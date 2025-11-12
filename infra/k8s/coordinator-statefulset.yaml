@@ -1,0 +1,3 @@
+# Coordinator StatefulSet for Kubernetes
+# Raft nodes require stable network identities
+

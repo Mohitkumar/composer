@@ -1,0 +1,23 @@
+FROM ghcr.io/astral-sh/uv:python3.11-bookworm-slim
+
+WORKDIR /app
+
+# Copy project files
+COPY cmd/worker-py/pyproject.toml ./
+COPY cmd/worker-py/main.py ./
+COPY pkg/api/proto ./proto/
+
+# Install dependencies
+RUN uv sync --frozen
+
+# Generate protobuf files
+RUN uv run python -m grpc_tools.protoc \
+    -I./proto \
+    --python_out=. \
+    --grpc_python_out=. \
+    ./proto/workflow_executor.proto
+
+EXPOSE 50051
+
+CMD ["uv", "run", "python", "main.py"]
+

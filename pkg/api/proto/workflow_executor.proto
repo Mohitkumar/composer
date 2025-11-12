@@ -1,0 +1,61 @@
+syntax = "proto3";
+package workflow.exec;
+option go_package = "github.com/mohitkumar/composer/pkg/api/proto/gen/go/workflow_exec";
+
+// A single RPC to execute a language task.
+service LanguageExecutor {
+  // Execute code or a pre-registered task.
+  // Unary RPC that returns the result or error.
+  rpc Execute(ExecuteRequest) returns (ExecuteResponse) {}
+}
+
+message ExecuteRequest {
+  // unique task instance id (for logging / tracing)
+  string task_id = 1;
+  // which runtime: "python" | "node" | "js"
+  string runtime = 2;
+  // either "inline_code" or "entrypoint" or "task_name"
+  oneof payload {
+    InlineCode inline_code = 10;
+    Entrypoint entrypoint = 11;
+    NamedTask named_task = 12;
+  }
+  // optional JSON-encoded input for the task
+  string input_json = 20;
+  // optional timeout seconds
+  int32 timeout_seconds = 30;
+  // metadata for routing (worker id, version)
+  map<string,string> metadata = 40;
+}
+
+message InlineCode {
+  // language-specific code text (e.g., python script or JS code)
+  string code = 1;
+  // file name hint (e.g., "handler.py" or "index.js")
+  string filename = 2;
+}
+
+message Entrypoint {
+  // run by calling "<module>:<callable>" or similar; allows pre-built packages
+  string module = 1;
+  string callable = 2;
+}
+
+message NamedTask {
+  // name of a registered task (server-side)
+  string name = 1;
+  string version = 2;
+}
+
+message ExecuteResponse {
+  // success/failure
+  bool success = 1;
+  // stdout / returned JSON string (if JSON)
+  string output_json = 2;
+  // textual error details if failed
+  string error = 3;
+  // execution duration milliseconds
+  int64 duration_ms = 4;
+  // optional logs
+  repeated string logs = 10;
+}

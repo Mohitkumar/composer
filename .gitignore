@@ -1,0 +1,61 @@
+# Binaries
+bin/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test binary, built with `go test -c`
+*.test
+
+# Output of the go coverage tool
+*.out
+
+# Dependency directories
+vendor/
+
+# Go workspace file
+go.work
+
+# Generated protobuf files
+pkg/api/proto/gen/
+cmd/worker-py/*_pb2.py
+cmd/worker-py/*_pb2_grpc.py
+cmd/worker-py/__pycache__/
+cmd/worker-py/.venv/
+
+# Node.js
+cmd/worker-js/node_modules/
+cmd/worker-js/package-lock.json
+cmd/worker-js/.npm/
+
+# Python
+*.pyc
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+.venv/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Docker
+.dockerignore
+

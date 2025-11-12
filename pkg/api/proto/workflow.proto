@@ -1,0 +1,72 @@
+syntax = "proto3";
+package workflow;
+
+option go_package = "github.com/mohitkumar/composer/pkg/api/proto/gen/go/workflow";
+
+// WorkflowService defines the gRPC service for worker-coordinator communication
+service WorkflowService {
+  // ExecuteTask requests a worker to execute a task
+  rpc ExecuteTask(ExecuteTaskRequest) returns (ExecuteTaskResponse);
+  
+  // GetTaskStatus retrieves the status of a running task
+  rpc GetTaskStatus(GetTaskStatusRequest) returns (GetTaskStatusResponse);
+  
+  // ReportTaskResult allows workers to report task execution results
+  rpc ReportTaskResult(ReportTaskResultRequest) returns (ReportTaskResultResponse);
+  
+  // Heartbeat allows workers to send periodic heartbeats
+  rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
+}
+
+// ExecuteTaskRequest contains task execution details
+message ExecuteTaskRequest {
+  string task_id = 1;
+  string workflow_id = 2;
+  string language = 3;  // "python", "node", "go"
+  bytes code = 4;      // Task code to execute
+  map<string, string> env = 5;  // Environment variables
+  map<string, bytes> inputs = 6;  // Task inputs
+}
+
+// ExecuteTaskResponse confirms task assignment
+message ExecuteTaskResponse {
+  bool accepted = 1;
+  string message = 2;
+}
+
+// GetTaskStatusRequest queries task status
+message GetTaskStatusRequest {
+  string task_id = 1;
+}
+
+// GetTaskStatusResponse returns task status
+message GetTaskStatusResponse {
+  string task_id = 1;
+  string status = 2;  // "pending", "running", "completed", "failed"
+  string message = 3;
+}
+
+// ReportTaskResultRequest contains task execution results
+message ReportTaskResultRequest {
+  string task_id = 1;
+  string status = 2;  // "completed", "failed"
+  bytes output = 3;
+  string error = 4;
+  map<string, string> metadata = 5;
+}
+
+// ReportTaskResultResponse acknowledges result receipt
+message ReportTaskResultResponse {
+  bool acknowledged = 1;
+}
+
+// HeartbeatRequest is sent by workers periodically
+message HeartbeatRequest {
+  string worker_id = 1;
+  repeated string active_tasks = 2;
+}
+
+// HeartbeatResponse confirms heartbeat receipt
+message HeartbeatResponse {
+  bool acknowledged = 1;
+}
