@@ -43,7 +43,7 @@ services:
         condition: service_started
     environment:
       - STORE_URL=postgres://postgres:password@postgres:5432/composer?sslmode=disable
-      - REDIS_ADDRS=redis:6379
+      - COMPOSER_REDIS_ADDRS=redis:6379
       - API_HTTP_PORT=8080
       - API_GRPC_PORT=50051
       - LOG_LEVEL=info
@@ -57,7 +57,7 @@ services:
       - "50051:50051"  # gRPC
     volumes:
       - ../../migrations:/app/migrations:ro
-    command: ["./coordinator", "--store.url=postgres://postgres:password@postgres:5432/composer?sslmode=disable", "--api.http_port=8080", "--api.grpc_port=50051"]
+    command: ["./coordinator", "--store.url=postgres://postgres:password@postgres:5432/composer?sslmode=disable", "--redis.addrs=redis:6379", "--api.http_port=8080", "--api.grpc_port=50051"]
 
   worker:
     build:

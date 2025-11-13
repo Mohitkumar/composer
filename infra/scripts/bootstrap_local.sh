@@ -63,12 +63,12 @@ if $DOCKER_COMPOSE_CMD ps 2>/dev/null | grep -q "Up"; then
 fi
 
 # Build images
-echo -e "${YELLOW}Building Docker images...${NC}"
-$DOCKER_COMPOSE_CMD build
+echo -e "${YELLOW}Rebuilding Docker images...${NC}"
+$DOCKER_COMPOSE_CMD build --pull
 
 # Start services
 echo -e "${YELLOW}Starting services...${NC}"
-$DOCKER_COMPOSE_CMD up -d
+$DOCKER_COMPOSE_CMD up --build -d
 
 # Wait for services to be healthy
 echo -e "${YELLOW}Waiting for services to be ready...${NC}"
