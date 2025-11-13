@@ -1,0 +1,87 @@
+{{- if .Values.otelCollector.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "composer.fullname" . }}-otel-collector-config
+  labels:
+    {{- include "composer.labels" . | nindent 4 }}
+    app.kubernetes.io/component: otel-collector
+data:
+  otel-collector-config.yaml: |
+{{ .Values.otelCollector.config | toYaml | indent 4 }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "composer.fullname" . }}-otel-collector
+  labels:
+    {{- include "composer.labels" . | nindent 4 }}
+    app.kubernetes.io/component: otel-collector
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "composer.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: otel-collector
+  template:
+    metadata:
+      labels:
+        {{- include "composer.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: otel-collector
+    spec:
+      containers:
+      - name: otel-collector
+        image: "{{ .Values.otelCollector.image.repository }}:{{ .Values.otelCollector.image.tag }}"
+        imagePullPolicy: IfNotPresent
+        command:
+        - /otelcol
+        args:
+        - --config=/etc/otel-collector-config.yaml
+        ports:
+        - name: otlp-grpc
+          containerPort: {{ .Values.otelCollector.service.ports.grpc }}
+          protocol: TCP
+        - name: otlp-http
+          containerPort: {{ .Values.otelCollector.service.ports.http }}
+          protocol: TCP
+        - name: prometheus
+          containerPort: {{ .Values.otelCollector.service.ports.prometheus }}
+          protocol: TCP
+        volumeMounts:
+        - name: config
+          mountPath: /etc/otel-collector-config.yaml
+          subPath: otel-collector-config.yaml
+        resources:
+          {{- toYaml .Values.otelCollector.resources | nindent 10 }}
+      volumes:
+      - name: config
+        configMap:
+          name: {{ include "composer.fullname" . }}-otel-collector-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "composer.fullname" . }}-otel-collector
+  labels:
+    {{- include "composer.labels" . | nindent 4 }}
+    app.kubernetes.io/component: otel-collector
+spec:
+  type: {{ .Values.otelCollector.service.type }}
+  ports:
+    - port: {{ .Values.otelCollector.service.ports.grpc }}
+      targetPort: otlp-grpc
+      protocol: TCP
+      name: otlp-grpc
+    - port: {{ .Values.otelCollector.service.ports.http }}
+      targetPort: otlp-http
+      protocol: TCP
+      name: otlp-http
+    - port: {{ .Values.otelCollector.service.ports.prometheus }}
+      targetPort: prometheus
+      protocol: TCP
+      name: prometheus
+  selector:
+    {{- include "composer.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: otel-collector
+{{- end }}
+

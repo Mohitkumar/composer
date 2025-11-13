@@ -5,6 +5,8 @@ import (
 	"net"
 
 	"github.com/mohitkumar/composer/pkg/api"
+	workflowpb "github.com/mohitkumar/composer/pkg/api/proto/gen/go/workflow"
+	"github.com/mohitkumar/composer/pkg/coord"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/reflection"
 )
@@ -13,16 +15,16 @@ import (
 type Server struct {
 	grpcServer  *grpc.Server
 	config      *api.APIConfig
-	coordinator interface{} // Will be *coord.Coordinator when handlers are implemented
+	coordinator *coord.Coordinator
 }
 
 // NewServer creates a new gRPC server for worker communication
-func NewServer(config *api.APIConfig, coordinator interface{}) *Server {
+func NewServer(config *api.APIConfig, coordinator *coord.Coordinator) *Server {
 	s := grpc.NewServer()
 
 	// Register gRPC services
-	// TODO: Register workflow service when proto is generated
-	// workflowpb.RegisterWorkflowServiceServer(s, NewWorkflowService(coordinator))
+	workflowService := NewWorkflowService(coordinator)
+	workflowpb.RegisterWorkflowServiceServer(s, workflowService)
 
 	// Enable reflection for development/testing
 	reflection.Register(s)

@@ -1,0 +1,292 @@
+# Default values for composer
+# This is a YAML-formatted file.
+
+global:
+  imageRegistry: ""
+  imagePullSecrets: []
+
+# Coordinator configuration
+coordinator:
+  enabled: true
+  replicaCount: 1
+  image:
+    repository: composer-coordinator
+    pullPolicy: IfNotPresent
+    tag: "latest"
+  service:
+    type: ClusterIP
+    httpPort: 8080
+    grpcPort: 50051
+  resources:
+    limits:
+      cpu: 1000m
+      memory: 512Mi
+    requests:
+      cpu: 500m
+      memory: 256Mi
+  env:
+    logLevel: info
+  config:
+    store:
+      url: "postgres://postgres:password@postgres:5432/composer?sslmode=disable"
+      maxConns: 25
+      maxIdleConns: 5
+    redis:
+      addrs: ["redis:6379"]
+      db: 0
+    api:
+      httpPort: 8080
+      grpcPort: 50051
+  # OpenTelemetry configuration
+  otel:
+    enabled: true
+    endpoint: "http://otel-collector:4317"
+    protocol: grpc
+    serviceName: composer-coordinator
+    resourceAttributes: "service.name=composer-coordinator,service.version=1.0.0"
+
+# Worker configuration
+worker:
+  enabled: true
+  replicaCount: 2
+  image:
+    repository: composer-worker
+    pullPolicy: IfNotPresent
+    tag: "latest"
+  resources:
+    limits:
+      cpu: 500m
+      memory: 256Mi
+    requests:
+      cpu: 250m
+      memory: 128Mi
+  env:
+    redisAddr: "redis:6379"
+    coordinatorAddr: "composer-coordinator:50051"
+    streamName: "workflow.tasks"
+    consumerGroup: "workflow-workers"
+  # OpenTelemetry configuration
+  otel:
+    enabled: true
+    endpoint: "http://otel-collector:4317"
+    protocol: grpc
+    serviceName: composer-worker
+    resourceAttributes: "service.name=composer-worker,service.version=1.0.0"
+
+# Language workers
+workerJs:
+  enabled: true
+  replicaCount: 1
+  image:
+    repository: composer-worker-js
+    pullPolicy: IfNotPresent
+    tag: "latest"
+  service:
+    type: ClusterIP
+    port: 50052
+  resources:
+    limits:
+      cpu: 200m
+      memory: 128Mi
+    requests:
+      cpu: 100m
+      memory: 64Mi
+  env:
+    port: 50052
+
+workerPy:
+  enabled: true
+  replicaCount: 1
+  image:
+    repository: composer-worker-py
+    pullPolicy: IfNotPresent
+    tag: "latest"
+  service:
+    type: ClusterIP
+    port: 50051
+  resources:
+    limits:
+      cpu: 200m
+      memory: 128Mi
+    requests:
+      cpu: 100m
+      memory: 64Mi
+  env:
+    port: 50051
+
+# PostgreSQL configuration
+postgresql:
+  enabled: true
+  auth:
+    postgresPassword: password
+    database: composer
+  primary:
+    persistence:
+      enabled: true
+      size: 10Gi
+    resources:
+      limits:
+        cpu: 500m
+        memory: 512Mi
+      requests:
+        cpu: 250m
+        memory: 256Mi
+
+# Redis configuration
+redis:
+  enabled: true
+  architecture: standalone
+  auth:
+    enabled: false
+  master:
+    persistence:
+      enabled: true
+      size: 8Gi
+    resources:
+      limits:
+        cpu: 500m
+        memory: 512Mi
+      requests:
+        cpu: 250m
+        memory: 256Mi
+
+# OpenTelemetry Collector
+otelCollector:
+  enabled: true
+  image:
+    repository: otel/opentelemetry-collector
+    tag: latest
+  config:
+    receivers:
+      otlp:
+        protocols:
+          grpc:
+            endpoint: 0.0.0.0:4317
+          http:
+            endpoint: 0.0.0.0:4318
+    processors:
+      batch:
+        timeout: 1s
+        send_batch_size: 1024
+      memory_limiter:
+        limit_mib: 512
+    exporters:
+      jaeger:
+        endpoint: jaeger:14250
+        tls:
+          insecure: true
+      prometheus:
+        endpoint: "0.0.0.0:8889"
+        const_labels:
+          service: composer
+      debug:
+        verbosity: detailed
+    service:
+      pipelines:
+        traces:
+          receivers: [otlp]
+          processors: [memory_limiter, batch]
+          exporters: [jaeger, debug]
+        metrics:
+          receivers: [otlp]
+          processors: [memory_limiter, batch]
+          exporters: [prometheus, debug]
+  service:
+    type: ClusterIP
+    ports:
+      grpc: 4317
+      http: 4318
+      prometheus: 8889
+  resources:
+    limits:
+      cpu: 500m
+      memory: 512Mi
+    requests:
+      cpu: 250m
+      memory: 256Mi
+
+# Jaeger for distributed tracing
+jaeger:
+  enabled: true
+  mode: allInOne
+  resources:
+    limits:
+      cpu: 500m
+      memory: 512Mi
+    requests:
+      cpu: 250m
+      memory: 256Mi
+  ingress:
+    enabled: false
+    annotations: {}
+    hosts:
+      - host: jaeger.local
+        paths: ["/"]
+    tls: []
+
+# Prometheus for metrics
+prometheus:
+  enabled: true
+  server:
+    persistentVolume:
+      enabled: true
+      size: 10Gi
+    resources:
+      limits:
+        cpu: 1000m
+        memory: 2Gi
+      requests:
+        cpu: 500m
+        memory: 1Gi
+    retention: 15d
+  config:
+    scrapeConfigs:
+      - job_name: 'otel-collector'
+        static_configs:
+          - targets: ['otel-collector:8889']
+      - job_name: 'coordinator'
+        static_configs:
+          - targets: ['composer-coordinator:8080']
+        metrics_path: '/metrics'
+  ingress:
+    enabled: false
+    annotations: {}
+    hosts:
+      - host: prometheus.local
+        paths: ["/"]
+    tls: []
+
+# Grafana for visualization
+grafana:
+  enabled: true
+  admin:
+    user: admin
+    password: admin
+  persistence:
+    enabled: true
+    size: 10Gi
+  resources:
+    limits:
+      cpu: 500m
+      memory: 512Mi
+    requests:
+      cpu: 250m
+      memory: 256Mi
+  datasources:
+    - name: Prometheus
+      type: prometheus
+      url: http://prometheus-server:80
+      access: proxy
+      isDefault: true
+    - name: Jaeger
+      type: jaeger
+      url: http://jaeger-query:16686
+      access: proxy
+  ingress:
+    enabled: false
+    annotations: {}
+    hosts:
+      - host: grafana.local
+        paths: ["/"]
+    tls: []
+

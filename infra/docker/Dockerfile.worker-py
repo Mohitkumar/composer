@@ -1,2 +1,41 @@
-# Dockerfile for Python worker
+# Build stage
+FROM ghcr.io/astral-sh/uv:python3.11-alpine AS builder
 
+WORKDIR /app
+
+# Copy project files
+COPY cmd/worker-py/pyproject.toml cmd/worker-py/uv.lock ./
+
+# Install dependencies
+RUN uv sync --frozen
+
+# Copy source code
+COPY cmd/worker-py/ ./
+COPY pkg/api/proto ./proto
+
+# Generate protobuf files
+RUN uv run python -m grpc_tools.protoc \
+    -I./proto \
+    --python_out=. \
+    --grpc_python_out=. \
+    ./proto/workflow_executor.proto
+
+# Runtime stage
+FROM python:3.11-alpine
+
+WORKDIR /app
+
+# Install runtime dependencies
+RUN apk add --no-cache ca-certificates tzdata
+
+# Copy virtual environment from builder
+COPY --from=builder /app/.venv /app/.venv
+COPY --from=builder /app/*.py ./
+COPY --from=builder /app/proto ./proto
+
+# Activate virtual environment
+ENV PATH="/app/.venv/bin:$PATH"
+
+EXPOSE 50051
+
+CMD ["python", "server.py"]

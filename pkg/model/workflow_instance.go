@@ -1,22 +1,44 @@
 package model
 
 import (
+	"encoding/json"
 	"time"
 )
 
-type WorkflowInstanceStatus string
-
-const (
-	WorkflowInstancePending   WorkflowInstanceStatus = "PENDING"
-	WorkflowInstanceRunning   WorkflowInstanceStatus = "RUNNING"
-	WorkflowInstanceCompleted WorkflowInstanceStatus = "COMPLETED"
-	WorkflowInstanceFailed    WorkflowInstanceStatus = "FAILED"
-)
-
-type WorkflowInstance struct {
-	ID                   string                 `db:"id"`
-	WorkflowDefinitionID string                 `db:"workflow_definition_id"`
-	Status               WorkflowInstanceStatus `db:"status"`
-	CreatedAt            time.Time              `db:"created_at"`
-	UpdatedAt            time.Time              `db:"updated_at"`
+// WorkflowInstanceRecord represents a workflow instance (run) record in the database
+type WorkflowInstanceRecord struct {
+	ID                   string                 `json:"id"`
+	WorkflowDefinitionID string                 `json:"workflow_definition_id"`
+	WorkflowVersion      int                    `json:"workflow_version"`
+	Status               WorkflowInstanceStatus `json:"status"`
+	Input                json.RawMessage        `json:"input,omitempty"`
+	CreatedAt            time.Time              `json:"created_at"`
+	UpdatedAt            time.Time              `json:"updated_at"`
+	CompletedAt          *time.Time             `json:"completed_at,omitempty"`
 }
+
+// WorkflowInstanceStatusResponse represents the status of a workflow instance with task counts
+type WorkflowInstanceStatusResponse struct {
+	ID             string                 `json:"id"`
+	Status         WorkflowInstanceStatus `json:"status"`
+	PendingTasks   int                    `json:"pending_tasks"`
+	RunningTasks   int                    `json:"running_tasks"`
+	CompletedTasks int                    `json:"completed_tasks"`
+	FailedTasks    int                    `json:"failed_tasks"`
+	TotalTasks     int                    `json:"total_tasks"`
+	CreatedAt      time.Time              `json:"created_at"`
+	UpdatedAt      time.Time              `json:"updated_at"`
+}
+
+// StartWorkflowRequest represents a request to start a workflow execution
+type StartWorkflowRequest struct {
+	RunID            string          `json:"run_id"`
+	WorkflowID       string          `json:"workflow_id"`
+	WorkflowVersion  int             `json:"workflow_version"`
+	Input            json.RawMessage `json:"input,omitempty"`
+	StartedBy        string          `json:"started_by,omitempty"`
+	ExecutionOptions json.RawMessage `json:"execution_options,omitempty"`
+	StartNodeID      string          `json:"start_node_id,omitempty"`
+	StartedAtUnixMs  int64           `json:"started_at_unix_ms,omitempty"`
+}
+

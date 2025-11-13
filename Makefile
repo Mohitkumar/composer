@@ -89,8 +89,18 @@ clean: ## Clean build artifacts
 	find $(PROTO_PY_OUT) -name "*_pb2_grpc.py" -delete
 	rm -rf cmd/worker-js/node_modules
 
-test: ## Run tests
+test: ## Run unit tests
 	$(GO_CMD) test ./...
+
+test-integration: ## Run integration tests (requires PostgreSQL and Redis)
+	@echo "Running integration tests..."
+	@echo "Ensure PostgreSQL and Redis are running"
+	$(GO_CMD) test -v ./tests -run TestIntegrationWorkflowExecution -short=false
+
+test-e2e: ## Run end-to-end tests (requires Docker for Testcontainers)
+	@echo "Running end-to-end tests..."
+	@echo "Ensure Docker is running"
+	$(GO_CMD) test -v ./tests -run TestEndToEndWorkflowExecution -short=false
 
 docker-build: ## Build Docker images
 	@echo "Building Docker images..."

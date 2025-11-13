@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/signal"
 	"syscall"
@@ -13,22 +14,40 @@ import (
 	"github.com/mohitkumar/composer/pkg/outbox"
 	"github.com/mohitkumar/composer/pkg/redisq"
 	"github.com/mohitkumar/composer/pkg/store"
+	"github.com/mohitkumar/composer/pkg/util"
 	"github.com/rs/zerolog"
 )
 
 type Bootstrap struct {
-	Config      *Config
-	Logger      *zerolog.Logger
-	Redis       *redisq.RedisStream
-	Store       *store.Store
-	Coordinator *coord.Coordinator
-	Outbox      *outbox.OutboxEnqueuer
-	HTTP        *httpapi.Server
-	GRPC        *grpcapi.Server
+	Config       *Config
+	Logger       *zerolog.Logger
+	Redis        *redisq.RedisStream
+	Store        *store.Store
+	Coordinator  *coord.Coordinator
+	Outbox       *outbox.OutboxEnqueuer
+	HTTP         *httpapi.Server
+	GRPC         *grpcapi.Server
+	shutdownOTel func() error
 }
 
 func NewBootstrap(config *Config) (*Bootstrap, error) {
 	logger := initLogger(config)
+
+	// Initialize OpenTelemetry SDK
+	ctx := context.Background()
+	shutdown, err := util.InitOpenTelemetry(ctx, "composer-coordinator", "1.0.0")
+	if err != nil {
+		logger.Error().Err(err).Msg("failed to initialize OpenTelemetry")
+		return nil, fmt.Errorf("failed to initialize OpenTelemetry: %w", err)
+	}
+	logger.Info().Msg("initialized OpenTelemetry SDK")
+
+	// Initialize OpenTelemetry metrics
+	if err := util.InitMetrics(); err != nil {
+		logger.Error().Err(err).Msg("failed to initialize metrics")
+		return nil, fmt.Errorf("failed to initialize metrics: %w", err)
+	}
+	logger.Info().Msg("initialized OpenTelemetry metrics")
 
 	// Create Redis stream
 	redisStream := redisq.NewRedisStream(&config.RedisConfig)
@@ -57,14 +76,15 @@ func NewBootstrap(config *Config) (*Bootstrap, error) {
 	grpcServer := grpcapi.NewServer(&config.APIConfig, coordinator)
 
 	return &Bootstrap{
-		Config:      config,
-		Logger:      logger,
-		Redis:       redisStream,
-		Store:       dbStore,
-		Coordinator: coordinator,
-		Outbox:      outboxEnqueuer,
-		HTTP:        httpServer,
-		GRPC:        grpcServer,
+		Config:       config,
+		Logger:       logger,
+		Redis:        redisStream,
+		Store:        dbStore,
+		Coordinator:  coordinator,
+		Outbox:       outboxEnqueuer,
+		HTTP:         httpServer,
+		GRPC:         grpcServer,
+		shutdownOTel: shutdown,
 	}, nil
 }
 
@@ -127,6 +147,13 @@ func (b *Bootstrap) Shutdown() error {
 
 	b.Logger.Info().Msg("stopping gRPC server")
 	b.GRPC.Stop()
+
+	b.Logger.Info().Msg("shutting down OpenTelemetry")
+	if b.shutdownOTel != nil {
+		if err := b.shutdownOTel(); err != nil {
+			b.Logger.Error().Err(err).Msg("failed to shutdown OpenTelemetry")
+		}
+	}
 
 	b.Logger.Info().Msg("closing connections")
 	if b.Redis != nil {

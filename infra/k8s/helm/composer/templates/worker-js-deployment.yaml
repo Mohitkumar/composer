@@ -1,0 +1,53 @@
+{{- if .Values.workerJs.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "composer.fullname" . }}-worker-js
+  labels:
+    {{- include "composer.labels" . | nindent 4 }}
+    app.kubernetes.io/component: worker-js
+spec:
+  replicas: {{ .Values.workerJs.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "composer.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: worker-js
+  template:
+    metadata:
+      labels:
+        {{- include "composer.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: worker-js
+    spec:
+      containers:
+      - name: worker-js
+        image: "{{ .Values.workerJs.image.repository }}:{{ .Values.workerJs.image.tag | default .Chart.AppVersion }}"
+        imagePullPolicy: {{ .Values.workerJs.image.pullPolicy }}
+        ports:
+        - name: grpc
+          containerPort: {{ .Values.workerJs.env.port }}
+          protocol: TCP
+        env:
+        - name: PORT
+          value: {{ .Values.workerJs.env.port | quote }}
+        resources:
+          {{- toYaml .Values.workerJs.resources | nindent 10 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "composer.fullname" . }}-worker-js
+  labels:
+    {{- include "composer.labels" . | nindent 4 }}
+    app.kubernetes.io/component: worker-js
+spec:
+  type: {{ .Values.workerJs.service.type }}
+  ports:
+    - port: {{ .Values.workerJs.service.port }}
+      targetPort: grpc
+      protocol: TCP
+      name: grpc
+  selector:
+    {{- include "composer.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: worker-js
+{{- end }}
+

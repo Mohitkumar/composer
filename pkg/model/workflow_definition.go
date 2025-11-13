@@ -1,43 +1,61 @@
 package model
 
 import (
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 )
 
-type WorkflowDefinition struct {
+// WorkflowDefinitionSpec represents the workflow definition structure (the spec JSON)
+// This is what gets stored in the spec_json column
+type WorkflowDefinitionSpec struct {
 	WorkflowID string `json:"workflow_id"`
 	Name       string `json:"name"`
 	Nodes      []Node `json:"nodes"`
 	Edges      []Edge `json:"edges"`
 }
 
+// Node represents a node in the workflow DAG
 type Node struct {
 	NodeID  string          `json:"node_id"`
 	Name    string          `json:"name"`
-	Type    NodeType        `json:"type"`    // TASK, SWITCH, PARALLEL, WAIT, etc (later)
+	Type    NodeType        `json:"type"`    // TASK, SWITCH, PARALLEL, WAIT, etc
 	Runtime string          `json:"runtime"` // go/python/js/http/sql etc
-	Spec    json.RawMessage `json:"spec"`    // task impl definition (http spec, code reference etc)
+	Spec    json.RawMessage `json:"spec"`    // task implementation definition (http spec, code reference etc)
 }
 
+// Edge represents an edge in the workflow DAG
 type Edge struct {
 	From string `json:"from"`
 	To   string `json:"to"`
-	// later: Condition expression or predicate
+	// TODO: Condition expression or predicate for conditional edges
 }
 
-type NodeType string
+// WorkflowDefinitionRecord represents a workflow definition record in the database
+type WorkflowDefinitionRecord struct {
+	ID         string          `json:"id"`
+	Name       string          `json:"name"`
+	Version    int             `json:"version"`
+	Spec       json.RawMessage `json:"spec"` // Contains WorkflowDefinitionSpec as JSON
+	CreatedBy  string          `json:"created_by,omitempty"`
+	Enabled    bool            `json:"enabled"`
+	WebhookURL sql.NullString  `json:"webhook_url,omitempty"`
+	CreatedAt  time.Time       `json:"created_at"`
+}
 
-const (
-	NodeTypeTask     NodeType = "TASK"
-	NodeTypeSwitch   NodeType = "SWITCH"
-	NodeTypeParallel NodeType = "PARALLEL"
-	NodeTypeWait     NodeType = "WAIT"
-)
+// RegisterWorkflowRequest represents a request to register a new workflow definition
+type RegisterWorkflowRequest struct {
+	WorkflowID string          `json:"workflow_id"`
+	Name       string          `json:"name"`
+	Version    int             `json:"version"`
+	Spec       json.RawMessage `json:"spec"` // Should contain WorkflowDefinitionSpec as JSON
+	CreatedBy  string          `json:"created_by,omitempty"`
+}
 
 // GetNodeByID returns a node by its ID, or nil if not found
-func (wf *WorkflowDefinition) GetNodeByID(nodeID string) *Node {
+func (wf *WorkflowDefinitionSpec) GetNodeByID(nodeID string) *Node {
 	for i := range wf.Nodes {
 		if wf.Nodes[i].NodeID == nodeID {
 			return &wf.Nodes[i]
@@ -47,7 +65,7 @@ func (wf *WorkflowDefinition) GetNodeByID(nodeID string) *Node {
 }
 
 // GetNodeMap returns a map of node ID to node pointer for efficient lookups
-func (wf *WorkflowDefinition) GetNodeMap() map[string]*Node {
+func (wf *WorkflowDefinitionSpec) GetNodeMap() map[string]*Node {
 	nodeMap := make(map[string]*Node, len(wf.Nodes))
 	for i := range wf.Nodes {
 		nodeMap[wf.Nodes[i].NodeID] = &wf.Nodes[i]
@@ -59,7 +77,7 @@ func (wf *WorkflowDefinition) GetNodeMap() map[string]*Node {
 // If startNodeID is provided, it returns that node.
 // Otherwise, it finds nodes with no incoming edges (entry points).
 // Returns an error if no start node is found.
-func (wf *WorkflowDefinition) FindStartNode(startNodeID string) (*Node, error) {
+func (wf *WorkflowDefinitionSpec) FindStartNode(startNodeID string) (*Node, error) {
 	if startNodeID != "" {
 		// Use provided start node ID
 		node := wf.GetNodeByID(startNodeID)
@@ -86,7 +104,7 @@ func (wf *WorkflowDefinition) FindStartNode(startNodeID string) (*Node, error) {
 
 // FindNextNodes returns all nodes that come after the given nodeID in the workflow DAG.
 // Returns an empty slice if there are no next nodes.
-func (wf *WorkflowDefinition) FindNextNodes(nodeID string) []*Node {
+func (wf *WorkflowDefinitionSpec) FindNextNodes(nodeID string) []*Node {
 	nextNodeIDs := make([]string, 0)
 	for _, edge := range wf.Edges {
 		if edge.From == nodeID {
@@ -110,7 +128,7 @@ func (wf *WorkflowDefinition) FindNextNodes(nodeID string) []*Node {
 }
 
 // HasIncomingEdges checks if a node has any incoming edges
-func (wf *WorkflowDefinition) HasIncomingEdges(nodeID string) bool {
+func (wf *WorkflowDefinitionSpec) HasIncomingEdges(nodeID string) bool {
 	for _, edge := range wf.Edges {
 		if edge.To == nodeID {
 			return true
@@ -120,7 +138,7 @@ func (wf *WorkflowDefinition) HasIncomingEdges(nodeID string) bool {
 }
 
 // HasOutgoingEdges checks if a node has any outgoing edges
-func (wf *WorkflowDefinition) HasOutgoingEdges(nodeID string) bool {
+func (wf *WorkflowDefinitionSpec) HasOutgoingEdges(nodeID string) bool {
 	for _, edge := range wf.Edges {
 		if edge.From == nodeID {
 			return true

@@ -3,60 +3,35 @@ package coord
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"strconv"
-	"time"
 
 	"github.com/mohitkumar/composer/pkg/model"
+	"github.com/mohitkumar/composer/pkg/util"
 )
 
-type RegisterWorkflowPayload struct {
-	WorkflowID string          `json:"workflow_id"`
-	Name       string          `json:"name"`
-	Version    int             `json:"version"`
-	Spec       json.RawMessage `json:"spec"`
-	CreatedBy  string          `json:"created_by,omitempty"`
-}
-
-type WorkflowDefinition struct {
-	ID         string          `json:"id"`
-	Name       string          `json:"name"`
-	Version    int             `json:"version"`
-	Spec       json.RawMessage `json:"spec"`
-	CreatedBy  string          `json:"created_by,omitempty"`
-	Enabled    bool            `json:"enabled"`
-	WebhookURL sql.NullString  `json:"webhook_url,omitempty"`
-	CreatedAt  time.Time       `json:"created_at"`
-}
-
-type WorkflowInstance struct {
-	ID                   string                       `json:"id"`
-	WorkflowDefinitionID string                       `json:"workflow_definition_id"`
-	WorkflowVersion      int                          `json:"workflow_version"`
-	Status               model.WorkflowInstanceStatus `json:"status"`
-	Input                json.RawMessage              `json:"input,omitempty"`
-	CreatedAt            time.Time                    `json:"created_at"`
-	UpdatedAt            time.Time                    `json:"updated_at"`
-}
-
-type WorkflowInstanceStatus struct {
-	ID             string                       `json:"id"`
-	Status         model.WorkflowInstanceStatus `json:"status"`
-	PendingTasks   int                          `json:"pending_tasks"`
-	RunningTasks   int                          `json:"running_tasks"`
-	CompletedTasks int                          `json:"completed_tasks"`
-	FailedTasks    int                          `json:"failed_tasks"`
-	TotalTasks     int                          `json:"total_tasks"`
-	CreatedAt      time.Time                    `json:"created_at"`
-	UpdatedAt      time.Time                    `json:"updated_at"`
-}
-
 // RegisterWorkflow registers a new workflow definition or creates a new version.
-func (c *Coordinator) RegisterWorkflow(ctx context.Context, p *RegisterWorkflowPayload) error {
+func (c *Coordinator) RegisterWorkflow(ctx context.Context, p *model.RegisterWorkflowRequest) error {
+	ctx, span := util.StartSpan(ctx, "workflow.register",
+		util.Attribute("workflow.id", p.WorkflowID),
+		util.AttributeInt("workflow.version", int64(p.Version)),
+	)
+	defer util.EndSpan(span, nil)
+
+	logger := c.Log.With().
+		Str("workflow_id", p.WorkflowID).
+		Str("name", p.Name).
+		Int("version", p.Version).
+		Str("created_by", p.CreatedBy).
+		Logger()
+
+	logger.Info().Msg("registering workflow definition")
+
 	tx, err := c.DB.Begin(ctx)
 	if err != nil {
+		logger.Error().Err(err).Msg("failed to begin transaction")
+		util.RecordError(span, err)
 		return err
 	}
 	defer tx.Rollback(ctx)
@@ -65,16 +40,19 @@ func (c *Coordinator) RegisterWorkflow(ctx context.Context, p *RegisterWorkflowP
         VALUES ($1,$2,$3,$4::jsonb,$5,NOW()) ON CONFLICT (id, version) DO NOTHING`,
 		p.WorkflowID, p.Name, p.Version, p.Spec, sql.NullString{String: p.CreatedBy, Valid: p.CreatedBy != ""})
 	if err != nil {
+		logger.Error().Err(err).Msg("failed to insert workflow definition")
+		util.RecordError(span, err)
 		return err
 	}
-	// Commit
+
+	logger.Info().Msg("workflow definition registered successfully")
 	return tx.Commit(ctx)
 }
 
 // GetWorkflow retrieves a workflow definition by ID and version.
 // If version is 0, returns the latest version.
-func (c *Coordinator) GetWorkflow(ctx context.Context, workflowID string, version int) (*WorkflowDefinition, error) {
-	var wf WorkflowDefinition
+func (c *Coordinator) GetWorkflow(ctx context.Context, workflowID string, version int) (*model.WorkflowDefinitionRecord, error) {
+	var wf model.WorkflowDefinitionRecord
 	var webhookURL sql.NullString
 
 	query := `SELECT id, name, version, spec_json, created_by, enabled, webhook_url, created_at 
@@ -105,7 +83,7 @@ func (c *Coordinator) GetWorkflow(ctx context.Context, workflowID string, versio
 }
 
 // ListWorkflows lists all workflow definitions, optionally filtered by enabled status.
-func (c *Coordinator) ListWorkflows(ctx context.Context, enabledOnly bool) ([]WorkflowDefinition, error) {
+func (c *Coordinator) ListWorkflows(ctx context.Context, enabledOnly bool) ([]model.WorkflowDefinitionRecord, error) {
 	query := `SELECT id, name, version, spec_json, created_by, enabled, webhook_url, created_at 
 	          FROM workflow_definitions`
 	args := []interface{}{}
@@ -122,9 +100,9 @@ func (c *Coordinator) ListWorkflows(ctx context.Context, enabledOnly bool) ([]Wo
 	}
 	defer rows.Close()
 
-	var workflows []WorkflowDefinition
+	var workflows []model.WorkflowDefinitionRecord
 	for rows.Next() {
-		var wf WorkflowDefinition
+		var wf model.WorkflowDefinitionRecord
 		var webhookURL sql.NullString
 
 		if err := rows.Scan(&wf.ID, &wf.Name, &wf.Version, &wf.Spec, &wf.CreatedBy,
@@ -225,8 +203,8 @@ func (c *Coordinator) DeleteWorkflow(ctx context.Context, workflowID string, ver
 }
 
 // GetWorkflowInstance retrieves a workflow instance (run) by ID.
-func (c *Coordinator) GetWorkflowInstance(ctx context.Context, instanceID string) (*WorkflowInstance, error) {
-	var inst WorkflowInstance
+func (c *Coordinator) GetWorkflowInstance(ctx context.Context, instanceID string) (*model.WorkflowInstanceRecord, error) {
+	var inst model.WorkflowInstanceRecord
 
 	err := c.DB.QueryRow(ctx,
 		`SELECT id, workflow_definition_id, workflow_version, status, input_json, created_at, updated_at 
@@ -247,7 +225,7 @@ func (c *Coordinator) GetWorkflowInstance(ctx context.Context, instanceID string
 
 // ListWorkflowInstances lists workflow instances, optionally filtered by workflow ID and status.
 func (c *Coordinator) ListWorkflowInstances(ctx context.Context, workflowID *string,
-	status *model.WorkflowInstanceStatus, limit, offset int) ([]WorkflowInstance, error) {
+	status *model.WorkflowInstanceStatus, limit, offset int) ([]model.WorkflowInstanceRecord, error) {
 	query := `SELECT id, workflow_definition_id, workflow_version, status, input_json, created_at, updated_at 
 	          FROM workflow_runs WHERE 1=1`
 	args := []interface{}{}
@@ -283,9 +261,9 @@ func (c *Coordinator) ListWorkflowInstances(ctx context.Context, workflowID *str
 	}
 	defer rows.Close()
 
-	var instances []WorkflowInstance
+	var instances []model.WorkflowInstanceRecord
 	for rows.Next() {
-		var inst WorkflowInstance
+		var inst model.WorkflowInstanceRecord
 		if err := rows.Scan(&inst.ID, &inst.WorkflowDefinitionID, &inst.WorkflowVersion,
 			&inst.Status, &inst.Input, &inst.CreatedAt, &inst.UpdatedAt); err != nil {
 			return nil, err
@@ -297,8 +275,8 @@ func (c *Coordinator) ListWorkflowInstances(ctx context.Context, workflowID *str
 }
 
 // GetWorkflowInstanceStatus retrieves detailed status information for a workflow instance.
-func (c *Coordinator) GetWorkflowInstanceStatus(ctx context.Context, instanceID string) (*WorkflowInstanceStatus, error) {
-	var status WorkflowInstanceStatus
+func (c *Coordinator) GetWorkflowInstanceStatus(ctx context.Context, instanceID string) (*model.WorkflowInstanceStatusResponse, error) {
+	var status model.WorkflowInstanceStatusResponse
 
 	// Get instance basic info
 	err := c.DB.QueryRow(ctx,

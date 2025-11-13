@@ -18,7 +18,7 @@ type handlers struct {
 // Workflow handlers
 
 func (h *handlers) createWorkflow(w http.ResponseWriter, r *http.Request) {
-	var p coord.RegisterWorkflowPayload
+	var p model.RegisterWorkflowRequest
 	if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -113,7 +113,7 @@ func (h *handlers) deleteWorkflow(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *handlers) executeWorkflow(w http.ResponseWriter, r *http.Request) {
-	var p coord.StartWorkflowPayload
+	var p model.StartWorkflowRequest
 	if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -126,8 +126,13 @@ func (h *handlers) executeWorkflow(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *handlers) getWorkflowStatus(w http.ResponseWriter, r *http.Request) {
-	id := chi.URLParam(r, "id")
-	status, err := h.coordinator.GetWorkflowInstanceStatus(r.Context(), id)
+	// Support both workflow_id (from path) with run_id (from query) or just run_id
+	runID := r.URL.Query().Get("run_id")
+	if runID == "" {
+		// If no run_id, try using the path param as run_id (for backward compatibility)
+		runID = chi.URLParam(r, "id")
+	}
+	status, err := h.coordinator.GetWorkflowInstanceStatus(r.Context(), runID)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusNotFound)
 		return

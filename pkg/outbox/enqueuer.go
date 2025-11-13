@@ -6,12 +6,10 @@ import (
 	"encoding/json"
 	"math"
 	"math/rand"
-	"net/http"
 	"sync"
 	"time"
 
-	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"github.com/mohitkumar/composer/pkg/util"
 	"github.com/rs/zerolog"
 )
 
@@ -20,12 +18,6 @@ type OutboxEnqueuer struct {
 	cfg  EnqueuerConfig
 	wg   sync.WaitGroup
 	quit chan struct{}
-
-	// metrics
-	mProcessed prometheus.Counter
-	mFailed    prometheus.Counter
-	mDLQ       prometheus.Counter
-	mInFlight  prometheus.Gauge
 }
 
 // outboxRow represents a row from the outbox table
@@ -53,35 +45,15 @@ func NewOutboxEnqueuer(cfg EnqueuerConfig) *OutboxEnqueuer {
 	if cfg.Logger.GetLevel() == zerolog.NoLevel {
 		cfg.Logger = zerolog.New(nil).Level(zerolog.InfoLevel)
 	}
-	o := &OutboxEnqueuer{
+	return &OutboxEnqueuer{
 		cfg:  cfg,
 		quit: make(chan struct{}),
-		mProcessed: prometheus.NewCounter(prometheus.CounterOpts{
-			Name: "outbox_processed_total",
-			Help: "Number of outbox messages successfully pushed to redis",
-		}),
-		mFailed: prometheus.NewCounter(prometheus.CounterOpts{
-			Name: "outbox_failed_total",
-			Help: "Number of outbox messages that failed to push",
-		}),
-		mDLQ: prometheus.NewCounter(prometheus.CounterOpts{
-			Name: "outbox_dlq_total",
-			Help: "Number of outbox messages moved to DLQ",
-		}),
-		mInFlight: prometheus.NewGauge(prometheus.GaugeOpts{
-			Name: "outbox_in_flight",
-			Help: "Number of outbox messages currently in-flight",
-		}),
 	}
-	prometheus.MustRegister(o.mProcessed, o.mFailed, o.mDLQ, o.mInFlight)
-	return o
 }
 
 // Run starts the enqueuer loop and returns when ctx is done (or Stop called).
 func (o *OutboxEnqueuer) Run(ctx context.Context) {
 	o.cfg.Logger.Info().Int("batch", o.cfg.BatchSize).Msg("starting outbox enqueuer")
-	// Start HTTP metrics endpoint on a separate goroutine (if ctx cancelled we still leave it)
-	go o.serveMetrics()
 
 	// Start worker goroutines
 	workerChan := make(chan struct{}, o.cfg.Concurrency)
@@ -134,19 +106,6 @@ func (o *OutboxEnqueuer) shutdown() {
 // Stop stops the enqueuer loop.
 func (o *OutboxEnqueuer) Stop() {
 	close(o.quit)
-}
-
-// serveMetrics runs an http server with /metrics and /healthz
-func (o *OutboxEnqueuer) serveMetrics() {
-	mux := http.NewServeMux()
-	mux.Handle("/metrics", promhttp.Handler())
-	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("ok"))
-	})
-	// listen on :9090 (configurable later)
-	o.cfg.Logger.Info().Msg("starting metrics server :9090")
-	_ = http.ListenAndServe(":9090", mux)
 }
 
 // processBatch picks a batch of outbox rows with FOR UPDATE SKIP LOCKED, marks them IN_FLIGHT,
@@ -206,15 +165,27 @@ FOR UPDATE SKIP LOCKED
 
 	// process items one by one (sequentially here; could parallelize per batch)
 	for _, r := range rowsToProcess {
-		o.mInFlight.Inc()
+		util.RecordOutboxInFlight(ctx, r.Stream, 1)
+		startTime := time.Now()
 		if err := o.processRow(ctx, r); err != nil {
 			// log and continue; processRow includes DB updates for failure
-			o.cfg.Logger.Error().Err(err).Str("outbox_id", r.ID).Msg("processing outbox row failed")
-			o.mFailed.Inc()
+			o.cfg.Logger.Error().
+				Err(err).
+				Str("outbox_id", r.ID).
+				Str("stream", r.Stream).
+				Dur("duration_ms", time.Since(startTime)).
+				Msg("processing outbox row failed")
+			util.RecordOutboxFailed(ctx, r.Stream, err.Error())
 		} else {
-			o.mProcessed.Inc()
+			duration := time.Since(startTime)
+			o.cfg.Logger.Debug().
+				Str("outbox_id", r.ID).
+				Str("stream", r.Stream).
+				Dur("duration_ms", duration).
+				Msg("outbox row processed successfully")
+			util.RecordOutboxProcessed(ctx, r.Stream)
 		}
-		o.mInFlight.Dec()
+		util.RecordOutboxInFlight(ctx, r.Stream, -1)
 	}
 
 	return nil
@@ -278,7 +249,7 @@ func (o *OutboxEnqueuer) processRow(ctx context.Context, r outboxRow) error {
 			o.cfg.Logger.Error().Err(uerr).Str("outbox_id", r.ID).Msg("failed mark DLQ")
 			return uerr
 		}
-		o.mDLQ.Inc()
+		util.RecordOutboxDLQ(ctx, stream)
 		return nil
 	}
 

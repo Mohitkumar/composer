@@ -39,6 +39,7 @@ create table IF NOT EXISTS task_instances(
     id text primary key,
     run_id text not null,
     node_id text not null,
+    node_type text not null,
     state text not null default 'PENDING',
     attempt int not null default 0,
     input_json jsonb,
@@ -55,6 +56,7 @@ create table IF NOT EXISTS task_instances(
     FOREIGN KEY (run_id) REFERENCES workflow_runs(id) ON DELETE CASCADE
 );
 
+CREATE INDEX IF NOT EXISTS idx_task_instances_node_type ON task_instances(node_type);
 CREATE INDEX IF NOT EXISTS idx_task_instances_run_id ON task_instances(run_id);
 CREATE INDEX IF NOT EXISTS idx_task_instances_state ON task_instances(state);
 CREATE INDEX IF NOT EXISTS idx_task_instances_node_id ON task_instances(node_id);
@@ -80,3 +82,19 @@ create table IF NOT EXISTS outbox(
 
 CREATE INDEX IF NOT EXISTS idx_outbox_status ON outbox(status, created_at);
 CREATE INDEX IF NOT EXISTS idx_outbox_stream ON outbox(stream);
+
+CREATE INDEX IF NOT EXISTS idx_outbox_status_next_attempt ON outbox (status, next_attempt_at) 
+WHERE status IN ('PENDING', 'RETRY') AND next_attempt_at IS NOT NULL;
+
+-- Create dead letter table for outbox failures
+CREATE TABLE IF NOT EXISTS outbox_dlq (
+  id TEXT PRIMARY KEY,
+  stream TEXT NOT NULL,
+  payload JSONB NULL,
+  last_error TEXT,
+  attempts INT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  moved_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_outbox_dlq_created ON outbox_dlq(created_at DESC);

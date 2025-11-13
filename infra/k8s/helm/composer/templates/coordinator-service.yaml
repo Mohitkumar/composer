@@ -1,0 +1,24 @@
+{{- if .Values.coordinator.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "composer.fullname" . }}-coordinator
+  labels:
+    {{- include "composer.labels" . | nindent 4 }}
+    app.kubernetes.io/component: coordinator
+spec:
+  type: {{ .Values.coordinator.service.type }}
+  ports:
+    - port: {{ .Values.coordinator.service.httpPort }}
+      targetPort: http
+      protocol: TCP
+      name: http
+    - port: {{ .Values.coordinator.service.grpcPort }}
+      targetPort: grpc
+      protocol: TCP
+      name: grpc
+  selector:
+    {{- include "composer.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: coordinator
+{{- end }}
+
