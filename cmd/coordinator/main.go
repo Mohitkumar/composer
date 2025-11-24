@@ -6,18 +6,19 @@ import (
 	"strings"
 
 	"github.com/mohitkumar/composer/pkg/api"
+	"github.com/mohitkumar/composer/pkg/coord"
 	"github.com/mohitkumar/composer/pkg/redisq"
 	"github.com/mohitkumar/composer/pkg/store"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
 
-var cfg *Config
+var cfg *coord.Config
 
 var rootCmd = &cobra.Command{
 	Use:   "coordinator",
-	Short: "Composer coordinator - Raft-based workflow orchestration",
-	Long:  `Coordinator is the main control plane component that manages workflow execution using Raft consensus.`,
+	Short: "Composer coordinator - the control plane for workflow orchestration",
+	Long:  `Coordinator is the main control plane component that manages workflow execution.`,
 	RunE:  runCoordinator,
 }
 
@@ -28,9 +29,6 @@ func init() {
 
 func setupFlags(cmd *cobra.Command) {
 	// General flags
-	cmd.Flags().String("node-name", "", "The name of the node")
-	cmd.Flags().StringSlice("start-join-addrs", []string{}, "Comma-separated addresses of other nodes to join")
-	cmd.Flags().Int("port", 8080, "The port to listen on")
 	cmd.Flags().String("log-level", "info", "The log level (debug, info, warn, error)")
 
 	// Redis flags
@@ -83,12 +81,9 @@ func initConfig() {
 	cfg = generateConfig()
 }
 
-func generateConfig() *Config {
-	config := &Config{
-		NodeName:       viper.GetString("node-name"),
-		StartJoinAddrs: viper.GetStringSlice("start-join-addrs"),
-		Port:           viper.GetInt("port"),
-		LogLevel:       viper.GetString("log-level"),
+func generateConfig() *coord.Config {
+	config := &coord.Config{
+		LogLevel: viper.GetString("log-level"),
 		RedisConfig: redisq.RedisConfig{
 			Addrs:    viper.GetStringSlice("redis.addrs"),
 			Username: viper.GetString("redis.username"),

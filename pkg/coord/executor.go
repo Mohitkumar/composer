@@ -17,7 +17,7 @@ func (c *Coordinator) StartWorkflow(ctx context.Context, p *model.StartWorkflowR
 	ctx, span := util.StartWorkflowSpan(ctx, "start", p.WorkflowID, p.RunID)
 	defer util.EndSpan(span, nil)
 
-	logger := c.Log.With().
+	logger := c.Logger.With().
 		Str("workflow_id", p.WorkflowID).
 		Str("run_id", p.RunID).
 		Int("workflow_version", p.WorkflowVersion).
@@ -50,7 +50,7 @@ func (c *Coordinator) StartWorkflow(ctx context.Context, p *model.StartWorkflowR
 		Msg("parsed workflow spec")
 
 	// Now start transaction
-	tx, err := c.DB.Begin(ctx)
+	tx, err := c.Store.DB().Begin(ctx)
 	if err != nil {
 		logger.Error().Err(err).Msg("failed to begin transaction")
 		util.RecordError(span, err)
@@ -170,10 +170,10 @@ func (c *Coordinator) HandleNodeCompleted(ctx context.Context, runID string, nod
 	// Get workflow run info to load workflow definition (before transaction)
 	var workflowID string
 	var workflowVersion int
-	err := c.DB.QueryRow(ctx, `SELECT workflow_definition_id, workflow_version FROM workflow_runs WHERE id=$1`, runID).
+	err := c.Store.DB().QueryRow(ctx, `SELECT workflow_definition_id, workflow_version FROM workflow_runs WHERE id=$1`, runID).
 		Scan(&workflowID, &workflowVersion)
 	if err != nil {
-		c.Log.Error().Err(err).Str("run_id", runID).Msg("failed to get workflow run")
+		c.Logger.Error().Err(err).Str("run_id", runID).Msg("failed to get workflow run")
 		return fmt.Errorf("failed to get workflow run: %w", err)
 	}
 
@@ -181,7 +181,7 @@ func (c *Coordinator) HandleNodeCompleted(ctx context.Context, runID string, nod
 	ctx, span := util.StartTaskSpan(ctx, "completed", "", runID, nodeID)
 	defer util.EndSpan(span, nil)
 
-	logger := c.Log.With().
+	logger := c.Logger.With().
 		Str("workflow_id", workflowID).
 		Str("run_id", runID).
 		Str("node_id", nodeID).
@@ -204,7 +204,7 @@ func (c *Coordinator) HandleNodeCompleted(ctx context.Context, runID string, nod
 	}
 
 	// Now start transaction
-	tx, err := c.DB.Begin(ctx)
+	tx, err := c.Store.DB().Begin(ctx)
 	if err != nil {
 		return err
 	}
@@ -244,7 +244,7 @@ func (c *Coordinator) HandleNodeCompleted(ctx context.Context, runID string, nod
 		if pending == 0 {
 			// Get workflow start time for duration calculation
 			var workflowStartTime time.Time
-			_ = c.DB.QueryRow(ctx, `SELECT created_at FROM workflow_runs WHERE id=$1`, runID).Scan(&workflowStartTime)
+			_ = c.Store.DB().QueryRow(ctx, `SELECT created_at FROM workflow_runs WHERE id=$1`, runID).Scan(&workflowStartTime)
 			workflowDuration := time.Since(workflowStartTime)
 
 			_, err = tx.Exec(ctx,
@@ -359,14 +359,14 @@ func (c *Coordinator) HandleNodeFailed(ctx context.Context, runID string, nodeID
 	// Get workflow info for logging
 	var workflowID string
 	var workflowVersion int
-	_ = c.DB.QueryRow(ctx, `SELECT workflow_definition_id, workflow_version FROM workflow_runs WHERE id=$1`, runID).
+	_ = c.Store.DB().QueryRow(ctx, `SELECT workflow_definition_id, workflow_version FROM workflow_runs WHERE id=$1`, runID).
 		Scan(&workflowID, &workflowVersion)
 
 	// Start tracing span
 	ctx, span := util.StartTaskSpan(ctx, "failed", "", runID, nodeID)
 	defer util.EndSpan(span, nil)
 
-	logger := c.Log.With().
+	logger := c.Logger.With().
 		Str("workflow_id", workflowID).
 		Str("run_id", runID).
 		Str("node_id", nodeID).
@@ -377,7 +377,7 @@ func (c *Coordinator) HandleNodeFailed(ctx context.Context, runID string, nodeID
 
 	startTime := time.Now()
 
-	tx, err := c.DB.Begin(ctx)
+	tx, err := c.Store.DB().Begin(ctx)
 	if err != nil {
 		logger.Error().Err(err).Msg("failed to begin transaction")
 		util.RecordError(span, err)
@@ -442,7 +442,7 @@ func (c *Coordinator) HandleNodeFailed(ctx context.Context, runID string, nodeID
 	if pending == 0 {
 		// Get workflow start time for duration calculation
 		var workflowStartTime time.Time
-		_ = c.DB.QueryRow(ctx, `SELECT created_at FROM workflow_runs WHERE id=$1`, runID).Scan(&workflowStartTime)
+		_ = c.Store.DB().QueryRow(ctx, `SELECT created_at FROM workflow_runs WHERE id=$1`, runID).Scan(&workflowStartTime)
 		workflowDuration := time.Since(workflowStartTime)
 
 		_, err = tx.Exec(ctx,

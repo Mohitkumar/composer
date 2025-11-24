@@ -6,31 +6,24 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
-	"time"
 
 	grpcapi "github.com/mohitkumar/composer/pkg/api/grpc"
 	httpapi "github.com/mohitkumar/composer/pkg/api/http"
 	"github.com/mohitkumar/composer/pkg/coord"
-	"github.com/mohitkumar/composer/pkg/outbox"
-	"github.com/mohitkumar/composer/pkg/redisq"
-	"github.com/mohitkumar/composer/pkg/store"
 	"github.com/mohitkumar/composer/pkg/util"
 	"github.com/rs/zerolog"
 )
 
 type Bootstrap struct {
-	Config       *Config
 	Logger       *zerolog.Logger
-	Redis        *redisq.RedisStream
-	Store        *store.Store
+	Config       *coord.Config
 	Coordinator  *coord.Coordinator
-	Outbox       *outbox.OutboxEnqueuer
 	HTTP         *httpapi.Server
 	GRPC         *grpcapi.Server
 	shutdownOTel func() error
 }
 
-func NewBootstrap(config *Config) (*Bootstrap, error) {
+func NewBootstrap(config *coord.Config) (*Bootstrap, error) {
 	logger := initLogger(config)
 
 	// Initialize OpenTelemetry SDK
@@ -49,25 +42,12 @@ func NewBootstrap(config *Config) (*Bootstrap, error) {
 	}
 	logger.Info().Msg("initialized OpenTelemetry metrics")
 
-	// Create Redis stream
-	redisStream := redisq.NewRedisStream(&config.RedisConfig)
-
-	// Create store (database pool)
-	dbStore := store.NewStore(&config.StoreConfig, *logger)
-
 	// Create coordinator
-	coordinator := coord.NewCoordinator(dbStore.DB(), *logger)
-
-	// Create outbox enqueuer
-	outboxEnqueuer := outbox.NewOutboxEnqueuer(outbox.EnqueuerConfig{
-		DB:           dbStore.DB(),
-		Redis:        redisStream,
-		Logger:       *logger,
-		BatchSize:    50,
-		Concurrency:  2,
-		PollInterval: 1 * time.Second,
-		StreamPrefix: "workflow.",
-	})
+	coordinator, err := coord.NewCoordinator(config, logger)
+	if err != nil {
+		logger.Error().Err(err).Msg("failed to create coordinator")
+		return nil, fmt.Errorf("failed to create coordinator: %w", err)
+	}
 
 	// Create HTTP server with coordinator
 	httpServer := httpapi.NewServer(&config.APIConfig, coordinator)
@@ -76,46 +56,21 @@ func NewBootstrap(config *Config) (*Bootstrap, error) {
 	grpcServer := grpcapi.NewServer(&config.APIConfig, coordinator)
 
 	return &Bootstrap{
-		Config:       config,
 		Logger:       logger,
-		Redis:        redisStream,
-		Store:        dbStore,
+		Config:       config,
 		Coordinator:  coordinator,
-		Outbox:       outboxEnqueuer,
 		HTTP:         httpServer,
 		GRPC:         grpcServer,
 		shutdownOTel: shutdown,
 	}, nil
 }
 
-func initLogger(config *Config) *zerolog.Logger {
-	level := zerolog.InfoLevel
-	switch config.LogLevel {
-	case "debug":
-		level = zerolog.DebugLevel
-	case "warn":
-		level = zerolog.WarnLevel
-	case "error":
-		level = zerolog.ErrorLevel
-	}
-	logger := zerolog.New(os.Stderr).
-		With().
-		Timestamp().
-		Logger().
-		Level(level)
-	return &logger
-}
-
 func (b *Bootstrap) Run() error {
-	b.Logger.Info().Msg("starting coordinator bootstrap")
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	// Start outbox enqueuer
-	b.Logger.Info().Msg("starting outbox enqueuer")
-	go b.Outbox.Run(ctx)
-
+	err := b.Coordinator.Run()
+	if err != nil {
+		b.Logger.Error().Err(err).Msg("failed to run coordinator")
+		return fmt.Errorf("failed to run coordinator: %w", err)
+	}
 	// Start HTTP server
 	b.Logger.Info().Int("port", b.Config.APIConfig.HTTPPort).Msg("starting HTTP server")
 	go func() {
@@ -141,10 +96,31 @@ func (b *Bootstrap) Run() error {
 	return nil
 }
 
-func (b *Bootstrap) Shutdown() error {
-	b.Logger.Info().Msg("stopping outbox enqueuer")
-	b.Outbox.Stop()
+func initLogger(config *coord.Config) *zerolog.Logger {
+	level := zerolog.InfoLevel
+	switch config.LogLevel {
+	case "debug":
+		level = zerolog.DebugLevel
+	case "warn":
+		level = zerolog.WarnLevel
+	case "error":
+		level = zerolog.ErrorLevel
+	}
+	logger := zerolog.New(os.Stderr).
+		With().
+		Timestamp().
+		Logger().
+		Level(level)
+	return &logger
+}
 
+func (b *Bootstrap) Shutdown() error {
+	err := b.Coordinator.Shutdown()
+
+	if err != nil {
+		b.Logger.Error().Err(err).Msg("failed to shutdown coordinator")
+		return fmt.Errorf("failed to shutdown coordinator: %w", err)
+	}
 	b.Logger.Info().Msg("stopping gRPC server")
 	b.GRPC.Stop()
 
@@ -154,15 +130,6 @@ func (b *Bootstrap) Shutdown() error {
 			b.Logger.Error().Err(err).Msg("failed to shutdown OpenTelemetry")
 		}
 	}
-
-	b.Logger.Info().Msg("closing connections")
-	if b.Redis != nil {
-		b.Redis.Close()
-	}
-	if b.Store != nil {
-		b.Store.Close()
-	}
-
-	b.Logger.Info().Msg("coordinator shutdown complete")
+	b.Logger.Info().Msg("shutdown complete")
 	return nil
 }

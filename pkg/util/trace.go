@@ -11,7 +11,6 @@ import (
 )
 
 const (
-	// TracerName is the name of the tracer used for workflow operations
 	TracerName = "github.com/mohitkumar/composer/coordinator"
 )
 

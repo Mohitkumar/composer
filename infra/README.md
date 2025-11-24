@@ -110,7 +110,7 @@ For more details, see `k8s/helm/composer/README.md`.
 
 ### bootstrap_local.sh
 
-Bootstrap script for local development using Docker Compose.
+Bootstrap script for running Composer services locally (not in Docker/K8s).
 
 **Usage:**
 ```bash
@@ -118,17 +118,39 @@ Bootstrap script for local development using Docker Compose.
 ```
 
 **What it does:**
-- Checks prerequisites (Docker, Docker Compose)
-- Builds Docker images
-- Starts all services
-- Waits for services to be healthy
-- Displays access information
+- Checks prerequisites (Go, Node.js, Python/UV, PostgreSQL, Redis)
+- Builds Go binaries (coordinator, worker)
+- Generates protobuf files
+- Sets up language workers (JS, Python)
+- Starts all services locally:
+  - Coordinator (HTTP + gRPC)
+  - Go Worker
+  - JavaScript Worker (if Node.js available)
+  - Python Worker (if UV available)
+- Creates log files in `logs/` directory
+- Handles graceful shutdown on Ctrl+C
 
-**Features:**
-- Automatic health checks
-- Service status display
-- Access URLs and port information
-- Helpful commands reference
+**Prerequisites:**
+- Go 1.21+
+- PostgreSQL 16+ (running locally or via Docker)
+- Redis 7+ (running locally or via Docker)
+- Node.js 20+ (optional, for JS worker)
+- UV (optional, for Python worker)
+
+**Environment Variables:**
+- `POSTGRES_HOST`, `POSTGRES_PORT`, `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB`
+- `REDIS_HOST`, `REDIS_PORT`
+- `COORDINATOR_HTTP_PORT`, `COORDINATOR_GRPC_PORT`
+
+**Quick Start PostgreSQL/Redis with Docker:**
+```bash
+docker run -d -p 5432:5432 -e POSTGRES_PASSWORD=password -e POSTGRES_DB=composer postgres:16-alpine
+docker run -d -p 6379:6379 redis:7-alpine
+```
+
+### bootstrap_docker_compose.sh
+
+Bootstrap script for local development using Docker Compose (if it exists).
 
 ### bootstrap_k8s.sh
 

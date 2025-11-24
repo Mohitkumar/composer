@@ -10,7 +10,6 @@ import (
 )
 
 const (
-	// MeterName is the name of the meter used for workflow metrics
 	MeterName = "github.com/mohitkumar/composer/coordinator"
 )
 

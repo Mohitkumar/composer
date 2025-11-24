@@ -1,6 +1,6 @@
 #!/bin/bash
 # Bootstrap script for local development environment
-# This script sets up the local development environment using Docker Compose
+# This script sets up and runs Composer services locally (not in Docker/K8s)
 
 set -euo pipefail
 
@@ -8,115 +8,249 @@ set -euo pipefail
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
 # Get the directory where this script is located
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
-DOCKER_DIR="$PROJECT_ROOT/infra/docker"
 
 echo -e "${GREEN}=== Composer Local Development Bootstrap ===${NC}\n"
+
+# Default values
+POSTGRES_HOST="${POSTGRES_HOST:-localhost}"
+POSTGRES_PORT="${POSTGRES_PORT:-5432}"
+POSTGRES_USER="${POSTGRES_USER:-postgres}"
+POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-password}"
+POSTGRES_DB="${POSTGRES_DB:-composer}"
+REDIS_HOST="${REDIS_HOST:-localhost}"
+REDIS_PORT="${REDIS_PORT:-6379}"
+COORDINATOR_HTTP_PORT="${COORDINATOR_HTTP_PORT:-8080}"
+COORDINATOR_GRPC_PORT="${COORDINATOR_GRPC_PORT:-50051}"
+WORKER_JS_PORT="${WORKER_JS_PORT:-50052}"
+WORKER_PY_PORT="${WORKER_PY_PORT:-50053}"
 
 # Check prerequisites
 echo -e "${YELLOW}Checking prerequisites...${NC}"
 
-# Check Docker
-if ! command -v docker &> /dev/null; then
-    echo -e "${RED}Error: Docker is not installed. Please install Docker first.${NC}"
+# Check Go
+if ! command -v go &> /dev/null; then
+    echo -e "${RED}Error: Go is not installed. Please install Go 1.21+ first.${NC}"
     exit 1
 fi
+GO_VERSION=$(go version | awk '{print $3}' | sed 's/go//')
+echo -e "${GREEN}✓ Go ${GO_VERSION} found${NC}"
 
-# Check Docker Compose
-DOCKER_COMPOSE_CMD=""
-if command -v docker-compose &> /dev/null; then
-    DOCKER_COMPOSE_CMD="docker-compose"
-elif docker compose version &> /dev/null; then
-    DOCKER_COMPOSE_CMD="docker compose"
+# Check Node.js (for JS worker)
+if ! command -v node &> /dev/null; then
+    echo -e "${YELLOW}⚠ Node.js not found. JS worker will be skipped.${NC}"
+    SKIP_JS_WORKER=true
 else
-    echo -e "${RED}Error: Docker Compose is not installed. Please install Docker Compose first.${NC}"
-    exit 1
+    NODE_VERSION=$(node --version)
+    echo -e "${GREEN}✓ Node.js ${NODE_VERSION} found${NC}"
+    SKIP_JS_WORKER=false
 fi
 
-# Check if Docker daemon is running
-if ! docker info &> /dev/null; then
-    echo -e "${RED}Error: Docker daemon is not running. Please start Docker first.${NC}"
-    exit 1
+# Check Python/UV (for Python worker)
+if ! command -v uv &> /dev/null; then
+    echo -e "${YELLOW}⚠ UV not found. Python worker will be skipped.${NC}"
+    SKIP_PY_WORKER=true
+else
+    UV_VERSION=$(uv --version | awk '{print $2}')
+    echo -e "${GREEN}✓ UV ${UV_VERSION} found${NC}"
+    SKIP_PY_WORKER=false
+fi
+
+# Check PostgreSQL connection
+echo -n "Checking PostgreSQL connection..."
+if command -v psql &> /dev/null; then
+    export PGPASSWORD="$POSTGRES_PASSWORD"
+    if psql -h "$POSTGRES_HOST" -p "$POSTGRES_PORT" -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "SELECT 1;" &> /dev/null; then
+        echo -e " ${GREEN}✓${NC}"
+    else
+        echo -e " ${RED}✗${NC}"
+        echo -e "${YELLOW}Warning: Cannot connect to PostgreSQL.${NC}"
+        echo -e "${YELLOW}Please ensure PostgreSQL is running and accessible at ${POSTGRES_HOST}:${POSTGRES_PORT}${NC}"
+        echo -e "${YELLOW}You can start it with: docker run -d -p 5432:5432 -e POSTGRES_PASSWORD=password -e POSTGRES_DB=composer postgres:16-alpine${NC}"
+        read -p "Continue anyway? (y/N): " -n 1 -r
+        echo
+        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+            exit 1
+        fi
+    fi
+    unset PGPASSWORD
+else
+    echo -e " ${YELLOW}⚠ psql not found, skipping connection test${NC}"
+fi
+
+# Check Redis connection
+echo -n "Checking Redis connection..."
+if command -v redis-cli &> /dev/null; then
+    if redis-cli -h "$REDIS_HOST" -p "$REDIS_PORT" ping &> /dev/null; then
+        echo -e " ${GREEN}✓${NC}"
+    else
+        echo -e " ${RED}✗${NC}"
+        echo -e "${YELLOW}Warning: Cannot connect to Redis.${NC}"
+        echo -e "${YELLOW}Please ensure Redis is running and accessible at ${REDIS_HOST}:${REDIS_PORT}${NC}"
+        echo -e "${YELLOW}You can start it with: docker run -d -p 6379:6379 redis:7-alpine${NC}"
+        read -p "Continue anyway? (y/N): " -n 1 -r
+        echo
+        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+            exit 1
+        fi
+    fi
+else
+    echo -e " ${YELLOW}⚠ redis-cli not found, skipping connection test${NC}"
 fi
 
 echo -e "${GREEN}✓ Prerequisites check passed${NC}\n"
 
-# Navigate to docker directory
-cd "$DOCKER_DIR"
+# Navigate to project root
+cd "$PROJECT_ROOT"
 
-# Check if services are already running
-if $DOCKER_COMPOSE_CMD ps 2>/dev/null | grep -q "Up"; then
-    echo -e "${YELLOW}Some services are already running.${NC}"
-    read -p "Do you want to restart all services? (y/N): " -n 1 -r
-    echo
-    if [[ $REPLY =~ ^[Yy]$ ]]; then
-        echo -e "${YELLOW}Stopping existing services...${NC}"
-        $DOCKER_COMPOSE_CMD down
-    else
-        echo -e "${GREEN}Keeping existing services running.${NC}"
-        exit 0
+# Build binaries
+echo -e "${YELLOW}Building binaries...${NC}"
+if ! make build-coordinator build-worker; then
+    echo -e "${RED}Error: Failed to build binaries${NC}"
+    exit 1
+fi
+echo -e "${GREEN}✓ Binaries built${NC}\n"
+
+# Generate protobuf files
+echo -e "${YELLOW}Generating protobuf files...${NC}"
+if ! make proto; then
+    echo -e "${RED}Error: Failed to generate protobuf files${NC}"
+    exit 1
+fi
+echo -e "${GREEN}✓ Protobuf files generated${NC}\n"
+
+# Setup language workers
+if [ "$SKIP_JS_WORKER" = false ]; then
+    echo -e "${YELLOW}Setting up JavaScript worker...${NC}"
+    cd "$PROJECT_ROOT/cmd/language-server-js"
+    if [ ! -d "node_modules" ]; then
+        npm install
     fi
+    echo -e "${GREEN}✓ JavaScript worker ready${NC}\n"
+    cd "$PROJECT_ROOT"
 fi
 
-# Build images
-echo -e "${YELLOW}Rebuilding Docker images...${NC}"
-$DOCKER_COMPOSE_CMD build --pull
+if [ "$SKIP_PY_WORKER" = false ]; then
+    echo -e "${YELLOW}Setting up Python worker...${NC}"
+    cd "$PROJECT_ROOT/cmd/language-server-py"
+    if [ ! -d ".venv" ]; then
+        uv sync
+    fi
+    echo -e "${GREEN}✓ Python worker ready${NC}\n"
+    cd "$PROJECT_ROOT"
+fi
 
-# Start services
-echo -e "${YELLOW}Starting services...${NC}"
-$DOCKER_COMPOSE_CMD up --build -d
+# Create logs directory
+mkdir -p "$PROJECT_ROOT/logs"
 
-# Wait for services to be healthy
-echo -e "${YELLOW}Waiting for services to be ready...${NC}"
-sleep 5
+# Build connection strings
+STORE_URL="postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${POSTGRES_DB}?sslmode=disable"
+REDIS_ADDR="${REDIS_HOST}:${REDIS_PORT}"
+COORDINATOR_ADDR="localhost:${COORDINATOR_GRPC_PORT}"
 
-# Check service health
-echo -e "${YELLOW}Checking service health...${NC}"
+# Function to cleanup on exit
+cleanup() {
+    echo -e "\n${YELLOW}Shutting down services...${NC}"
+    jobs -p | xargs -r kill 2>/dev/null || true
+    wait
+    echo -e "${GREEN}✓ Services stopped${NC}"
+}
 
-# Wait for PostgreSQL
-echo -n "Waiting for PostgreSQL..."
+trap cleanup EXIT INT TERM
+
+# Start Coordinator
+echo -e "${BLUE}Starting Coordinator...${NC}"
+STORE_URL="$STORE_URL" \
+COMPOSER_REDIS_ADDRS="$REDIS_ADDR" \
+COMPOSER_API_HTTP_PORT="$COORDINATOR_HTTP_PORT" \
+COMPOSER_API_GRPC_PORT="$COORDINATOR_GRPC_PORT" \
+COMPOSER_LOG_LEVEL=info \
+./bin/coordinator \
+    --store.url="$STORE_URL" \
+    --redis.addrs="$REDIS_ADDR" \
+    --api.http_port="$COORDINATOR_HTTP_PORT" \
+    --api.grpc_port="$COORDINATOR_GRPC_PORT" \
+    > "$PROJECT_ROOT/logs/coordinator.log" 2>&1 &
+COORDINATOR_PID=$!
+echo -e "${GREEN}✓ Coordinator started (PID: $COORDINATOR_PID)${NC}"
+
+# Wait for coordinator to be ready
+echo -n "Waiting for coordinator to be ready..."
 for i in {1..30}; do
-    if $DOCKER_COMPOSE_CMD exec -T postgres pg_isready -U postgres &> /dev/null; then
+    if curl -s "http://localhost:${COORDINATOR_HTTP_PORT}/health" &> /dev/null 2>&1 || (command -v nc &> /dev/null && nc -z localhost "$COORDINATOR_HTTP_PORT" 2>/dev/null); then
         echo -e " ${GREEN}✓${NC}"
         break
     fi
     echo -n "."
     sleep 1
 done
+echo ""
 
-# Wait for Redis
-echo -n "Waiting for Redis..."
-for i in {1..30}; do
-    if $DOCKER_COMPOSE_CMD exec -T redis redis-cli ping &> /dev/null; then
-        echo -e " ${GREEN}✓${NC}"
-        break
-    fi
-    echo -n "."
-    sleep 1
-done
+# Start Go Worker
+echo -e "${BLUE}Starting Go Worker...${NC}"
+REDIS_ADDR="$REDIS_ADDR" \
+COORDINATOR_ADDR="$COORDINATOR_ADDR" \
+STREAM_NAME=workflow.tasks \
+CONSUMER_GROUP=workflow-workers \
+WORKER_ID="worker-$(hostname)-$$" \
+./bin/worker > "$PROJECT_ROOT/logs/worker.log" 2>&1 &
+WORKER_PID=$!
+echo -e "${GREEN}✓ Go Worker started (PID: $WORKER_PID)${NC}"
 
-# Display service status
-echo -e "\n${GREEN}=== Service Status ===${NC}"
-$DOCKER_COMPOSE_CMD ps
+# Start JavaScript Worker (if available)
+if [ "$SKIP_JS_WORKER" = false ]; then
+    echo -e "${BLUE}Starting JavaScript Worker...${NC}"
+    cd "$PROJECT_ROOT/cmd/language-server-js"
+    PORT="$WORKER_JS_PORT" npm start > "$PROJECT_ROOT/logs/language-server-js.log" 2>&1 &
+    WORKER_JS_PID=$!
+    echo -e "${GREEN}✓ JavaScript Worker started (PID: $WORKER_JS_PID)${NC}"
+    cd "$PROJECT_ROOT"
+fi
 
-# Display access information
-echo -e "\n${GREEN}=== Access Information ===${NC}"
-echo -e "Coordinator API:     ${GREEN}http://localhost:8080${NC}"
-echo -e "Coordinator gRPC:    ${GREEN}localhost:50051${NC}"
-echo -e "Jaeger UI:           ${GREEN}http://localhost:16686${NC}"
-echo -e "Prometheus UI:       ${GREEN}http://localhost:9090${NC}"
-echo -e "Grafana UI:          ${GREEN}http://localhost:3000${NC} (admin/admin)"
-echo -e "PostgreSQL:          ${GREEN}localhost:5432${NC} (postgres/password)"
-echo -e "Redis:               ${GREEN}localhost:6379${NC}"
+# Start Python Worker (if available)
+if [ "$SKIP_PY_WORKER" = false ]; then
+    echo -e "${BLUE}Starting Python Worker...${NC}"
+    cd "$PROJECT_ROOT/cmd/language-server-py"
+    PORT="$WORKER_PY_PORT" uv run python main.py > "$PROJECT_ROOT/logs/language-server-py.log" 2>&1 &
+    WORKER_PY_PID=$!
+    echo -e "${GREEN}✓ Python Worker started (PID: $WORKER_PY_PID)${NC}"
+    cd "$PROJECT_ROOT"
+fi
+
+# Display status
+echo -e "\n${GREEN}=== Services Running ===${NC}"
+echo -e "Coordinator HTTP:  ${GREEN}http://localhost:${COORDINATOR_HTTP_PORT}${NC}"
+echo -e "Coordinator gRPC:  ${GREEN}localhost:${COORDINATOR_GRPC_PORT}${NC}"
+if [ "$SKIP_JS_WORKER" = false ]; then
+    echo -e "JavaScript Worker: ${GREEN}localhost:${WORKER_JS_PORT}${NC}"
+fi
+if [ "$SKIP_PY_WORKER" = false ]; then
+    echo -e "Python Worker:     ${GREEN}localhost:${WORKER_PY_PORT}${NC}"
+fi
+
+echo -e "\n${GREEN}=== Log Files ===${NC}"
+echo -e "Coordinator:  ${YELLOW}$PROJECT_ROOT/logs/coordinator.log${NC}"
+echo -e "Go Worker:    ${YELLOW}$PROJECT_ROOT/logs/worker.log${NC}"
+if [ "$SKIP_JS_WORKER" = false ]; then
+    echo -e "JavaScript Worker: ${YELLOW}$PROJECT_ROOT/logs/language-server-js.log${NC}"
+fi
+if [ "$SKIP_PY_WORKER" = false ]; then
+    echo -e "Python Worker: ${YELLOW}$PROJECT_ROOT/logs/language-server-py.log${NC}"
+fi
 
 echo -e "\n${GREEN}=== Useful Commands ===${NC}"
-echo -e "View logs:           ${YELLOW}cd infra/docker && $DOCKER_COMPOSE_CMD logs -f${NC}"
-echo -e "Stop services:       ${YELLOW}cd infra/docker && $DOCKER_COMPOSE_CMD down${NC}"
-echo -e "Restart services:    ${YELLOW}cd infra/docker && $DOCKER_COMPOSE_CMD restart${NC}"
-echo -e "View status:        ${YELLOW}cd infra/docker && $DOCKER_COMPOSE_CMD ps${NC}"
+echo -e "View coordinator logs:  ${YELLOW}tail -f logs/coordinator.log${NC}"
+echo -e "View worker logs:       ${YELLOW}tail -f logs/worker.log${NC}"
+echo -e "Stop all services:      ${YELLOW}Press Ctrl+C${NC}"
 
-echo -e "\n${GREEN}✓ Local development environment is ready!${NC}\n"
+echo -e "\n${GREEN}✓ Local development environment is ready!${NC}"
+echo -e "${YELLOW}Press Ctrl+C to stop all services${NC}\n"
+
+# Wait for all background jobs
+wait
+

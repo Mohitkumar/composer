@@ -1,12 +1,12 @@
-.PHONY: help build build-coordinator build-worker build-worker-js build-worker-py proto proto-go proto-py proto-js clean test docker-build docker-up docker-down install-deps
+.PHONY: help build build-coordinator build-worker build-worker-js build-worker-py proto proto-go proto-py proto-js clean test docker-build docker-up docker-down install-deps run-local
 
 # Variables
 GO_CMD := go
 PROTOC := protoc
 PROTO_DIR := pkg/api/proto
 PROTO_GO_OUT := pkg/api/proto/gen/go
-PROTO_PY_OUT := cmd/worker-py
-PROTO_JS_OUT := cmd/worker-js
+PROTO_PY_OUT := cmd/language-server-py
+PROTO_JS_OUT := cmd/language-server-js
 
 # Go binaries
 COORDINATOR_BIN := bin/coordinator
@@ -18,7 +18,7 @@ help: ## Show this help message
 	@echo 'Available targets:'
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-15s %s\n", $$1, $$2}'
 
-build: proto-go build-coordinator build-worker build-worker-js build-worker-py ## Build all binaries (coordinator, worker, and language workers)
+build: proto-go build-coordinator build-worker build-language-server-js build-language-server-py ## Build all binaries (coordinator, worker, and language workers)
 
 build-coordinator: ## Build coordinator binary
 	@echo "Building coordinator..."
@@ -28,17 +28,17 @@ build-coordinator: ## Build coordinator binary
 build-worker: proto-go ## Build Go worker binary
 	@echo "Building Go worker..."
 	@mkdir -p bin
-	$(GO_CMD) build -o $(WORKER_BIN) ./cmd/worker-go
+	$(GO_CMD) build -o $(WORKER_BIN) ./cmd/worker
 
-build-worker-js: proto-js ## Build JavaScript language worker
+build-language-server-js: proto-js ## Build JavaScript language worker
 	@echo "Building JavaScript language worker..."
-	@cd cmd/worker-js && npm install --omit=dev
-	@echo "JavaScript worker dependencies installed"
+	@cd cmd/language-server-js && npm install --omit=dev
+	@echo "JavaScript language server dependencies installed"
 
-build-worker-py: proto-py ## Build Python language worker
+build-language-server-py: proto-py ## Build Python language worker
 	@echo "Building Python language worker..."
-	@cd cmd/worker-py && uv sync
-	@echo "Python worker dependencies installed"
+	@cd cmd/language-server-py && uv sync
+	@echo "Python language server dependencies installed"
 
 proto: proto-go proto-py proto-js ## Generate all protobuf files
 
@@ -76,9 +76,9 @@ install-deps: ## Install dependencies for all projects
 	@echo "Installing Go dependencies..."
 	$(GO_CMD) mod download
 	@echo "Installing Node.js dependencies..."
-	cd cmd/worker-js && npm install
+	cd cmd/language-server-js && npm install
 	@echo "Installing Python dependencies..."
-	cd cmd/worker-py && uv sync
+	cd cmd/language-server-py && uv sync
 	@echo "All dependencies installed"
 
 clean: ## Clean build artifacts
@@ -87,8 +87,7 @@ clean: ## Clean build artifacts
 	rm -rf $(PROTO_GO_OUT)/*
 	find $(PROTO_PY_OUT) -name "*_pb2.py" -delete
 	find $(PROTO_PY_OUT) -name "*_pb2_grpc.py" -delete
-	rm -rf cmd/worker-js/node_modules
-
+	rm -rf cmd/language-server-js/node_modules
 test: ## Run unit tests
 	$(GO_CMD) test ./...
 
@@ -117,17 +116,7 @@ docker-down: ## Stop all services
 docker-logs: ## Show docker-compose logs
 	docker-compose logs -f
 
-# Development targets
-dev-coordinator: build-coordinator ## Run coordinator in development mode
-	./$(COORDINATOR_BIN) --log-level=debug
+run-local: ## Run the project locally using bootstrap script
+	@echo "Running local bootstrap script..."
+	@bash infra/scripts/bootstrap_local.sh
 
-dev-worker: build-worker ## Run worker in development mode
-	REDIS_ADDR=localhost:6379 \
-	COORDINATOR_ADDR=localhost:50051 \
-	./$(WORKER_BIN)
-
-dev-worker-js: ## Run JS worker in development mode
-	cd cmd/worker-js && npm start
-
-dev-worker-py: proto-py ## Run Python worker in development mode
-	cd cmd/worker-py && uv run python main.py
