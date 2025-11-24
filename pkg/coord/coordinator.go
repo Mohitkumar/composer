@@ -2,9 +2,6 @@ package coord
 
 import (
 	"context"
-	"os"
-	"os/signal"
-	"syscall"
 	"time"
 
 	"github.com/mohitkumar/composer/pkg/outbox"
@@ -49,22 +46,10 @@ func NewCoordinator(config *Config, logger *zerolog.Logger) (*Coordinator, error
 	}, nil
 }
 
-func (b *Coordinator) Run() error {
-	b.Logger.Info().Msg("starting coordinator bootstrap")
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	// Start outbox enqueuer
+func (b *Coordinator) Run(ctx context.Context) error {
+	b.Logger.Info().Msg("starting coordinator")
 	b.Logger.Info().Msg("starting outbox enqueuer")
 	go b.Outbox.Run(ctx)
-
-	// Wait for interrupt signal
-	sigc := make(chan os.Signal, 1)
-	signal.Notify(sigc, syscall.SIGINT, syscall.SIGTERM)
-	<-sigc
-
-	b.Logger.Info().Msg("shutting down coordinator")
 	return nil
 }
 

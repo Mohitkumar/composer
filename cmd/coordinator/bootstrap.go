@@ -66,7 +66,11 @@ func NewBootstrap(config *coord.Config) (*Bootstrap, error) {
 }
 
 func (b *Bootstrap) Run() error {
-	err := b.Coordinator.Run()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	b.Logger.Info().Msg("starting composer")
+	err := b.Coordinator.Run(ctx)
 	if err != nil {
 		b.Logger.Error().Err(err).Msg("failed to run coordinator")
 		return fmt.Errorf("failed to run coordinator: %w", err)
@@ -92,7 +96,7 @@ func (b *Bootstrap) Run() error {
 	signal.Notify(sigc, syscall.SIGINT, syscall.SIGTERM)
 	<-sigc
 
-	b.Logger.Info().Msg("shutting down coordinator")
+	b.Logger.Info().Msg("shutting down composer")
 	return nil
 }
 
@@ -115,6 +119,7 @@ func initLogger(config *coord.Config) *zerolog.Logger {
 }
 
 func (b *Bootstrap) Shutdown() error {
+	b.Logger.Info().Msg("shutting down composer....")
 	err := b.Coordinator.Shutdown()
 
 	if err != nil {
