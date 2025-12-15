@@ -11,11 +11,12 @@ import (
 )
 
 type Coordinator struct {
-	Config *Config
-	Logger *zerolog.Logger
-	Redis  *redisq.RedisStream
-	Store  *store.Store
-	Outbox *outbox.OutboxEnqueuer
+	Config            *Config
+	Logger            *zerolog.Logger
+	Redis             *redisq.RedisStream
+	Store             *store.Store
+	Outbox            *outbox.OutboxEnqueuer
+	ParameterResolver *ParameterResolver
 }
 
 func NewCoordinator(config *Config, logger *zerolog.Logger) (*Coordinator, error) {
@@ -37,12 +38,19 @@ func NewCoordinator(config *Config, logger *zerolog.Logger) (*Coordinator, error
 		StreamPrefix: "workflow.",
 	})
 
+	// Create parameter resolver
+	parameterResolver, err := NewParameterResolver()
+	if err != nil {
+		return nil, err
+	}
+
 	return &Coordinator{
-		Config: config,
-		Logger: logger,
-		Redis:  redisStream,
-		Store:  dbStore,
-		Outbox: outboxEnqueuer,
+		Config:            config,
+		Logger:            logger,
+		Redis:             redisStream,
+		Store:             dbStore,
+		Outbox:            outboxEnqueuer,
+		ParameterResolver: parameterResolver,
 	}, nil
 }
 

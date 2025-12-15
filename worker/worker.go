@@ -203,14 +203,27 @@ func (w *Worker) processMessage(ctx context.Context, msg *TaskMessage, msgID str
 		Str("run", msg.RunID).
 		Logger()
 
+	leaseCtx, cancelLease := context.WithTimeout(ctx, 5*time.Second)
+	acquired, err := w.coordClient.AcquireTaskLease(leaseCtx, msg.TaskID, w.cfg.ConsumerName, w.cfg.LeaseTTLSeconds)
+	cancelLease()
+	if err != nil {
+		logger.Error().Err(err).Msg("failed to acquire task lease")
+		return err
+	}
+	if !acquired {
+		logger.Warn().Msg("task lease not acquired, leaving message for retry")
+		// do not ack; leave in pending so another worker can claim
+		return nil
+	}
+
 	// Execute the task using router
 	var execOutput json.RawMessage
 	var execErr *string
 	start := time.Now()
 
-	execOutput, err := w.router.Route(ctx, msg.NodeType, msg.Input)
-	if err != nil {
-		errStr := err.Error()
+	execOutput, routeErr := w.router.Route(ctx, msg.NodeType, msg.Input)
+	if routeErr != nil {
+		errStr := routeErr.Error()
 		execErr = &errStr
 	}
 

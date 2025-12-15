@@ -14,5 +14,6 @@ type WorkerConfig struct {
 	StreamName    string
 	ConsumerGroup string
 	ConsumerName  string
+	LeaseTTLSeconds int64
 	Logger        zerolog.Logger
 }

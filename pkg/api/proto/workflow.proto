@@ -16,6 +16,9 @@ service WorkflowService {
   
   // Heartbeat allows workers to send periodic heartbeats
   rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
+
+  // AcquireTaskLease lets workers claim a task lease before execution
+  rpc AcquireTaskLease(AcquireTaskLeaseRequest) returns (AcquireTaskLeaseResponse);
 }
 
 // ExecuteTaskRequest contains task execution details
@@ -69,4 +72,17 @@ message HeartbeatRequest {
 // HeartbeatResponse confirms heartbeat receipt
 message HeartbeatResponse {
   bool acknowledged = 1;
+}
+
+// AcquireTaskLeaseRequest asks coordinator to claim a lease on a task instance
+message AcquireTaskLeaseRequest {
+  string task_id = 1;
+  string owner = 2;
+  int64 ttl_seconds = 3;
+}
+
+// AcquireTaskLeaseResponse returns whether the lease was acquired
+message AcquireTaskLeaseResponse {
+  bool acquired = 1;
+  string message = 2;
 }

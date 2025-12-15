@@ -8,6 +8,8 @@ import (
 	"syscall"
 	"time"
 
+	"strconv"
+
 	"github.com/mohitkumar/composer/pkg/redisq"
 	"github.com/mohitkumar/composer/worker"
 	"github.com/rs/zerolog"
@@ -44,6 +46,13 @@ func main() {
 		workerID = fmt.Sprintf("worker-%d", time.Now().Unix())
 	}
 
+	leaseTTLSeconds := int64(90)
+	if v := os.Getenv("LEASE_TTL_SECONDS"); v != "" {
+		if parsed, err := strconv.ParseInt(v, 10, 64); err == nil && parsed > 0 {
+			leaseTTLSeconds = parsed
+		}
+	}
+
 	ctx := context.Background()
 
 	// Create Redis stream
@@ -64,6 +73,7 @@ func main() {
 		StreamName:      streamName,
 		ConsumerGroup:   consumerGroup,
 		ConsumerName:    workerID,
+		LeaseTTLSeconds: leaseTTLSeconds,
 		Logger:          logger,
 	}
 

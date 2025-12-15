@@ -2,9 +2,11 @@ package grpc
 
 import (
 	"context"
+	"time"
 
 	workflowpb "github.com/mohitkumar/composer/pkg/api/proto/gen/go/workflow"
 	"github.com/mohitkumar/composer/pkg/coord"
+	"github.com/mohitkumar/composer/pkg/store"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -37,7 +39,7 @@ func (s *WorkflowService) ReportTaskResult(ctx context.Context, req *workflowpb.
 
 	// Handle task completion or failure
 	if req.Status == "completed" {
-		err := s.coordinator.HandleNodeCompleted(ctx, runID, nodeID, req.Output)
+		err := s.coordinator.HandleNodeCompleted(ctx, req.TaskId, runID, nodeID, req.Output)
 		if err != nil {
 			return nil, status.Error(codes.Internal, err.Error())
 		}
@@ -75,5 +77,27 @@ func (s *WorkflowService) Heartbeat(ctx context.Context, req *workflowpb.Heartbe
 	// TODO: Implement heartbeat tracking
 	return &workflowpb.HeartbeatResponse{
 		Acknowledged: true,
+	}, nil
+}
+
+// AcquireTaskLease allows a worker to claim a lease before executing a task.
+func (s *WorkflowService) AcquireTaskLease(ctx context.Context, req *workflowpb.AcquireTaskLeaseRequest) (*workflowpb.AcquireTaskLeaseResponse, error) {
+	if req.GetTaskId() == "" || req.GetOwner() == "" {
+		return nil, status.Error(codes.InvalidArgument, "task_id and owner are required")
+	}
+
+	ttl := time.Duration(req.GetTtlSeconds()) * time.Second
+	if ttl <= 0 {
+		ttl = 90 * time.Second
+	}
+
+	acquired, err := store.AcquireTaskLease(ctx, s.coordinator.Store.DB(), req.GetTaskId(), req.GetOwner(), ttl)
+	if err != nil {
+		return nil, status.Error(codes.Internal, err.Error())
+	}
+
+	return &workflowpb.AcquireTaskLeaseResponse{
+		Acquired: acquired,
+		Message:  "",
 	}, nil
 }

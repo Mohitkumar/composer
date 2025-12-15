@@ -1,53 +1,60 @@
 {
-  "workflow_id": "order-fulfillment",
-  "name": "Order Fulfillment Pipeline",
-  "description": "Fetch order details, enrich them with business logic, and persist a summary report",
-  "metadata": {
-    "owner": "data-platform",
-    "version": 1
-  },
-  "nodes": [
-    {
-      "node_id": "fetch_order",
-      "name": "Fetch Order",
-      "type": "TASK",
-      "runtime": "http",
-      "spec": {
-        "url": "https://api.example.com/orders/{{workflow_run_id}}",
-        "method": "GET",
-        "headers": {
-          "Authorization": "Bearer ${ORDER_SERVICE_TOKEN}"
-        },
-        "timeout_seconds": 20
-      }
-    },
-    {
-      "node_id": "enrich_order",
-      "name": "Enrich Order",
-      "type": "TASK",
-      "runtime": "python",
-      "spec": {
-        "filename": "enrich_order.py",
-        "timeout": 30,
-        "code": "import json\n\n# The worker passes the previous node output in `input`\ndef handler(input):\n    order = json.loads(input) if isinstance(input, str) else input\n    items = order.get('items', [])\n    total_amount = sum(item.get('price', 0) * item.get('quantity', 1) for item in items)\n    return {\n        'order_id': order.get('order_id'),\n        'customer_id': order.get('customer_id'),\n        'items': items,\n        'total_amount': total_amount,\n        'item_count': len(items)\n    }\n"
-      }
-    },
-    {
-      "node_id": "persist_summary",
-      "name": "Persist Summary",
-      "type": "TASK",
-      "runtime": "s3",
-      "spec": {
-        "operation": "upload",
-        "bucket": "composer-demo-order-summaries",
-        "key": "summaries/{{workflow_run_id}}.json",
-        "region": "us-east-1"
-      }
+    "workflow_id": "order-fulfillment",
+    "name": "Order Fulfillment Pipeline",
+    "description": "Fetch order details, enrich them with business logic, and persist a summary report",
+    "version": 1,
+    "created_by":"mohit",
+    "spec": {
+        "workflow_id": "order-fulfillment",
+        "name": "Order Fulfillment Pipeline",
+        "nodes": [
+            {
+                "node_id": "fetch_order",
+                "name": "Fetch Order",
+                "type": "TASK",
+                "runtime": "http",
+                "spec": {
+                    "url": "https://api.example.com/orders/{{workflow_run_id}}",
+                    "method": "GET",
+                    "headers": {
+                        "Authorization": "Bearer ${ORDER_SERVICE_TOKEN}"
+                    },
+                    "timeout_seconds": 20
+                }
+            },
+            {
+                "node_id": "enrich_order",
+                "name": "Enrich Order",
+                "type": "TASK",
+                "runtime": "python",
+                "spec": {
+                    "filename": "enrich_order.py",
+                    "timeout": 30,
+                    "code": "import json\n\n# The worker passes the previous node output in `input`\ndef handler(input):\n    order = json.loads(input) if isinstance(input, str) else input\n    items = order.get('items', [])\n    total_amount = sum(item.get('price', 0) * item.get('quantity', 1) for item in items)\n    return {\n        'order_id': order.get('order_id'),\n        'customer_id': order.get('customer_id'),\n        'items': items,\n        'total_amount': total_amount,\n        'item_count': len(items)\n    }\n"
+                }
+            },
+            {
+                "node_id": "persist_summary",
+                "name": "Persist Summary",
+                "type": "TASK",
+                "runtime": "s3",
+                "spec": {
+                    "operation": "upload",
+                    "bucket": "composer-demo-order-summaries",
+                    "key": "summaries/{{workflow_run_id}}.json",
+                    "region": "us-east-1"
+                }
+            }
+        ],
+        "edges": [
+            {
+                "from": "fetch_order",
+                "to": "enrich_order"
+            },
+            {
+                "from": "enrich_order",
+                "to": "persist_summary"
+            }
+        ]
     }
-  ],
-  "edges": [
-    { "from": "fetch_order", "to": "enrich_order" },
-    { "from": "enrich_order", "to": "persist_summary" }
-  ]
 }
-

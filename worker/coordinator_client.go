@@ -50,6 +50,24 @@ func (c *CoordinatorClient) Close() error {
 	return nil
 }
 
+// AcquireTaskLease asks coordinator to claim a lease for this task.
+func (c *CoordinatorClient) AcquireTaskLease(ctx context.Context, taskID, owner string, ttlSeconds int64) (bool, error) {
+	req := &workflowpb.AcquireTaskLeaseRequest{
+		TaskId:     taskID,
+		Owner:      owner,
+		TtlSeconds: ttlSeconds,
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	resp, err := c.client.AcquireTaskLease(ctx, req)
+	if err != nil {
+		return false, fmt.Errorf("acquire lease failed: %w", err)
+	}
+	return resp.GetAcquired(), nil
+}
+
 // ReportTaskResult reports task execution result to the coordinator
 func (c *CoordinatorClient) ReportTaskResult(ctx context.Context, taskID, runID, nodeID string, output json.RawMessage, errMsg *string) error {
 	status := "completed"

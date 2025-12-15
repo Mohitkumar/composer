@@ -5,7 +5,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -15,6 +17,8 @@ import (
 	"github.com/mohitkumar/composer/pkg/coord"
 	"github.com/mohitkumar/composer/pkg/model"
 	"github.com/mohitkumar/composer/pkg/outbox"
+	"github.com/mohitkumar/composer/pkg/redisq"
+	"github.com/mohitkumar/composer/pkg/store"
 	"github.com/mohitkumar/composer/worker"
 	"github.com/rs/zerolog"
 )
@@ -44,7 +48,14 @@ func TestEndToEndWorkflowExecution(t *testing.T) {
 
 	// Setup coordinator
 	coordLogger := zerolog.New(infra.Logger).With().Str("component", "coordinator").Logger()
-	coordinator := coord.NewCoordinator(infra.DBPool, coordLogger)
+	coordConfig := &coord.Config{
+		StoreConfig: store.StoreConfig{URL: infra.DBURL},
+		RedisConfig: redisq.RedisConfig{Addrs: []string{infra.RedisAddr}},
+	}
+	coordinator, err := coord.NewCoordinator(coordConfig, &coordLogger)
+	if err != nil {
+		t.Fatalf("Failed to create coordinator: %v", err)
+	}
 
 	// Create outbox enqueuer
 	outboxEnqueuer := outbox.NewOutboxEnqueuer(outbox.EnqueuerConfig{
@@ -282,4 +293,246 @@ func TestEndToEndWorkflowExecution(t *testing.T) {
 	}
 
 	t.Fatalf("Workflow did not complete within %v", maxWait)
+}
+
+// TestEndToEndParameterResolutionAndLease validates parameter resolution across nodes
+// and lease-based task claiming via worker/coordinator.
+func TestEndToEndParameterResolutionAndLease(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	infra := SetupTestInfra(ctx, t)
+	defer infra.Cleanup(ctx, t)
+
+	coordLogger := zerolog.New(infra.Logger).With().Str("component", "coordinator").Logger()
+	coordConfig := &coord.Config{
+		StoreConfig: store.StoreConfig{URL: infra.DBURL},
+		RedisConfig: redisq.RedisConfig{Addrs: []string{infra.RedisAddr}},
+	}
+	coordinator, err := coord.NewCoordinator(coordConfig, &coordLogger)
+	if err != nil {
+		t.Fatalf("Failed to create coordinator: %v", err)
+	}
+
+	outboxEnqueuer := outbox.NewOutboxEnqueuer(outbox.EnqueuerConfig{
+		DB:           infra.DBPool,
+		Redis:        infra.RedisStream,
+		Logger:       coordLogger,
+		BatchSize:    50,
+		Concurrency:  2,
+		PollInterval: 300 * time.Millisecond,
+		StreamPrefix: "workflow.",
+	})
+	outboxCtx, outboxCancel := context.WithCancel(ctx)
+	defer outboxCancel()
+	go outboxEnqueuer.Run(outboxCtx)
+
+	httpPort := 18081
+	httpConfig := &api.APIConfig{
+		HTTPPort: httpPort,
+		GRPCPort: 15052,
+	}
+	httpServer := httpapi.NewServer(httpConfig, coordinator)
+	httpAddr := fmt.Sprintf("http://localhost:%d", httpPort)
+	httpCtx, httpCancel := context.WithCancel(ctx)
+	defer httpCancel()
+	go func() {
+		if err := httpServer.Start(); err != nil && httpCtx.Err() == nil {
+			t.Logf("HTTP server error: %v", err)
+		}
+	}()
+	time.Sleep(100 * time.Millisecond)
+
+	grpcServer := grpcapi.NewServer(httpConfig, coordinator)
+	grpcAddr := fmt.Sprintf("localhost:%d", httpConfig.GRPCPort)
+	grpcCtx, grpcCancel := context.WithCancel(ctx)
+	defer grpcCancel()
+	go func() {
+		if err := grpcServer.Start(); err != nil && grpcCtx.Err() == nil {
+			t.Logf("gRPC server error: %v", err)
+		}
+	}()
+	time.Sleep(100 * time.Millisecond)
+
+	// Test HTTP backend used by tasks
+	var receivedBody []byte
+	testServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/step1":
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"value":"hello"}`))
+		case "/step2":
+			body, _ := io.ReadAll(r.Body)
+			receivedBody = body
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"status":"ok"}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer testServer.Close()
+
+	workerLogger := zerolog.New(infra.Logger).With().Str("component", "worker").Logger()
+	workerConfig := worker.WorkerConfig{
+		Redis:           infra.RedisStream,
+		CoordinatorAddr: grpcAddr,
+		LangWorkerAddr:  "",
+		StreamName:      "workflow.tasks",
+		ConsumerGroup:   "lease-workers",
+		ConsumerName:    "lease-worker-1",
+		LeaseTTLSeconds: 60,
+		Logger:          workerLogger,
+	}
+	w, err := worker.NewWorker(workerConfig)
+	if err != nil {
+		t.Fatalf("Failed to create worker: %v", err)
+	}
+	defer w.Close()
+	if err := w.EnsureConsumerGroup(ctx); err != nil {
+		t.Fatalf("Failed to ensure consumer group: %v", err)
+	}
+	workerCtx, workerCancel := context.WithCancel(ctx)
+	defer workerCancel()
+	go w.Run(workerCtx)
+	time.Sleep(100 * time.Millisecond)
+
+	workflowID := "lease-param-workflow"
+	workflowVersion := 1
+	workflowName := "Lease Param Workflow"
+
+	workflowSpec := model.WorkflowDefinitionSpec{
+		WorkflowID: workflowID,
+		Name:       workflowName,
+		Nodes: []model.Node{
+			{
+				NodeID:  "fetch_data",
+				Name:    "Fetch",
+				Type:    model.NodeTypeTask,
+				Runtime: "http",
+				Spec: json.RawMessage(fmt.Sprintf(`{
+					"url": "%s/step1",
+					"method": "GET",
+					"timeout_seconds": 5
+				}`, testServer.URL)),
+			},
+			{
+				NodeID:  "use_data",
+				Name:    "UseData",
+				Type:    model.NodeTypeTask,
+				Runtime: "http",
+				Spec: json.RawMessage(fmt.Sprintf(`{
+					"url": "%s/step2",
+					"method": "POST",
+					"timeout_seconds": 5,
+					"body": {
+						"fromPrev": "{{tasks.fetch_data.output.value}}",
+						"fromInput": "{{input.test}}"
+					}
+				}`, testServer.URL)),
+			},
+		},
+		Edges: []model.Edge{
+			{From: "fetch_data", To: "use_data"},
+		},
+	}
+
+	specJSON, err := json.Marshal(workflowSpec)
+	if err != nil {
+		t.Fatalf("Failed to marshal workflow spec: %v", err)
+	}
+
+	// Register workflow
+	registerReq := map[string]interface{}{
+		"workflow_id": workflowID,
+		"name":        workflowName,
+		"version":     workflowVersion,
+		"spec":        json.RawMessage(specJSON),
+		"created_by":  "e2e-test",
+	}
+	registerBody, _ := json.Marshal(registerReq)
+	resp, err := http.Post(httpAddr+"/api/v1/workflows", "application/json", bytes.NewReader(registerBody))
+	if err != nil {
+		t.Fatalf("Failed to register workflow: %v", err)
+	}
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("Expected status 201, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	// Execute workflow
+	runID := fmt.Sprintf("run-%d", time.Now().UnixNano())
+	executeReq := map[string]interface{}{
+		"run_id":           runID,
+		"workflow_id":      workflowID,
+		"workflow_version": workflowVersion,
+		"input":            json.RawMessage(`{"test":"world"}`),
+		"started_by":       "e2e-test",
+	}
+	executeBody, _ := json.Marshal(executeReq)
+	resp, err = http.Post(httpAddr+"/api/v1/workflows/"+workflowID+"/execute", "application/json", bytes.NewReader(executeBody))
+	if err != nil {
+		t.Fatalf("Failed to start workflow: %v", err)
+	}
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("Expected status 202, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	// Wait for completion
+	maxWait := 30 * time.Second
+	startTime := time.Now()
+	for time.Since(startTime) < maxWait {
+		resp, err := http.Get(httpAddr + "/api/v1/workflows/" + workflowID + "/status?run_id=" + runID)
+		if err != nil {
+			time.Sleep(200 * time.Millisecond)
+			continue
+		}
+		if resp.StatusCode == http.StatusOK {
+			var status struct {
+				Status         string `json:"status"`
+				CompletedTasks int    `json:"completed_tasks"`
+				PendingTasks   int    `json:"pending_tasks"`
+				RunningTasks   int    `json:"running_tasks"`
+			}
+			if err := json.NewDecoder(resp.Body).Decode(&status); err == nil {
+				resp.Body.Close()
+				if status.Status == "SUCCEEDED" || status.Status == "COMPLETED" {
+					if status.CompletedTasks != 2 {
+						t.Fatalf("expected 2 completed tasks, got %d", status.CompletedTasks)
+					}
+					break
+				}
+				if status.Status == "FAILED" {
+					t.Fatalf("workflow failed")
+				}
+			} else {
+				resp.Body.Close()
+			}
+		} else {
+			resp.Body.Close()
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+
+	if time.Since(startTime) >= maxWait {
+		t.Fatalf("workflow did not complete in time")
+	}
+
+	// Validate parameter resolution reached second task
+	if len(receivedBody) == 0 {
+		t.Fatalf("second task did not hit test server")
+	}
+	var got map[string]interface{}
+	if err := json.Unmarshal(receivedBody, &got); err != nil {
+		t.Fatalf("failed to parse second task body: %v", err)
+	}
+	if got["fromPrev"] != "hello" || got["fromInput"] != "world" {
+		t.Fatalf("unexpected body values: %+v", got)
+	}
 }
