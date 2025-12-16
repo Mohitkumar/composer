@@ -2,11 +2,16 @@
  * gRPC server setup and request handling
  */
 
-const grpc = require('@grpc/grpc-js');
-const protoLoader = require('@grpc/proto-loader');
-const path = require('path');
-const { executeCode, parseInput, serializeOutput, formatError } = require('./executor');
-const { DEFAULT_PORT } = require('./config');
+import grpc from '@grpc/grpc-js';
+import protoLoader from '@grpc/proto-loader';
+import path from 'path';
+import { fileURLToPath } from 'url';
+import { existsSync } from 'fs';
+import { executeCode, parseInput, serializeOutput, formatError } from './executor.js';
+import { DEFAULT_PORT } from './config.js';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 /**
  * Load protobuf definitions
@@ -15,7 +20,7 @@ const { DEFAULT_PORT } = require('./config');
 function loadProto() {
   // Load proto file - try multiple paths
   let protoPath = path.join(__dirname, '../../pkg/api/proto/workflow_executor.proto');
-  if (!require('fs').existsSync(protoPath)) {
+  if (!existsSync(protoPath)) {
     // Try alternative path (for Docker)
     protoPath = path.join(__dirname, './proto/workflow_executor.proto');
   }
@@ -126,7 +131,7 @@ function startServer(port) {
   return server;
 }
 
-module.exports = {
+export {
   startServer,
   Execute
 };

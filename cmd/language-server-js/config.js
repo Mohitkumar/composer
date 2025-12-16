@@ -14,7 +14,7 @@ const MAX_CODE_SIZE = 1024 * 1024;
 // Default server port
 const DEFAULT_PORT = '50052';
 
-module.exports = {
+export {
   DEFAULT_TIMEOUT_MS,
   DEFAULT_MEMORY_LIMIT_MB,
   MAX_CODE_SIZE,

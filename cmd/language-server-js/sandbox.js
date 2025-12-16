@@ -2,7 +2,7 @@
  * Secure sandbox creation and management for JavaScript code execution
  */
 
-const { VM } = require('vm2');
+import { VM } from 'vm2';
 
 /**
  * Create a secure VM sandbox for executing user code
@@ -68,7 +68,7 @@ function createSandbox(timeoutMs, input) {
   });
 }
 
-module.exports = {
+export {
   createSandbox
 };
 

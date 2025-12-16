@@ -12,8 +12,8 @@
  *   PORT - gRPC server port (default: 50052)
  */
 
-const { startServer } = require('./server');
-const { DEFAULT_PORT } = require('./config');
+import { startServer } from './server.js';
+import { DEFAULT_PORT } from './config.js';
 
 // Handle graceful shutdown
 process.on('SIGINT', () => {

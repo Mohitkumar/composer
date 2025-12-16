@@ -1,57 +1,116 @@
 {
-    "workflow_id": "order-fulfillment",
-    "name": "Order Fulfillment Pipeline",
-    "description": "Fetch order details, enrich them with business logic, and persist a summary report",
+    "workflow_id": "aramex_abel",
+    "name": "Aramex Create consignment label",
+    "description": "Create a consignment label for an order",
     "version": 1,
-    "created_by":"mohit",
+    "created_by": "mohit",
     "spec": {
         "nodes": [
             {
-                "node_id": "fetch_order",
-                "name": "Fetch Order",
+                "node_id": "get_job",
+                "name": "Get Job Details",
                 "type": "TASK",
                 "runtime": "http",
                 "spec": {
-                    "url": "https://api.example.com/orders/{{workflow_run_id}}",
+                    "url": "https://portal-api-dev.freightexchange.com.au/portal/internal/job/{{input.job_id}}",
                     "method": "GET",
                     "headers": {
-                        "Authorization": "Bearer ${ORDER_SERVICE_TOKEN}"
+                        "securityToken": "thd74858@*ui87#",
+                        "Content-Type": "application/json"
                     },
-                    "timeout_seconds": 20
+                    "timeout_seconds": 30
                 }
             },
             {
-                "node_id": "enrich_order",
-                "name": "Enrich Order",
+                "node_id": "get_auth_token",
+                "name": "Get Auth Token",
                 "type": "TASK",
-                "runtime": "python",
+                "runtime": "http",
                 "spec": {
-                    "filename": "enrich_order.py",
-                    "timeout": 30,
-                    "code": "import json\n\n# The worker passes the previous node output in `input`\ndef handler(input):\n    order = json.loads(input) if isinstance(input, str) else input\n    items = order.get('items', [])\n    total_amount = sum(item.get('price', 0) * item.get('quantity', 1) for item in items)\n    return {\n        'order_id': order.get('order_id'),\n        'customer_id': order.get('customer_id'),\n        'items': items,\n        'total_amount': total_amount,\n        'item_count': len(items)\n    }\n"
+                    "url": "{{config.aramex_access_token_url}}",
+                    "method": "POST",
+                    "headers": {
+                        "Content-Type": "application/x-www-form-urlencoded"
+                    },
+                    "body": "grant_type=client_credentials&client_id={{config.aramex_client_id}}&client_secret={{config.aramex_client_secret}}&scope={{config.aramex_scope}}",
+                    "timeout_seconds": 30
                 }
             },
             {
-                "node_id": "persist_summary",
-                "name": "Persist Summary",
+                "node_id": "map_job_to_consignment_request",
+                "name": "Map Job to Consignment Request",
                 "type": "TASK",
-                "runtime": "s3",
+                "runtime": "javascript",
                 "spec": {
-                    "operation": "upload",
-                    "bucket": "composer-demo-order-summaries",
-                    "key": "summaries/{{workflow_run_id}}.json",
-                    "region": "us-east-1"
+                    "input": "{{{\"job\": input.job, \"config\": config}}}",
+                    "code": "function handler(input) {\n    const data = typeof input === 'string' ? JSON.parse(input) : input;\n    const job = data.job || input.job;\n    const config = data.config || input.config || {};\n    \n    let output = {\n        conTypeId: config.conTypeId || null,\n        ExternalRef1: job.shipperReference1,\n        ExternalRef2: job.shipperReference2,\n        From: {\n            BusinessName: job.origin.companyName,\n            ContactName: job.origin.contact.contactName,\n            PhoneNumber: job.origin.contact.phoneRaw,\n            Email: job.origin.contact.email,\n            Address: {\n                StreetAddress: job.origin.address1,\n                AdditionalDetails: job.origin.address2,\n                Locality: job.origin.city,\n                StateOrProvince: job.origin.state,\n                PostalCode: job.origin.postCode,\n                Country: job.origin.countryCode\n            }\n        },\n        To: {\n            BusinessName: job.destination.companyName,\n            ContactName: job.destination.contact.contactName,\n            PhoneNumber: job.destination.contact.phoneRaw,\n            Email: job.destination.contact.email,\n            Address: {\n                StreetAddress: job.destination.address1,\n                AdditionalDetails: job.destination.address2,\n                Locality: job.destination.city,\n                StateOrProvince: job.destination.state,\n                PostalCode: job.destination.postCode,\n                Country: job.destination.countryCode\n            }\n        },\n        pickupTypeId: 2,\n        Items: []\n    };\n\n    if (job.origin.countryCode == \"NZ\" && job.destination.countryCode == \"NZ\") {\n        let pickupInstructions = \"PICKUP: \" + (job.pickupInstructions != null ? job.pickupInstructions : \"\");\n        if (job.depotDropOff) {\n            pickupInstructions += \" DEPOT DROP OFF\";\n        }\n        if (job.origin.tailLift) {\n            pickupInstructions += \" TAIL LIFT REQUIRED\";\n        }\n\n        let deliveryInstructions = \"DELIVER: \" + (job.deliveryInstructions != null ? job.deliveryInstructions : \"\");\n        if (job.depotCollection) {\n            deliveryInstructions += \" DEPOT COLLECT\";\n        }\n        if (job.destination.tailLift) {\n            deliveryInstructions += \" TAIL LIFT REQUIRED\";\n        }\n        output.InstructionsPublic = pickupInstructions + \" \" + deliveryInstructions;\n    } else {\n        output.InstructionsPublic = job.pickupAndtailLiftInstructions + \" \" + job.deliveryAndtailInstructions;\n    }\n    if (job.atl) {\n        output.Services = [];\n        output.Services.push({ServiceCode: 'DELOPT', ServiceItemCode: 'ATL'});\n    } else {\n        output.Services = [];\n        output.Services.push({ServiceCode: 'DELOPT', ServiceItemCode: 'SGR'});\n    }\n    if (job.customFields != null && job.customFields.agentId != null) {\n        output.To.AgentId = job.customFields.agentId;\n    }\n    for (let item of job.items.items) {\n        let itm = {\n            Quantity: item.quantity,\n            WeightDead: item.weightKG,\n            WeightCubic: item.itemVolumeM3,\n            Length: item.lengthCM,\n            Width: item.widthCM,\n            Height: item.heightCM,\n            reference: item.id.toString()\n        };\n        let itemReference = item.references != null && item.references.length > 0 ? item.references[0].value : null;\n        if (itemReference != null) {\n            itm.reference = itemReference + \"|\" + item.id.toString();\n        }\n        itm.PackageType = 'P';\n        output.Items.push(itm);\n    }\n    if (job.customFields != null && job.customFields.trackingnumber != null) {\n        output.Items[0].label = job.customFields.trackingnumber;\n    } else if (job.customFields != null && job.customFields.trackingNumber != null) {\n        output.Items[0].label = job.customFields.trackingNumber;\n    }\n    if (config.ServiceItemCode != null) {\n        output.Services[0].ServiceItemCode = config.ServiceItemCode;\n    }\n    \n    return output;\n}",
+                    "filename": "map_job_to_consignment.js",
+                    "timeout": 60
+                }
+            },
+            {
+                "node_id": "send_consignment",
+                "name": "Send Consignment",
+                "type": "TASK",
+                "runtime": "http",
+                "spec": {
+                    "url": "{{carrierAliasProperties.carrierDetailsJson.otherDetails.aramexBaseUrl}}/api/consignments",
+                    "method": "POST",
+                    "headers": {
+                        "Content-Type": "application/json",
+                        "Authorization": "Bearer {{tasks.get_auth_token.output.access_token}}"
+                    },
+                    "body": "{{tasks.map_job_to_consignment_request.output}}",
+                    "timeout_seconds": 60
+                }
+            },
+            {
+                "node_id": "parse_send_consignment_response",
+                "name": "Parse Send Consignment Response",
+                "type": "TASK",
+                "runtime": "javascript",
+                "spec": {
+                    "code": "function handler(input) {\n    const data = typeof input === 'string' ? JSON.parse(input) : input;\n    const job = data.job || input.job;\n    const response = data.response || tasks.send_consignment.output.data || input.response;\n    \n    let output = [];\n    let itemIndex = 0;\n    let responseMap = response.items.reduce((acc, current) => {\n        let itemId = current.reference;\n        if (current.reference.includes(\"|\")) {\n            itemId = current.reference.split(\"|\")[1];\n        }\n        if (!acc[itemId]) {\n            acc[itemId] = [];\n        }\n        acc[itemId].push(current);\n        return acc;\n    }, {});\n    for (let item of job.items.items) {\n        let itemId = item.id;\n        for (let i = 0; i < item.quantity; i++) {\n            let out = {};\n            let responseObj = responseMap[itemId];\n            out.itemId = itemId;\n            out.itemNumber = responseObj[i].conItemId;\n            out.labelNumber = responseObj[i].label;\n            output.push(out);\n        }\n    }\n    return output;\n}",
+                    "filename": "parse_response.js",
+                    "timeout": 30
+                }
+            },
+            {
+                "node_id": "download_label",
+                "name": "Download Label",
+                "type": "TASK",
+                "runtime": "http",
+                "spec": {
+                    "url": "{{carrierAliasProperties.carrierDetailsJson.otherDetails.aramexBaseUrl}}/api/consignments/{{tasks.send_consignment.output.data.conId}}/labels?pageSize=4x6",
+                    "method": "GET",
+                    "headers": {
+                        "Content-Type": "application/json",
+                        "Authorization": "Bearer {{tasks.get_auth_token.output.access_token}}"
+                    },
+                    "timeout_seconds": 60
                 }
             }
         ],
         "edges": [
             {
-                "from": "fetch_order",
-                "to": "enrich_order"
+                "from": "get_job",
+                "to": "get_auth_token"
             },
             {
-                "from": "enrich_order",
-                "to": "persist_summary"
+                "from": "get_auth_token",
+                "to": "map_job_to_consignment_request"
+            },
+            {
+                "from": "map_job_to_consignment_request",
+                "to": "send_consignment"
+            },
+            {
+                "from": "send_consignment",
+                "to": "parse_send_consignment_response"
+            },
+            {
+                "from": "parse_send_consignment_response",
+                "to": "download_label"
             }
         ]
     }

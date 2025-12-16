@@ -2,8 +2,8 @@
  * Code execution logic for JavaScript language server
  */
 
-const { createSandbox } = require('./sandbox');
-const { DEFAULT_TIMEOUT_MS, MAX_CODE_SIZE } = require('./config');
+import { createSandbox } from './sandbox.js';
+import { DEFAULT_TIMEOUT_MS, MAX_CODE_SIZE } from './config.js';
 
 /**
  * Wrap user code with handler validation and execution
@@ -115,7 +115,7 @@ function formatError(error, timeoutSeconds) {
   return errorMsg;
 }
 
-module.exports = {
+export {
   executeCode,
   parseInput,
   serializeOutput,

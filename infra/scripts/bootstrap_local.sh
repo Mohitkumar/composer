@@ -157,7 +157,7 @@ COORDINATOR_ADDR="localhost:${COORDINATOR_GRPC_PORT}"
 cleanup() {
     echo -e "\n${YELLOW}Shutting down services...${NC}"
     jobs -p | xargs -r kill 2>/dev/null || true
-    wait
+    wait 2>/dev/null || true
     echo -e "${GREEN}✓ Services stopped${NC}"
 }
 
@@ -206,21 +206,49 @@ echo -e "${GREEN}✓ Go Worker started (PID: $WORKER_PID)${NC}"
 # Start JavaScript Worker (if available)
 if [ "$SKIP_JS_WORKER" = false ]; then
     echo -e "${BLUE}Starting JavaScript Worker...${NC}"
-    cd "$PROJECT_ROOT/cmd/language-server-js"
-    PORT="$WORKER_JS_PORT" npm start > "$PROJECT_ROOT/logs/language-server-js.log" 2>&1 &
+    # Check if port is already in use
+    if command -v lsof &> /dev/null; then
+        EXISTING_PID=$(lsof -ti :"$WORKER_JS_PORT" 2>/dev/null || true)
+        if [ -n "$EXISTING_PID" ]; then
+            echo -e "${YELLOW}Port $WORKER_JS_PORT is already in use (PID: $EXISTING_PID), killing existing process...${NC}"
+            kill "$EXISTING_PID" 2>/dev/null || true
+            sleep 1
+        fi
+    fi
+    cd "$PROJECT_ROOT/cmd/language-server-js" || exit 1
+    (PORT="$WORKER_JS_PORT" npm start > "$PROJECT_ROOT/logs/language-server-js.log" 2>&1) &
     WORKER_JS_PID=$!
-    echo -e "${GREEN}✓ JavaScript Worker started (PID: $WORKER_JS_PID)${NC}"
-    cd "$PROJECT_ROOT"
+    sleep 1  # Give it a moment to start
+    if ! kill -0 "$WORKER_JS_PID" 2>/dev/null; then
+        echo -e "${YELLOW}⚠ JavaScript Worker may have failed to start, check logs${NC}"
+    else
+        echo -e "${GREEN}✓ JavaScript Worker started (PID: $WORKER_JS_PID)${NC}"
+    fi
+    cd "$PROJECT_ROOT" || exit 1
 fi
 
 # Start Python Worker (if available)
 if [ "$SKIP_PY_WORKER" = false ]; then
     echo -e "${BLUE}Starting Python Worker...${NC}"
-    cd "$PROJECT_ROOT/cmd/language-server-py"
-    PORT="$WORKER_PY_PORT" uv run python main.py > "$PROJECT_ROOT/logs/language-server-py.log" 2>&1 &
+    # Check if port is already in use
+    if command -v lsof &> /dev/null; then
+        EXISTING_PID=$(lsof -ti :"$WORKER_PY_PORT" 2>/dev/null || true)
+        if [ -n "$EXISTING_PID" ]; then
+            echo -e "${YELLOW}Port $WORKER_PY_PORT is already in use (PID: $EXISTING_PID), killing existing process...${NC}"
+            kill "$EXISTING_PID" 2>/dev/null || true
+            sleep 1
+        fi
+    fi
+    cd "$PROJECT_ROOT/cmd/language-server-py" || exit 1
+    (PORT="$WORKER_PY_PORT" uv run python main.py > "$PROJECT_ROOT/logs/language-server-py.log" 2>&1) &
     WORKER_PY_PID=$!
-    echo -e "${GREEN}✓ Python Worker started (PID: $WORKER_PY_PID)${NC}"
-    cd "$PROJECT_ROOT"
+    sleep 1  # Give it a moment to start
+    if ! kill -0 "$WORKER_PY_PID" 2>/dev/null; then
+        echo -e "${YELLOW}⚠ Python Worker may have failed to start, check logs${NC}"
+    else
+        echo -e "${GREEN}✓ Python Worker started (PID: $WORKER_PY_PID)${NC}"
+    fi
+    cd "$PROJECT_ROOT" || exit 1
 fi
 
 # Display status
@@ -252,6 +280,6 @@ echo -e "Stop all services:      ${YELLOW}Press Ctrl+C${NC}"
 echo -e "\n${GREEN}✓ Local development environment is ready!${NC}"
 echo -e "${YELLOW}Press Ctrl+C to stop all services${NC}\n"
 
-# Wait for all background jobs
-wait
+# Wait for all background jobs (ignore errors from background processes)
+wait || true
 
