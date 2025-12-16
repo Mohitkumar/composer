@@ -45,6 +45,9 @@ func setupFlags(cmd *cobra.Command) {
 	cmd.Flags().Int("api.http_port", 8080, "HTTP API port")
 	cmd.Flags().Int("api.grpc_port", 50051, "gRPC API port")
 
+	// Observability flags
+	cmd.Flags().Bool("disable-observability", false, "Disable metrics and traces export (useful for local development)")
+
 	// Config file flag
 	cmd.Flags().String("config", "", "Config file path (default: ./config.yaml)")
 
@@ -104,6 +107,7 @@ func generateConfig() *coord.Config {
 			HTTPPort: viper.GetInt("api.http_port"),
 			GRPCPort: viper.GetInt("api.grpc_port"),
 		},
+		DisableObservability: viper.GetBool("disable-observability"),
 	}
 
 	// Set defaults if not provided

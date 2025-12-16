@@ -19,7 +19,15 @@ import (
 
 // InitOpenTelemetry initializes the OpenTelemetry SDK with OTLP exporter
 // This should be called once at application startup
-func InitOpenTelemetry(ctx context.Context, serviceName, serviceVersion string) (func() error, error) {
+// If disableObservability is true, it returns a no-op shutdown function and skips initialization
+func InitOpenTelemetry(ctx context.Context, serviceName, serviceVersion string, disableObservability bool) (func() error, error) {
+	// If observability is disabled, return a no-op shutdown function
+	if disableObservability {
+		return func() error {
+			return nil
+		}, nil
+	}
+
 	// Get OTLP endpoint from environment or use default
 	otlpEndpoint := os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT")
 	if otlpEndpoint == "" {

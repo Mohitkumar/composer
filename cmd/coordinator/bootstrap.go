@@ -28,19 +28,24 @@ func NewBootstrap(config *coord.Config) (*Bootstrap, error) {
 
 	// Initialize OpenTelemetry SDK
 	ctx := context.Background()
-	shutdown, err := util.InitOpenTelemetry(ctx, "composer-coordinator", "1.0.0")
+	shutdown, err := util.InitOpenTelemetry(ctx, "composer-coordinator", "1.0.0", config.DisableObservability)
 	if err != nil {
 		logger.Error().Err(err).Msg("failed to initialize OpenTelemetry")
 		return nil, fmt.Errorf("failed to initialize OpenTelemetry: %w", err)
 	}
-	logger.Info().Msg("initialized OpenTelemetry SDK")
 
-	// Initialize OpenTelemetry metrics
-	if err := util.InitMetrics(); err != nil {
-		logger.Error().Err(err).Msg("failed to initialize metrics")
-		return nil, fmt.Errorf("failed to initialize metrics: %w", err)
+	if config.DisableObservability {
+		logger.Info().Msg("observability (metrics and traces) is disabled")
+	} else {
+		logger.Info().Msg("initialized OpenTelemetry SDK")
+
+		// Initialize OpenTelemetry metrics
+		if err := util.InitMetrics(); err != nil {
+			logger.Error().Err(err).Msg("failed to initialize metrics")
+			return nil, fmt.Errorf("failed to initialize metrics: %w", err)
+		}
+		logger.Info().Msg("initialized OpenTelemetry metrics")
 	}
-	logger.Info().Msg("initialized OpenTelemetry metrics")
 
 	// Create coordinator
 	coordinator, err := coord.NewCoordinator(config, logger)

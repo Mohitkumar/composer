@@ -175,6 +175,7 @@ COMPOSER_LOG_LEVEL=info \
     --redis.addrs="$REDIS_ADDR" \
     --api.http_port="$COORDINATOR_HTTP_PORT" \
     --api.grpc_port="$COORDINATOR_GRPC_PORT" \
+    --disable-observability \
     > "$PROJECT_ROOT/logs/coordinator.log" 2>&1 &
 COORDINATOR_PID=$!
 echo -e "${GREEN}✓ Coordinator started (PID: $COORDINATOR_PID)${NC}"
