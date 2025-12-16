@@ -4,11 +4,12 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/mohitkumar/composer/pkg/api"
 	"github.com/mohitkumar/composer/pkg/coord"
+	"github.com/mohitkumar/composer/pkg/db"
 	"github.com/mohitkumar/composer/pkg/redisq"
-	"github.com/mohitkumar/composer/pkg/store"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
@@ -90,13 +91,14 @@ func generateConfig() *coord.Config {
 			Password: viper.GetString("redis.password"),
 			DB:       viper.GetInt("redis.db"),
 		},
-		StoreConfig: store.StoreConfig{
-			URL:             viper.GetString("store.url"),
-			MaxConns:        viper.GetInt("store.max-conns"),
-			MaxIdleConns:    viper.GetInt("store.max-idle-conns"),
-			MaxConnLifetime: viper.GetInt("store.max-conn-lifetime"),
-			MaxConnIdleTime: viper.GetInt("store.max-conn-idle-time"),
-			MaxConnTimeout:  viper.GetInt("store.max-conn-timeout"),
+		DBConfig: db.Config{
+			URL:                   viper.GetString("store.url"),
+			MaxConns:              viper.GetInt("store.max-conns"),
+			MaxIdleConns:          viper.GetInt("store.max-idle-conns"),
+			MaxConnLifetime:       time.Duration(viper.GetInt("store.max-conn-lifetime")) * time.Second,
+			MaxConnIdleTime:       time.Duration(viper.GetInt("store.max-conn-idle-time")) * time.Second,
+			MaxConnTimeout:        time.Duration(viper.GetInt("store.max-conn-timeout")) * time.Second,
+			MaxConnReleaseTimeout: time.Duration(viper.GetInt("store.max-conn-release-timeout")) * time.Second,
 		},
 		APIConfig: api.APIConfig{
 			HTTPPort: viper.GetInt("api.http_port"),
@@ -111,8 +113,8 @@ func generateConfig() *coord.Config {
 	if config.APIConfig.GRPCPort == 0 {
 		config.APIConfig.GRPCPort = 50051
 	}
-	if config.StoreConfig.URL == "" {
-		config.StoreConfig.URL = "postgres://postgres:password@localhost:5432/composer?sslmode=disable"
+	if config.DBConfig.URL == "" {
+		config.DBConfig.URL = "postgres://postgres:password@localhost:5432/composer?sslmode=disable"
 	}
 
 	return config

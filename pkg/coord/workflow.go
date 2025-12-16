@@ -28,7 +28,7 @@ func (c *Coordinator) RegisterWorkflow(ctx context.Context, p *model.RegisterWor
 
 	logger.Info().Msg("registering workflow definition")
 
-	tx, err := c.Store.DB().Begin(ctx)
+	tx, err := c.DB.Begin(ctx)
 	if err != nil {
 		logger.Error().Err(err).Msg("failed to begin transaction")
 		util.RecordError(span, err)
@@ -66,7 +66,7 @@ func (c *Coordinator) GetWorkflow(ctx context.Context, workflowID string, versio
 		query += ` ORDER BY version DESC LIMIT 1`
 	}
 
-	err := c.Store.DB().QueryRow(ctx, query, args...).Scan(
+	err := c.DB.QueryRow(ctx, query, args...).Scan(
 		&wf.ID, &wf.Name, &wf.Version, &wf.Spec, &wf.CreatedBy, &wf.Enabled, &webhookURL, &wf.CreatedAt)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -94,7 +94,7 @@ func (c *Coordinator) ListWorkflows(ctx context.Context, enabledOnly bool) ([]mo
 
 	query += ` ORDER BY id, version DESC`
 
-	rows, err := c.Store.DB().Query(ctx, query, args...)
+	rows, err := c.DB.Query(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -124,7 +124,7 @@ func (c *Coordinator) ListWorkflows(ctx context.Context, enabledOnly bool) ([]mo
 // The spec cannot be updated; create a new version instead.
 func (c *Coordinator) UpdateWorkflow(ctx context.Context, workflowID string, version int,
 	name *string, enabled *bool, webhookURL *string) error {
-	tx, err := c.Store.DB().Begin(ctx)
+	tx, err := c.DB.Begin(ctx)
 	if err != nil {
 		return err
 	}
@@ -181,7 +181,7 @@ func (c *Coordinator) UpdateWorkflow(ctx context.Context, workflowID string, ver
 // DeleteWorkflow disables a workflow definition (soft delete).
 // Set hardDelete to true to actually delete the workflow.
 func (c *Coordinator) DeleteWorkflow(ctx context.Context, workflowID string, version int, hardDelete bool) error {
-	tx, err := c.Store.DB().Begin(ctx)
+	tx, err := c.DB.Begin(ctx)
 	if err != nil {
 		return err
 	}
@@ -206,7 +206,7 @@ func (c *Coordinator) DeleteWorkflow(ctx context.Context, workflowID string, ver
 func (c *Coordinator) GetWorkflowInstance(ctx context.Context, instanceID string) (*model.WorkflowInstanceRecord, error) {
 	var inst model.WorkflowInstanceRecord
 
-	err := c.Store.DB().QueryRow(ctx,
+	err := c.DB.QueryRow(ctx,
 		`SELECT id, workflow_definition_id, workflow_version, status, input_json, created_at, updated_at 
 		 FROM workflow_runs WHERE id = $1`,
 		instanceID).Scan(
@@ -255,7 +255,7 @@ func (c *Coordinator) ListWorkflowInstances(ctx context.Context, workflowID *str
 		}
 	}
 
-	rows, err := c.Store.DB().Query(ctx, query, args...)
+	rows, err := c.DB.Query(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -279,7 +279,7 @@ func (c *Coordinator) GetWorkflowInstanceStatus(ctx context.Context, instanceID 
 	var status model.WorkflowInstanceStatusResponse
 
 	// Get instance basic info
-	err := c.Store.DB().QueryRow(ctx,
+	err := c.DB.QueryRow(ctx,
 		`SELECT id, status, created_at, updated_at FROM workflow_runs WHERE id = $1`,
 		instanceID).Scan(&status.ID, &status.Status, &status.CreatedAt, &status.UpdatedAt)
 
@@ -291,7 +291,7 @@ func (c *Coordinator) GetWorkflowInstanceStatus(ctx context.Context, instanceID 
 	}
 
 	// Get task counts
-	err = c.Store.DB().QueryRow(ctx,
+	err = c.DB.QueryRow(ctx,
 		`SELECT 
 			COUNT(*) as total,
 			COUNT(*) FILTER (WHERE state IN ('PENDING', 'QUEUED')) as pending,
@@ -312,7 +312,7 @@ func (c *Coordinator) GetWorkflowInstanceStatus(ctx context.Context, instanceID 
 
 // CancelWorkflowInstance cancels a running workflow instance by setting its status to FAILED.
 func (c *Coordinator) CancelWorkflowInstance(ctx context.Context, instanceID string, reason string) error {
-	tx, err := c.Store.DB().Begin(ctx)
+	tx, err := c.DB.Begin(ctx)
 	if err != nil {
 		return err
 	}

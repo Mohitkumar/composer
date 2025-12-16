@@ -6,7 +6,6 @@ import (
 
 	workflowpb "github.com/mohitkumar/composer/pkg/api/proto/gen/go/workflow"
 	"github.com/mohitkumar/composer/pkg/coord"
-	"github.com/mohitkumar/composer/pkg/store"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -91,7 +90,7 @@ func (s *WorkflowService) AcquireTaskLease(ctx context.Context, req *workflowpb.
 		ttl = 90 * time.Second
 	}
 
-	acquired, err := store.AcquireTaskLease(ctx, s.coordinator.Store.DB(), req.GetTaskId(), req.GetOwner(), ttl)
+	acquired, err := s.coordinator.LeaseManager.AcquireTaskLease(ctx, req.GetTaskId(), req.GetOwner(), ttl)
 	if err != nil {
 		return nil, status.Error(codes.Internal, err.Error())
 	}

@@ -8,9 +8,9 @@ import (
 	"time"
 
 	"github.com/mohitkumar/composer/pkg/coord"
+	"github.com/mohitkumar/composer/pkg/db"
 	"github.com/mohitkumar/composer/pkg/model"
 	"github.com/mohitkumar/composer/pkg/redisq"
-	"github.com/mohitkumar/composer/pkg/store"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -36,7 +36,7 @@ func TestIntegrationWorkflowExecution(t *testing.T) {
 
 	// Create coordinator
 	coordConfig := &coord.Config{
-		StoreConfig: store.StoreConfig{URL: infra.DBURL},
+		DBConfig:    db.Config{URL: infra.DBURL},
 		RedisConfig: redisq.RedisConfig{Addrs: []string{infra.RedisAddr}},
 	}
 	coordinator, err := coord.NewCoordinator(coordConfig, &infra.Logger)

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/mohitkumar/composer/pkg/db"
 	"github.com/mohitkumar/composer/pkg/redisq"
 	"github.com/redis/go-redis/v9"
 	"github.com/rs/zerolog"
@@ -24,7 +25,8 @@ import (
 type TestInfra struct {
 	PostgresContainer testcontainers.Container
 	RedisContainer    testcontainers.Container
-	DBPool            *pgxpool.Pool
+	DBPool            db.DB
+	DBPoolRaw         *pgxpool.Pool // For direct access when needed
 	RedisClient       *redis.Client
 	RedisStream       *redisq.RedisStream
 	DBURL             string
@@ -82,14 +84,24 @@ func SetupTestInfra(ctx context.Context, t *testing.T) *TestInfra {
 
 	// Create database pool
 	t.Log("Connecting to PostgreSQL...")
-	pool, err := pgxpool.New(ctx, dbURL)
+	poolRaw, err := pgxpool.New(ctx, dbURL)
 	if err != nil {
 		t.Fatalf("Failed to connect to database: %v", err)
 	}
 
+	// Wrap in db.Pool for interface compatibility
+	dbConfig := &db.Config{URL: dbURL}
+	dbPool, err := db.NewPool(ctx, dbConfig, logger)
+	if err != nil {
+		poolRaw.Close()
+		t.Fatalf("Failed to create db pool: %v", err)
+	}
+
 	// Run migrations
 	t.Log("Running database migrations...")
-	if err := runMigrations(ctx, pool); err != nil {
+	if err := runMigrations(ctx, poolRaw); err != nil {
+		poolRaw.Close()
+		dbPool.Close()
 		t.Fatalf("Failed to run migrations: %v", err)
 	}
 
@@ -120,7 +132,8 @@ func SetupTestInfra(ctx context.Context, t *testing.T) *TestInfra {
 	return &TestInfra{
 		PostgresContainer: pgContainer,
 		RedisContainer:    redisContainer,
-		DBPool:            pool,
+		DBPool:            dbPool,
+		DBPoolRaw:         poolRaw,
 		RedisClient:       redisClient,
 		RedisStream:       redisStream,
 		DBURL:             dbURL,

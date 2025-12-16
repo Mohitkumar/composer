@@ -15,10 +15,10 @@ import (
 	grpcapi "github.com/mohitkumar/composer/pkg/api/grpc"
 	httpapi "github.com/mohitkumar/composer/pkg/api/http"
 	"github.com/mohitkumar/composer/pkg/coord"
+	"github.com/mohitkumar/composer/pkg/db"
 	"github.com/mohitkumar/composer/pkg/model"
 	"github.com/mohitkumar/composer/pkg/outbox"
 	"github.com/mohitkumar/composer/pkg/redisq"
-	"github.com/mohitkumar/composer/pkg/store"
 	"github.com/mohitkumar/composer/worker"
 	"github.com/rs/zerolog"
 )
@@ -49,7 +49,7 @@ func TestEndToEndWorkflowExecution(t *testing.T) {
 	// Setup coordinator
 	coordLogger := zerolog.New(infra.Logger).With().Str("component", "coordinator").Logger()
 	coordConfig := &coord.Config{
-		StoreConfig: store.StoreConfig{URL: infra.DBURL},
+		DBConfig: db.Config{URL: infra.DBURL},
 		RedisConfig: redisq.RedisConfig{Addrs: []string{infra.RedisAddr}},
 	}
 	coordinator, err := coord.NewCoordinator(coordConfig, &coordLogger)
@@ -310,7 +310,7 @@ func TestEndToEndParameterResolutionAndLease(t *testing.T) {
 
 	coordLogger := zerolog.New(infra.Logger).With().Str("component", "coordinator").Logger()
 	coordConfig := &coord.Config{
-		StoreConfig: store.StoreConfig{URL: infra.DBURL},
+		DBConfig: db.Config{URL: infra.DBURL},
 		RedisConfig: redisq.RedisConfig{Addrs: []string{infra.RedisAddr}},
 	}
 	coordinator, err := coord.NewCoordinator(coordConfig, &coordLogger)

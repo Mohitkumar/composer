@@ -112,7 +112,7 @@ func (c *Coordinator) HandleNodeCompleted(ctx context.Context, taskID string, ru
 	// Get workflow run info to load workflow definition (before transaction)
 	var workflowID string
 	var workflowVersion int
-	err := c.Store.DB().QueryRow(ctx, `SELECT workflow_definition_id, workflow_version FROM workflow_runs WHERE id=$1`, runID).
+	err := c.DB.QueryRow(ctx, `SELECT workflow_definition_id, workflow_version FROM workflow_runs WHERE id=$1`, runID).
 		Scan(&workflowID, &workflowVersion)
 	if err != nil {
 		c.Logger.Error().Err(err).Str("run_id", runID).Msg("failed to get workflow run")
@@ -508,7 +508,7 @@ func (c *Coordinator) HandleNodeFailed(ctx context.Context, runID string, nodeID
 	// Get workflow info for logging
 	var workflowID string
 	var workflowVersion int
-	_ = c.Store.DB().QueryRow(ctx, `SELECT workflow_definition_id, workflow_version FROM workflow_runs WHERE id=$1`, runID).
+	_ = c.DB.QueryRow(ctx, `SELECT workflow_definition_id, workflow_version FROM workflow_runs WHERE id=$1`, runID).
 		Scan(&workflowID, &workflowVersion)
 
 	// Start tracing span
@@ -592,7 +592,7 @@ func (c *Coordinator) HandleNodeFailed(ctx context.Context, runID string, nodeID
 		if pending == 0 {
 			// Get workflow start time for duration calculation
 			var workflowStartTime time.Time
-			_ = c.Store.DB().QueryRow(ctx, `SELECT created_at FROM workflow_runs WHERE id=$1`, runID).Scan(&workflowStartTime)
+			_ = c.DB.QueryRow(ctx, `SELECT created_at FROM workflow_runs WHERE id=$1`, runID).Scan(&workflowStartTime)
 			workflowDuration := time.Since(workflowStartTime)
 
 			_, err = tx.Exec(ctx,
@@ -634,7 +634,7 @@ func (c *Coordinator) HandleNodeFailed(ctx context.Context, runID string, nodeID
 
 // ExecuteWithTransaction executes a function within a transaction
 func (c *Coordinator) ExecuteWithTransaction(ctx context.Context, span trace.Span, logger zerolog.Logger, fn func(ctx context.Context, tx pgx.Tx) error) error {
-	tx, err := c.Store.DB().Begin(ctx)
+	tx, err := c.DB.Begin(ctx)
 	if err != nil {
 		logger.Error().Err(err).Msg("failed to begin transaction")
 		util.RecordError(span, err)

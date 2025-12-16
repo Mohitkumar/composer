@@ -1,4 +1,4 @@
-package store
+package lease
 
 import (
 	"context"
@@ -6,13 +6,23 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/mohitkumar/composer/pkg/db"
 )
+
+// Manager handles task lease operations
+type Manager struct {
+	db db.DB
+}
+
+// NewManager creates a new lease manager
+func NewManager(db db.DB) *Manager {
+	return &Manager{db: db}
+}
 
 // AcquireTaskLease attempts to atomically move task state to RUNNING and set a lease owner + expiry.
 // Returns true if lease acquired.
-func AcquireTaskLease(ctx context.Context, pool *pgxpool.Pool, taskID, owner string, ttl time.Duration) (bool, error) {
-	conn, err := pool.Acquire(ctx)
+func (m *Manager) AcquireTaskLease(ctx context.Context, taskID, owner string, ttl time.Duration) (bool, error) {
+	conn, err := m.db.Acquire(ctx)
 	if err != nil {
 		return false, err
 	}
@@ -36,8 +46,8 @@ func AcquireTaskLease(ctx context.Context, pool *pgxpool.Pool, taskID, owner str
 
 // ReleaseTaskLease releases lease and optionally set state back to PENDING or leave as-is if finished externally.
 // Here we just clear the lease_owner and leave state as-is (coordinator will update on completion)
-func ReleaseTaskLease(ctx context.Context, pool *pgxpool.Pool, taskID, owner string) error {
-	conn, err := pool.Acquire(ctx)
+func (m *Manager) ReleaseTaskLease(ctx context.Context, taskID, owner string) error {
+	conn, err := m.db.Acquire(ctx)
 	if err != nil {
 		return err
 	}
