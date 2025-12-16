@@ -276,7 +276,7 @@ func (c *Coordinator) resolveNodeInputFromSpecRaw(specRaw json.RawMessage, runCo
 		}
 	}
 
-	resolvedParameters, err := c.ParameterResolver.ResolveTemplates(spec, runContext)
+	resolvedParameters, err := c.Template.ResolveTemplates(spec, runContext)
 	if err != nil {
 		logger.Error().Err(err).Msg("failed to resolve templates")
 		return nil, fmt.Errorf("failed to resolve templates: %w", err)

@@ -1,4 +1,4 @@
-package coord
+package template
 
 import (
 	"encoding/json"
@@ -12,13 +12,16 @@ import (
 	"github.com/mohitkumar/composer/pkg/model"
 )
 
-type ParameterResolver struct {
+// Resolver resolves template expressions in workflow parameters using CEL (Common Expression Language).
+// It supports expressions like {{ input.field }} or {{ tasks.task_id.output }}.
+type Resolver struct {
 	celEnv     *cel.Env
 	templateRe *regexp.Regexp
 }
 
-func NewParameterResolver() (*ParameterResolver, error) {
-	pr := &ParameterResolver{
+// NewResolver creates a new template resolver with CEL environment configured.
+func NewResolver() (*Resolver, error) {
+	r := &Resolver{
 		templateRe: regexp.MustCompile(`{{\s*([^}]+)\s*}}`),
 	}
 	env, err := cel.NewEnv(
@@ -32,18 +35,21 @@ func NewParameterResolver() (*ParameterResolver, error) {
 	if err != nil {
 		return nil, err
 	}
-	pr.celEnv = env
-	return pr, nil
+	r.celEnv = env
+	return r, nil
 }
 
-func (pr *ParameterResolver) ResolveTemplates(node interface{}, rc *model.RunContext) (interface{}, error) {
+// ResolveTemplates recursively resolves template expressions in the given node.
+// It handles strings, maps, arrays, and other types.
+// Template expressions use the format {{ expression }} where expression is a CEL expression.
+func (r *Resolver) ResolveTemplates(node interface{}, rc *model.RunContext) (interface{}, error) {
 	switch v := node.(type) {
 	case string:
-		return pr.resolveStringTemplates(v, rc)
+		return r.resolveStringTemplates(v, rc)
 	case map[string]interface{}:
 		m2 := make(map[string]interface{}, len(v))
 		for k, vv := range v {
-			res, err := pr.ResolveTemplates(vv, rc)
+			res, err := r.ResolveTemplates(vv, rc)
 			if err != nil {
 				return nil, err
 			}
@@ -53,7 +59,7 @@ func (pr *ParameterResolver) ResolveTemplates(node interface{}, rc *model.RunCon
 	case []interface{}:
 		arr := make([]interface{}, len(v))
 		for i, vv := range v {
-			res, err := pr.ResolveTemplates(vv, rc)
+			res, err := r.ResolveTemplates(vv, rc)
 			if err != nil {
 				return nil, err
 			}
@@ -65,8 +71,10 @@ func (pr *ParameterResolver) ResolveTemplates(node interface{}, rc *model.RunCon
 	}
 }
 
-func (pr *ParameterResolver) resolveStringTemplates(s string, rc *model.RunContext) (interface{}, error) {
-	matches := pr.templateRe.FindAllStringSubmatch(s, -1)
+// resolveStringTemplates resolves template expressions in a string.
+// It finds all {{ expression }} patterns and replaces them with evaluated CEL expressions.
+func (r *Resolver) resolveStringTemplates(s string, rc *model.RunContext) (interface{}, error) {
+	matches := r.templateRe.FindAllStringSubmatch(s, -1)
 	if len(matches) == 0 {
 		return s, nil
 	}
@@ -74,7 +82,7 @@ func (pr *ParameterResolver) resolveStringTemplates(s string, rc *model.RunConte
 	out := s
 	for _, m := range matches {
 		rawExpr := strings.TrimSpace(m[1])
-		val, err := pr.evalCELExpression(rawExpr, rc)
+		val, err := r.evalCELExpression(rawExpr, rc)
 		if err != nil {
 			return nil, err
 		}
@@ -98,7 +106,9 @@ func (pr *ParameterResolver) resolveStringTemplates(s string, rc *model.RunConte
 	return out, nil
 }
 
-func (pr *ParameterResolver) buildStepsView(rc *model.RunContext) map[string]interface{} {
+// buildStepsView builds a view of completed tasks for use in CEL expressions.
+// It provides access to task outputs and status via the "tasks" variable.
+func (r *Resolver) buildStepsView(rc *model.RunContext) map[string]interface{} {
 	out := map[string]interface{}{}
 	for id, res := range rc.Tasks {
 		if res == nil {
@@ -114,7 +124,13 @@ func (pr *ParameterResolver) buildStepsView(rc *model.RunContext) map[string]int
 	return out
 }
 
-func (pr *ParameterResolver) evalCELExpression(exprStr string, rc *model.RunContext) (interface{}, error) {
+// evalCELExpression evaluates a CEL expression with the given run context.
+// Available variables in expressions:
+//   - input: The workflow input (from rc.Input)
+//   - config: The workflow configuration (from rc.Config)
+//   - tasks: Map of task results keyed by task/node ID
+//   - system: System variables (e.g., system.now for current timestamp)
+func (r *Resolver) evalCELExpression(exprStr string, rc *model.RunContext) (interface{}, error) {
 	decodeJSON := func(raw json.RawMessage) interface{} {
 		if len(raw) == 0 {
 			return map[string]interface{}{}
@@ -127,26 +143,26 @@ func (pr *ParameterResolver) evalCELExpression(exprStr string, rc *model.RunCont
 		return v
 	}
 
-	ast, iss := pr.celEnv.Parse(exprStr)
+	ast, iss := r.celEnv.Parse(exprStr)
 	if iss != nil && iss.Err() != nil {
 		return nil, fmt.Errorf("cel parse error: %w", iss.Err())
 	}
 
-	checked, iss := pr.celEnv.Check(ast)
+	checked, iss := r.celEnv.Check(ast)
 	if iss != nil && iss.Err() != nil {
 		return nil, fmt.Errorf("cel check error: %w", iss.Err())
 	}
 
-	prg, err := pr.celEnv.Program(checked)
+	prg, err := r.celEnv.Program(checked)
 	if err != nil {
 		return nil, err
 	}
 
-	// Prepare activation
+	// Prepare activation with available variables
 	activation := map[string]interface{}{
 		"input":  decodeJSON(rc.Input),
 		"config": decodeJSON(rc.Config),
-		"tasks":  pr.buildStepsView(rc),
+		"tasks":  r.buildStepsView(rc),
 		"system": map[string]interface{}{"now": time.Now().UTC().Format(time.RFC3339)},
 	}
 
@@ -156,3 +172,4 @@ func (pr *ParameterResolver) evalCELExpression(exprStr string, rc *model.RunCont
 	}
 	return out.Value(), nil
 }
+

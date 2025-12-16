@@ -8,17 +8,18 @@ import (
 	"github.com/mohitkumar/composer/pkg/lease"
 	"github.com/mohitkumar/composer/pkg/outbox"
 	"github.com/mohitkumar/composer/pkg/redisq"
+	"github.com/mohitkumar/composer/pkg/template"
 	"github.com/rs/zerolog"
 )
 
 type Coordinator struct {
-	Config            *Config
-	Logger            *zerolog.Logger
-	Redis             *redisq.RedisStream
-	DB                db.DB
-	LeaseManager      *lease.Manager
-	Outbox            *outbox.OutboxEnqueuer
-	ParameterResolver *ParameterResolver
+	Config       *Config
+	Logger       *zerolog.Logger
+	Redis        *redisq.RedisStream
+	DB           db.DB
+	LeaseManager *lease.Manager
+	Outbox       *outbox.OutboxEnqueuer
+	Template     *template.Resolver
 }
 
 func NewCoordinator(config *Config, logger *zerolog.Logger) (*Coordinator, error) {
@@ -45,21 +46,21 @@ func NewCoordinator(config *Config, logger *zerolog.Logger) (*Coordinator, error
 		StreamPrefix: "workflow.",
 	})
 
-	// Create parameter resolver
-	parameterResolver, err := NewParameterResolver()
+	// Create template resolver
+	templateResolver, err := template.NewResolver()
 	if err != nil {
 		dbPool.Close()
 		return nil, err
 	}
 
 	return &Coordinator{
-		Config:            config,
-		Logger:            logger,
-		Redis:             redisStream,
-		DB:                dbPool,
-		LeaseManager:      leaseManager,
-		Outbox:            outboxEnqueuer,
-		ParameterResolver: parameterResolver,
+		Config:       config,
+		Logger:       logger,
+		Redis:        redisStream,
+		DB:           dbPool,
+		LeaseManager: leaseManager,
+		Outbox:       outboxEnqueuer,
+		Template:     templateResolver,
 	}, nil
 }
 
