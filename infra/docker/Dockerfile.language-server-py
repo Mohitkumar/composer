@@ -38,4 +38,4 @@ ENV PATH="/app/.venv/bin:$PATH"
 
 EXPOSE 50051
 
-CMD ["python", "server.py"]
+CMD ["python", "main.py"]

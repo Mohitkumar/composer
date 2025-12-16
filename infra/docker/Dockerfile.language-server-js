@@ -23,4 +23,4 @@ COPY --from=builder /app/proto ./proto
 
 EXPOSE 50052
 
-CMD ["node", "server.js"]
+CMD ["node", "main.js"]

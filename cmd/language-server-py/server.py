@@ -1,58 +1,151 @@
+"""
+gRPC server setup and request handling
+"""
+
+import os
+import sys
 import time
-import json
+import logging
 from concurrent import futures
 import grpc
-import logging
 
-import workflow_executor_pb2 as pb
-import workflow_executor_pb2_grpc as pb_grpc
+# Add proto path
+sys.path.insert(0, os.path.dirname(__file__))
 
-_ONE_DAY_IN_SECONDS = 60 * 60 * 24
+# Import generated protobuf code
+try:
+    import workflow_executor_pb2 as pb
+    import workflow_executor_pb2_grpc as pb_grpc
+except ImportError:
+    print("Error: Protobuf files not found. Please generate them first:")
+    print("  make proto-py")
+    print("  Or:")
+    print("  python -m grpc_tools.protoc -I../../pkg/api/proto --python_out=. --grpc_python_out=. ../../pkg/api/proto/workflow_executor.proto")
+    sys.exit(1)
+
+from executor import (
+    execute_code,
+    parse_input,
+    serialize_output,
+    execute_handler_with_timeout
+)
+from sandbox import TimeoutError
+from config import DEFAULT_TIMEOUT_SECONDS
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
 
 class LanguageExecutorServicer(pb_grpc.LanguageExecutorServicer):
+    """Implements the LanguageExecutor gRPC service"""
+    
     def Execute(self, request, context):
         start = time.time()
         logs = []
+        
         try:
             runtime = request.runtime
-            # For safety: DO NOT exec arbitrary code in production.
-            # This demo will handle simple "inline python" that expects a function `handler(input)` and will echo.
-            if request.payload.WhichOneof("payload") == "inline_code":
-                code = request.payload.inline_code.code
-                filename = request.payload.inline_code.filename
-                # DEMO: do NOT exec untrusted code in prod.
-                # We'll run code in a very limited local namespace for demo only.
-                local_ns = {}
+            logger.info(f"Executing {runtime} task: {request.task_id}")
+            
+            # Check payload type
+            if request.payload.WhichOneof("payload") != "inline_code":
+                return pb.ExecuteResponse(
+                    success=False,
+                    error="Only inline_code payload is supported",
+                    duration_ms=int((time.time() - start) * 1000)
+                )
+            
+            code = request.payload.inline_code.code
+            filename = request.payload.inline_code.filename or "handler.py"
+            input_json = request.input_json or "{}"
+            timeout_seconds = request.timeout_seconds or DEFAULT_TIMEOUT_SECONDS
+            
+            # Parse input
+            try:
+                input_data = parse_input(input_json)
+            except ValueError as e:
+                return pb.ExecuteResponse(
+                    success=False,
+                    error=str(e),
+                    duration_ms=int((time.time() - start) * 1000)
+                )
+            
+            # Execute code
+            try:
+                handler, local_ns = execute_code(code, input_data, timeout_seconds)
+                
+                # Call handler with input (with timeout)
+                output = execute_handler_with_timeout(handler, input_data, timeout_seconds)
+                
+                # Serialize output
                 try:
-                    exec(code, {}, local_ns)
-                    # Expect handler function
-                    if "handler" in local_ns and callable(local_ns["handler"]):
-                        input_json = json.loads(request.input_json) if request.input_json else {}
-                        out = local_ns["handler"](input_json)
-                        out_json = json.dumps(out)
-                        duration = int((time.time() - start) * 1000)
-                        return pb.ExecuteResponse(success=True, output_json=out_json, duration_ms=duration, logs=logs)
-                    else:
-                        return pb.ExecuteResponse(success=False, error="no handler() defined in code")
-                except Exception as e:
-                    return pb.ExecuteResponse(success=False, error=str(e))
-            else:
-                # other payload types: named tasks, entrypoints (not implemented here)
-                return pb.ExecuteResponse(success=False, error="payload type not supported in demo")
+                    output_json = serialize_output(output)
+                except ValueError as e:
+                    return pb.ExecuteResponse(
+                        success=False,
+                        error=str(e),
+                        duration_ms=int((time.time() - start) * 1000)
+                    )
+                
+                duration = int((time.time() - start) * 1000)
+                
+                return pb.ExecuteResponse(
+                    success=True,
+                    output_json=output_json,
+                    duration_ms=duration,
+                    logs=logs
+                )
+            except TimeoutError as e:
+                return pb.ExecuteResponse(
+                    success=False,
+                    error=str(e),
+                    duration_ms=int((time.time() - start) * 1000)
+                )
+            except ImportError as e:
+                return pb.ExecuteResponse(
+                    success=False,
+                    error=f"Import error: {str(e)}",
+                    duration_ms=int((time.time() - start) * 1000)
+                )
+            except ValueError as e:
+                return pb.ExecuteResponse(
+                    success=False,
+                    error=str(e),
+                    duration_ms=int((time.time() - start) * 1000)
+                )
+            except Exception as e:
+                return pb.ExecuteResponse(
+                    success=False,
+                    error=str(e),
+                    duration_ms=int((time.time() - start) * 1000)
+                )
         except Exception as e:
-            return pb.ExecuteResponse(success=False, error=str(e))
+            logger.error(f"Execute error: {e}")
+            return pb.ExecuteResponse(
+                success=False,
+                error=str(e),
+                duration_ms=int((time.time() - start) * 1000)
+            )
+
 
 def serve(port=50051):
+    """Start the gRPC server"""
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=4))
-    pb_grpc.add_LanguageExecutorServicer_to_server(LanguageExecutorServicer(), server)
-    server.add_insecure_port(f"[::]:{port}")
+    pb_grpc.add_LanguageExecutorServicer_to_server(
+        LanguageExecutorServicer(),
+        server
+    )
+    
+    listen_addr = f"[::]:{port}"
+    server.add_insecure_port(listen_addr)
     server.start()
-    logging.info("Python language worker serving on %d", port)
+    
+    logger.info(f"Python language worker serving on {listen_addr}")
+    
     try:
         while True:
-            time.sleep(_ONE_DAY_IN_SECONDS)
+            time.sleep(86400)  # Sleep for a day
     except KeyboardInterrupt:
+        logger.info("Shutting down...")
         server.stop(0)
 
-if __name__ == "__main__":
-    serve(50051)
