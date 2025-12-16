@@ -213,10 +213,7 @@ func TestEndToEndWorkflowExecution(t *testing.T) {
 
 	// Step 2: Start workflow run via HTTP API
 	t.Log("Step 2: Starting workflow run via HTTP API")
-	runID := fmt.Sprintf("test-run-%d", time.Now().UnixNano())
 	executeReq := map[string]interface{}{
-		"run_id":           runID,
-		"workflow_id":      workflowID,
 		"workflow_version": workflowVersion,
 		"input":            json.RawMessage(`{"test": "data"}`),
 		"started_by":       "integration-test",
@@ -229,7 +226,17 @@ func TestEndToEndWorkflowExecution(t *testing.T) {
 	if resp.StatusCode != http.StatusAccepted {
 		t.Fatalf("Expected status 202, got %d", resp.StatusCode)
 	}
+	
+	// Read run_id from response
+	var executeResp map[string]string
+	if err := json.NewDecoder(resp.Body).Decode(&executeResp); err != nil {
+		t.Fatalf("Failed to decode execute response: %v", err)
+	}
 	resp.Body.Close()
+	runID := executeResp["run_id"]
+	if runID == "" {
+		t.Fatalf("Expected run_id in response, got empty")
+	}
 
 	// Step 3: Wait for outbox to process and worker to pick up tasks
 	t.Log("Step 3: Waiting for tasks to be processed...")
@@ -462,10 +469,7 @@ func TestEndToEndParameterResolutionAndLease(t *testing.T) {
 	resp.Body.Close()
 
 	// Execute workflow
-	runID := fmt.Sprintf("run-%d", time.Now().UnixNano())
 	executeReq := map[string]interface{}{
-		"run_id":           runID,
-		"workflow_id":      workflowID,
 		"workflow_version": workflowVersion,
 		"input":            json.RawMessage(`{"test":"world"}`),
 		"started_by":       "e2e-test",
@@ -478,7 +482,17 @@ func TestEndToEndParameterResolutionAndLease(t *testing.T) {
 	if resp.StatusCode != http.StatusAccepted {
 		t.Fatalf("Expected status 202, got %d", resp.StatusCode)
 	}
+	
+	// Read run_id from response
+	var executeResp map[string]string
+	if err := json.NewDecoder(resp.Body).Decode(&executeResp); err != nil {
+		t.Fatalf("Failed to decode execute response: %v", err)
+	}
 	resp.Body.Close()
+	runID := executeResp["run_id"]
+	if runID == "" {
+		t.Fatalf("Expected run_id in response, got empty")
+	}
 
 	// Wait for completion
 	maxWait := 30 * time.Second

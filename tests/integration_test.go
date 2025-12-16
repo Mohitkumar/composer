@@ -3,7 +3,6 @@ package tests
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"testing"
 	"time"
 
@@ -123,11 +122,9 @@ func TestIntegrationWorkflowExecution(t *testing.T) {
 		t.Errorf("Expected workflow name %s, got %s", workflowName, wf.Name)
 	}
 
-	// Step 2: Start workflow run
+	// Step 2: Start workflow run (run_id will be auto-generated)
 	t.Log("Step 2: Starting workflow run")
-	runID := fmt.Sprintf("test-run-%d", time.Now().UnixNano())
 	startPayload := &model.StartWorkflowRequest{
-		RunID:           runID,
 		WorkflowID:      workflowID,
 		WorkflowVersion: workflowVersion,
 		Input:           json.RawMessage(`{"test": "data"}`),
@@ -136,6 +133,12 @@ func TestIntegrationWorkflowExecution(t *testing.T) {
 	err = coordinator.StartWorkflow(ctx, startPayload)
 	if err != nil {
 		t.Fatalf("Failed to start workflow: %v", err)
+	}
+
+	// Verify run_id was generated
+	runID := startPayload.RunID
+	if runID == "" {
+		t.Fatalf("Expected run_id to be generated, got empty")
 	}
 
 	// Verify workflow run was created

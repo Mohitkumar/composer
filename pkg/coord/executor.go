@@ -15,7 +15,13 @@ import (
 )
 
 // StartWorkflow creates a workflow_run and creates initial task instance from start node
+// If RunID is not provided, it will be generated using UUID
 func (c *Coordinator) StartWorkflow(ctx context.Context, p *model.StartWorkflowRequest) error {
+	// Generate run_id if not provided
+	if p.RunID == "" {
+		p.RunID = uuid.New().String()
+	}
+
 	// Start tracing span
 	ctx, span := util.StartWorkflowSpan(ctx, "start", p.WorkflowID, p.RunID)
 	defer util.EndSpan(span, nil)

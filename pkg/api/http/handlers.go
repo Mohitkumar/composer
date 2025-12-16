@@ -113,16 +113,33 @@ func (h *handlers) deleteWorkflow(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *handlers) executeWorkflow(w http.ResponseWriter, r *http.Request) {
+	// Get workflow ID from path parameter
+	workflowID := chi.URLParam(r, "id")
+	if workflowID == "" {
+		http.Error(w, "workflow ID is required in path", http.StatusBadRequest)
+		return
+	}
+
 	var p model.StartWorkflowRequest
 	if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	// Use workflow ID from path parameter (ignore if provided in body)
+	p.WorkflowID = workflowID
+
 	if err := h.coordinator.StartWorkflow(r.Context(), &p); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+
+	// Return the run_id (generated or provided) in the response
+	response := map[string]string{
+		"run_id": p.RunID,
+	}
+	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusAccepted)
+	json.NewEncoder(w).Encode(response)
 }
 
 func (h *handlers) getWorkflowStatus(w http.ResponseWriter, r *http.Request) {
