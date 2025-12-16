@@ -38,19 +38,11 @@ func (c *Coordinator) StartWorkflow(ctx context.Context, p *model.StartWorkflowR
 	startTime := time.Now()
 
 	// Load workflow definition to get nodes and edges (before transaction)
-	wfDef, err := c.GetWorkflow(ctx, p.WorkflowID, p.WorkflowVersion)
+	wfSpec, err := c.loadAndParseWorkflowSpec(ctx, p.WorkflowID, p.WorkflowVersion)
 	if err != nil {
 		logger.Error().Err(err).Msg("failed to load workflow definition")
 		util.RecordError(span, err)
-		return fmt.Errorf("failed to load workflow definition: %w", err)
-	}
-
-	// Parse workflow spec to get nodes and edges
-	var wfSpec model.WorkflowDefinitionSpec
-	if err := json.Unmarshal(wfDef.Spec, &wfSpec); err != nil {
-		logger.Error().Err(err).Msg("failed to parse workflow spec")
-		util.RecordError(span, err)
-		return fmt.Errorf("failed to parse workflow spec: %w", err)
+		return err
 	}
 
 	err = c.ExecuteWithTransaction(ctx, span, logger, func(ctx context.Context, tx pgx.Tx) error {
@@ -113,11 +105,6 @@ func (c *Coordinator) StartWorkflow(ctx context.Context, p *model.StartWorkflowR
 	return nil
 }
 
-// HandleNodeCompleted marks a node as completed and dispatches next tasks from the workflow DAG
-// This is split into two transactions:
-// 1. First transaction: Record the output from the previous node (mark completed, clear lease, update run context)
-// 2. Second transaction: Start the next nodes (resolve parameters, create task instances)
-// This ensures that node completion is always recorded even if starting next nodes fails.
 func (c *Coordinator) HandleNodeCompleted(ctx context.Context, taskID string, runID string, nodeID string, output json.RawMessage) error {
 	// Get workflow run info to load workflow definition (before transaction)
 	var workflowID string
@@ -144,15 +131,9 @@ func (c *Coordinator) HandleNodeCompleted(ctx context.Context, taskID string, ru
 	startTime := time.Now()
 
 	// Load workflow definition to get DAG structure (before transaction)
-	wfDef, err := c.GetWorkflow(ctx, workflowID, workflowVersion)
+	wfSpec, err := c.loadAndParseWorkflowSpec(ctx, workflowID, workflowVersion)
 	if err != nil {
-		return fmt.Errorf("failed to load workflow definition: %w", err)
-	}
-
-	// Parse workflow spec
-	var wfSpec model.WorkflowDefinitionSpec
-	if err := json.Unmarshal(wfDef.Spec, &wfSpec); err != nil {
-		return fmt.Errorf("failed to parse workflow spec: %w", err)
+		return err
 	}
 
 	// STEP 1: Record the output from the previous node successfully
@@ -187,7 +168,6 @@ func (c *Coordinator) HandleNodeCompleted(ctx context.Context, taskID string, ru
 		return fmt.Errorf("failed to record node completion: %w", err)
 	}
 
-	// STEP 2: Start the next nodes
 	// This is a separate transaction so that if it fails, we can retry without losing the completion record
 	nextNodes := wfSpec.FindNextNodes(nodeID)
 	logger.Debug().Int("next_nodes_count", len(nextNodes)).Msg("found next nodes")
@@ -226,6 +206,21 @@ func (c *Coordinator) HandleNodeCompleted(ctx context.Context, taskID string, ru
 		Msg("node completion handled")
 
 	return nil
+}
+
+// loadAndParseWorkflowSpec loads a workflow definition and parses its spec
+func (c *Coordinator) loadAndParseWorkflowSpec(ctx context.Context, workflowID string, workflowVersion int) (*model.WorkflowDefinitionSpec, error) {
+	wfDef, err := c.GetWorkflow(ctx, workflowID, workflowVersion)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load workflow definition: %w", err)
+	}
+
+	var wfSpec model.WorkflowDefinitionSpec
+	if err := json.Unmarshal(wfDef.Spec, &wfSpec); err != nil {
+		return nil, fmt.Errorf("failed to parse workflow spec: %w", err)
+	}
+
+	return &wfSpec, nil
 }
 
 func (c *Coordinator) newRunContext(input json.RawMessage, config json.RawMessage) *model.RunContext {
