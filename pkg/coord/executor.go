@@ -114,6 +114,10 @@ func (c *Coordinator) StartWorkflow(ctx context.Context, p *model.StartWorkflowR
 }
 
 // HandleNodeCompleted marks a node as completed and dispatches next tasks from the workflow DAG
+// This is split into two transactions:
+// 1. First transaction: Record the output from the previous node (mark completed, clear lease, update run context)
+// 2. Second transaction: Start the next nodes (resolve parameters, create task instances)
+// This ensures that node completion is always recorded even if starting next nodes fails.
 func (c *Coordinator) HandleNodeCompleted(ctx context.Context, taskID string, runID string, nodeID string, output json.RawMessage) error {
 	// Get workflow run info to load workflow definition (before transaction)
 	var workflowID string
@@ -151,31 +155,46 @@ func (c *Coordinator) HandleNodeCompleted(ctx context.Context, taskID string, ru
 		return fmt.Errorf("failed to parse workflow spec: %w", err)
 	}
 
+	// STEP 1: Record the output from the previous node successfully
+	// This transaction should always succeed to preserve the node completion state
+	var runContext *model.RunContext
 	err = c.ExecuteWithTransaction(ctx, span, logger, func(ctx context.Context, tx pgx.Tx) error {
 		updated, err := c.markTaskCompleted(ctx, tx, runID, nodeID, output, logger, span)
 		if err != nil {
 			return err
 		}
 		if !updated {
-			return nil
+			// Task was already completed, load run context for potential next node processing
+			runContext, err = c.loadRunContext(ctx, tx, runID, logger, span)
+			return err
 		}
 
 		if err := c.clearTaskLease(ctx, tx, runID, nodeID, logger, span); err != nil {
 			return err
 		}
 
-		runContext, err := c.loadAndUpdateRunContext(ctx, tx, runID, nodeID, output, logger, span)
+		runContext, err = c.loadAndUpdateRunContext(ctx, tx, runID, nodeID, output, logger, span)
 		if err != nil {
 			return err
 		}
 
-		// Find next nodes using utility method
-		nextNodes := wfSpec.FindNextNodes(nodeID)
+		logger.Debug().Msg("node completion recorded successfully")
+		return nil
+	})
 
-		logger.Debug().Int("next_nodes_count", len(nextNodes)).Msg("found next nodes")
+	if err != nil {
+		logger.Error().Err(err).Msg("failed to record node completion")
+		return fmt.Errorf("failed to record node completion: %w", err)
+	}
 
-		// If no next nodes, check if workflow is complete
-		if len(nextNodes) == 0 {
+	// STEP 2: Start the next nodes
+	// This is a separate transaction so that if it fails, we can retry without losing the completion record
+	nextNodes := wfSpec.FindNextNodes(nodeID)
+	logger.Debug().Int("next_nodes_count", len(nextNodes)).Msg("found next nodes")
+
+	if len(nextNodes) == 0 {
+		// No next nodes, check if workflow is complete
+		err = c.ExecuteWithTransaction(ctx, span, logger, func(ctx context.Context, tx pgx.Tx) error {
 			done, pending, err := c.finalizeWorkflowIfComplete(ctx, tx, runID, workflowID, span, logger)
 			if err != nil {
 				return err
@@ -185,58 +204,26 @@ func (c *Coordinator) HandleNodeCompleted(ctx context.Context, taskID string, ru
 			}
 			logger.Debug().Int("pending_tasks", pending).Msg("workflow still has pending tasks")
 			return nil
+		})
+		if err != nil {
+			logger.Error().Err(err).Msg("failed to finalize workflow completion check")
+			// Don't return error here - the node is already marked as completed
 		}
-
-		// Create task instances and outbox entries for next nodes
-		for _, nextNode := range nextNodes {
-			// Check if task instance already exists (idempotency)
-			exists, existingTaskID, err := c.taskInstanceExists(ctx, tx, runID, nextNode.NodeID)
-			if err != nil {
-				return err
-			}
-			if exists {
-				logger.Debug().
-					Str("next_node_id", nextNode.NodeID).
-					Str("existing_task_id", existingTaskID).
-					Msg("next task already exists, skipping")
-				continue
-			}
-
-			// Create new task instance
-			nextTaskID := uuid.New().String()
-
-			taskInput, err := c.resolveNodeInputFromSpecRaw(nextNode.Spec, runContext, logger)
-			if err != nil {
-				return err
-			}
-			nextTaskLogger := logger.With().
-				Str("next_task_id", nextTaskID).
-				Str("next_node_id", nextNode.NodeID).
-				Str("next_node_type", nextNode.Runtime).
-				Logger()
-
-			if err := c.insertTaskInstance(ctx, tx, nextTaskID, runID, nextNode, taskInput, time.Now(), nextTaskLogger, span); err != nil {
-				return err
-			}
-			c.recordTaskCreated(ctx, nextTaskLogger, span, nextTaskID, runID, nextNode)
-
-			if err := c.insertTaskOutbox(ctx, tx, nextTaskID, runID, nextNode, taskInput, nextTaskLogger, span); err != nil {
-				return err
-			}
+	} else {
+		// Start next nodes in a separate transaction
+		err = c.startNextNodes(ctx, span, logger, runID, workflowID, nextNodes, runContext)
+		if err != nil {
+			logger.Error().Err(err).Msg("failed to start next nodes, but node completion was recorded")
+			// Don't return error here - the node is already marked as completed
+			// The next nodes can be started later via a retry mechanism or manual intervention
 		}
-
-		duration := time.Since(startTime)
-		logger.Info().
-			Dur("duration_ms", duration).
-			Int("next_tasks_created", len(nextNodes)).
-			Msg("node completion handled successfully")
-
-		return nil
-	})
-
-	if err != nil {
-		return err
 	}
+
+	duration := time.Since(startTime)
+	logger.Info().
+		Dur("duration_ms", duration).
+		Int("next_tasks_count", len(nextNodes)).
+		Msg("node completion handled")
 
 	return nil
 }
@@ -367,6 +354,27 @@ func (c *Coordinator) markTaskCompleted(ctx context.Context, tx pgx.Tx, runID, n
 	}
 	logger.Debug().Int64("rows_updated", rowsAffected).Msg("marked task completed")
 	return true, nil
+}
+
+// loadRunContext loads the run context without updating it (for read-only operations)
+func (c *Coordinator) loadRunContext(ctx context.Context, tx pgx.Tx, runID string, logger zerolog.Logger, span trace.Span) (*model.RunContext, error) {
+	var workflowInput json.RawMessage
+	var runContextJSON json.RawMessage
+	if err := tx.QueryRow(ctx, `SELECT input_json, context_json FROM workflow_runs WHERE id=$1`, runID).
+		Scan(&workflowInput, &runContextJSON); err != nil {
+		logger.Error().Err(err).Msg("failed to load workflow run context")
+		util.RecordError(span, err)
+		return nil, fmt.Errorf("failed to load workflow run context: %w", err)
+	}
+
+	runContext, err := c.mergeRunContext(workflowInput, runContextJSON)
+	if err != nil {
+		logger.Error().Err(err).Msg("failed to merge run context")
+		util.RecordError(span, err)
+		return nil, err
+	}
+
+	return runContext, nil
 }
 
 func (c *Coordinator) loadAndUpdateRunContext(ctx context.Context, tx pgx.Tx, runID, nodeID string, output json.RawMessage, logger zerolog.Logger, span trace.Span) (*model.RunContext, error) {
@@ -507,6 +515,56 @@ func (c *Coordinator) taskInstanceExists(ctx context.Context, tx pgx.Tx, runID, 
 		return true, existingTaskID, nil
 	}
 	return false, "", nil
+}
+
+// startNextNodes starts the next nodes in a separate transaction
+// This allows retrying if it fails without losing the completion record of the previous node
+func (c *Coordinator) startNextNodes(ctx context.Context, span trace.Span, logger zerolog.Logger, runID, workflowID string, nextNodes []*model.Node, runContext *model.RunContext) error {
+	return c.ExecuteWithTransaction(ctx, span, logger, func(ctx context.Context, tx pgx.Tx) error {
+		// Create task instances and outbox entries for next nodes
+		for _, nextNode := range nextNodes {
+			// Check if task instance already exists (idempotency)
+			exists, existingTaskID, err := c.taskInstanceExists(ctx, tx, runID, nextNode.NodeID)
+			if err != nil {
+				return err
+			}
+			if exists {
+				logger.Debug().
+					Str("next_node_id", nextNode.NodeID).
+					Str("existing_task_id", existingTaskID).
+					Msg("next task already exists, skipping")
+				continue
+			}
+
+			// Create new task instance
+			nextTaskID := uuid.New().String()
+
+			taskInput, err := c.resolveNodeInputFromSpecRaw(nextNode.Spec, runContext, logger)
+			if err != nil {
+				return err
+			}
+			nextTaskLogger := logger.With().
+				Str("next_task_id", nextTaskID).
+				Str("next_node_id", nextNode.NodeID).
+				Str("next_node_type", nextNode.Runtime).
+				Logger()
+
+			if err := c.insertTaskInstance(ctx, tx, nextTaskID, runID, nextNode, taskInput, time.Now(), nextTaskLogger, span); err != nil {
+				return err
+			}
+			c.recordTaskCreated(ctx, nextTaskLogger, span, nextTaskID, runID, nextNode)
+
+			if err := c.insertTaskOutbox(ctx, tx, nextTaskID, runID, nextNode, taskInput, nextTaskLogger, span); err != nil {
+				return err
+			}
+		}
+
+		logger.Info().
+			Int("next_tasks_created", len(nextNodes)).
+			Msg("next nodes started successfully")
+
+		return nil
+	})
 }
 
 // HandleNodeFailed marks a node as failed and handles workflow failure logic
