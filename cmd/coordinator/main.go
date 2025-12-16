@@ -48,6 +48,12 @@ func setupFlags(cmd *cobra.Command) {
 	// Observability flags
 	cmd.Flags().Bool("disable-observability", false, "Disable metrics and traces export (useful for local development)")
 
+	// Outbox flags
+	cmd.Flags().Int("outbox.batch_size", 50, "Outbox batch size (number of messages to process per batch)")
+	cmd.Flags().Int("outbox.concurrency", 2, "Outbox concurrency (number of concurrent workers)")
+	cmd.Flags().Duration("outbox.poll_interval", time.Second, "Outbox poll interval (how often to check for new messages)")
+	cmd.Flags().String("outbox.stream_prefix", "workflow.", "Outbox stream prefix (e.g., 'workflow.' for 'workflow.tasks')")
+
 	// Config file flag
 	cmd.Flags().String("config", "", "Config file path (default: ./config.yaml)")
 
@@ -108,6 +114,12 @@ func generateConfig() *coord.Config {
 			GRPCPort: viper.GetInt("api.grpc_port"),
 		},
 		DisableObservability: viper.GetBool("disable-observability"),
+		OutboxConfig: coord.OutboxConfig{
+			BatchSize:    viper.GetInt("outbox.batch_size"),
+			Concurrency:  viper.GetInt("outbox.concurrency"),
+			PollInterval: viper.GetDuration("outbox.poll_interval"),
+			StreamPrefix: viper.GetString("outbox.stream_prefix"),
+		},
 	}
 
 	// Set defaults if not provided
@@ -119,6 +131,19 @@ func generateConfig() *coord.Config {
 	}
 	if config.DBConfig.URL == "" {
 		config.DBConfig.URL = "postgres://postgres:password@localhost:5432/composer?sslmode=disable"
+	}
+	// Set outbox defaults if not provided
+	if config.OutboxConfig.BatchSize == 0 {
+		config.OutboxConfig.BatchSize = 50
+	}
+	if config.OutboxConfig.Concurrency == 0 {
+		config.OutboxConfig.Concurrency = 2
+	}
+	if config.OutboxConfig.PollInterval == 0 {
+		config.OutboxConfig.PollInterval = time.Second
+	}
+	if config.OutboxConfig.StreamPrefix == "" {
+		config.OutboxConfig.StreamPrefix = "workflow."
 	}
 
 	return config

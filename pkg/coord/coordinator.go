@@ -2,7 +2,6 @@ package coord
 
 import (
 	"context"
-	"time"
 
 	"github.com/mohitkumar/composer/pkg/db"
 	"github.com/mohitkumar/composer/pkg/lease"
@@ -40,10 +39,10 @@ func NewCoordinator(config *Config, logger *zerolog.Logger) (*Coordinator, error
 		DB:           dbPool,
 		Redis:        redisStream,
 		Logger:       *logger,
-		BatchSize:    50,
-		Concurrency:  2,
-		PollInterval: 1 * time.Second,
-		StreamPrefix: "workflow.",
+		BatchSize:    config.OutboxConfig.BatchSize,
+		Concurrency:  config.OutboxConfig.Concurrency,
+		PollInterval: config.OutboxConfig.PollInterval,
+		StreamPrefix: config.OutboxConfig.StreamPrefix,
 	})
 
 	// Create template resolver
