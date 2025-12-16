@@ -146,8 +146,6 @@ func TestEndToEndWorkflowExecution(t *testing.T) {
 
 	// Define a simple workflow: http -> http -> http
 	workflowSpec := model.WorkflowDefinitionSpec{
-		WorkflowID: workflowID,
-		Name:       workflowName,
 		Nodes: []model.Node{
 			{
 				NodeID:  "fetch_data",
@@ -407,8 +405,6 @@ func TestEndToEndParameterResolutionAndLease(t *testing.T) {
 	workflowName := "Lease Param Workflow"
 
 	workflowSpec := model.WorkflowDefinitionSpec{
-		WorkflowID: workflowID,
-		Name:       workflowName,
 		Nodes: []model.Node{
 			{
 				NodeID:  "fetch_data",

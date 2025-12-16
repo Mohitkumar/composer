@@ -111,7 +111,6 @@ func (o *OutboxEnqueuer) Stop() {
 // processBatch picks a batch of outbox rows with FOR UPDATE SKIP LOCKED, marks them IN_FLIGHT,
 // commits, and processes them one by one (pushing to Redis) and updates DB accordingly.
 func (o *OutboxEnqueuer) processBatch(ctx context.Context) error {
-	// 1) begin tx and select rows for update skip locked
 	tx, err := o.cfg.DB.Begin(ctx)
 	if err != nil {
 		return err
@@ -168,7 +167,6 @@ FOR UPDATE SKIP LOCKED
 		util.RecordOutboxInFlight(ctx, r.Stream, 1)
 		startTime := time.Now()
 		if err := o.processRow(ctx, r); err != nil {
-			// log and continue; processRow includes DB updates for failure
 			o.cfg.Logger.Error().
 				Err(err).
 				Str("outbox_id", r.ID).
@@ -207,24 +205,19 @@ func (o *OutboxEnqueuer) processRow(ctx context.Context, r outboxRow) error {
 
 	stream := r.Stream
 	if stream == "" {
-		// fallback stream if missing
 		stream = "workflow.tasks"
 	}
 
-	// Try push to redis using redisq abstraction
 	_, err := o.cfg.Redis.XAdd(ctx, stream, payloadMap)
 	if err == nil {
-		// success -> mark SENT
 		_, uerr := o.cfg.DB.Exec(ctx, `UPDATE outbox SET status='SENT', sent_at=NOW(), updated_at=NOW() WHERE id=$1`, r.ID)
 		if uerr != nil {
-			// critical: cannot update outbox status; log error
 			o.cfg.Logger.Error().Err(uerr).Str("outbox_id", r.ID).Msg("failed mark SENT after xadd success")
 			return uerr
 		}
 		return nil
 	}
 
-	// failure path: schedule retry or DLQ
 	o.cfg.Logger.Warn().Err(err).Str("outbox_id", r.ID).Msg("redis xadd failed; scheduling retry/dlq")
 
 	attempt := r.Attempt + 1
@@ -238,12 +231,10 @@ func (o *OutboxEnqueuer) processRow(ctx context.Context, r outboxRow) error {
 	}
 
 	if attempt > maxRetries {
-		// move to DLQ (insert into outbox_dlq and mark original DLQ)
 		_, derr := o.cfg.DB.Exec(ctx, `INSERT INTO outbox_dlq (id, stream, payload, last_error, attempts, created_at, moved_at)
 			VALUES ($1,$2,$3::jsonb,$4,$5,NOW(),NOW()) ON CONFLICT (id) DO NOTHING`, r.ID, stream, r.Payload, err.Error(), attempt)
 		if derr != nil {
 			o.cfg.Logger.Error().Err(derr).Str("outbox_id", r.ID).Msg("failed move to dlq")
-			// still attempt to mark as DLQ to avoid infinite retries
 		}
 		if _, uerr := o.cfg.DB.Exec(ctx, `UPDATE outbox SET status='DLQ', last_error=$1, attempt_count=$2, updated_at=NOW() WHERE id=$3`, err.Error(), attempt, r.ID); uerr != nil {
 			o.cfg.Logger.Error().Err(uerr).Str("outbox_id", r.ID).Msg("failed mark DLQ")

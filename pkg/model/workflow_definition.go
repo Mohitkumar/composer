@@ -10,11 +10,10 @@ import (
 
 // WorkflowDefinitionSpec represents the workflow definition structure (the spec JSON)
 // This is what gets stored in the spec_json column
+// Note: workflow_id and name are stored in the workflow_definitions table, not in the spec
 type WorkflowDefinitionSpec struct {
-	WorkflowID string `json:"workflow_id"`
-	Name       string `json:"name"`
-	Nodes      []Node `json:"nodes"`
-	Edges      []Edge `json:"edges"`
+	Nodes []Node `json:"nodes"`
+	Edges []Edge `json:"edges"`
 }
 
 // Node represents a node in the workflow DAG

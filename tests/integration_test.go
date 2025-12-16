@@ -51,8 +51,6 @@ func TestIntegrationWorkflowExecution(t *testing.T) {
 
 	// Define a simple workflow: http -> python -> http
 	workflowSpec := model.WorkflowDefinitionSpec{
-		WorkflowID: workflowID,
-		Name:       workflowName,
 		Nodes: []model.Node{
 			{
 				NodeID:  "fetch_data",
