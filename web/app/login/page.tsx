@@ -19,10 +19,16 @@ export default function LoginPage() {
 
   useEffect(() => {
     checkAuth();
+  }, [checkAuth]);
+
+  useEffect(() => {
+    // Only redirect if authenticated and not already on a dashboard page
     if (isAuthenticated) {
-      router.push('/');
+      // Check if there's a return URL in the query params, otherwise go to home
+      const returnUrl = new URLSearchParams(window.location.search).get('returnUrl');
+      router.push(returnUrl || '/');
     }
-  }, [isAuthenticated, router, checkAuth]);
+  }, [isAuthenticated, router]);
 
   // Redirect if already authenticated
   if (isAuthenticated) {
