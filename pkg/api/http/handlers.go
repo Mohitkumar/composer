@@ -20,23 +20,32 @@ type handlers struct {
 func (h *handlers) createWorkflow(w http.ResponseWriter, r *http.Request) {
 	var p model.RegisterWorkflowRequest
 	if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 		return
 	}
 	if err := h.coordinator.RegisterWorkflow(r.Context(), &p); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 		return
 	}
+	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(map[string]string{"message": "Workflow created successfully"})
 }
 
 func (h *handlers) listWorkflows(w http.ResponseWriter, r *http.Request) {
 	enabledOnly := r.URL.Query().Get("enabled") == "true"
 	workflows, err := h.coordinator.ListWorkflows(r.Context(), enabledOnly)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 		return
 	}
+	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(workflows)
 }
 
@@ -55,9 +64,12 @@ func (h *handlers) getWorkflow(w http.ResponseWriter, r *http.Request) {
 
 	wf, err := h.coordinator.GetWorkflow(r.Context(), id, version)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusNotFound)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 		return
 	}
+	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(wf)
 }
 
@@ -85,10 +97,14 @@ func (h *handlers) updateWorkflow(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := h.coordinator.UpdateWorkflow(r.Context(), id, version, payload.Name, payload.Enabled, payload.WebhookURL); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 		return
 	}
+	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]string{"message": "Workflow updated successfully"})
 }
 
 func (h *handlers) deleteWorkflow(w http.ResponseWriter, r *http.Request) {
@@ -106,30 +122,40 @@ func (h *handlers) deleteWorkflow(w http.ResponseWriter, r *http.Request) {
 	hardDelete := r.URL.Query().Get("hard") == "true"
 
 	if err := h.coordinator.DeleteWorkflow(r.Context(), id, version, hardDelete); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 		return
 	}
+	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]string{"message": "Workflow deleted successfully"})
 }
 
 func (h *handlers) executeWorkflow(w http.ResponseWriter, r *http.Request) {
 	// Get workflow ID from path parameter
 	workflowID := chi.URLParam(r, "id")
 	if workflowID == "" {
-		http.Error(w, "workflow ID is required in path", http.StatusBadRequest)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "workflow ID is required in path"})
 		return
 	}
 
 	var p model.StartWorkflowRequest
 	if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 		return
 	}
 	// Use workflow ID from path parameter (ignore if provided in body)
 	p.WorkflowID = workflowID
 
 	if err := h.coordinator.StartWorkflow(r.Context(), &p); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 		return
 	}
 
@@ -151,9 +177,12 @@ func (h *handlers) getWorkflowStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	status, err := h.coordinator.GetWorkflowInstanceStatus(r.Context(), runID)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusNotFound)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 		return
 	}
+	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(status)
 }
 
@@ -188,9 +217,12 @@ func (h *handlers) listExecutions(w http.ResponseWriter, r *http.Request) {
 
 	instances, err := h.coordinator.ListWorkflowInstances(r.Context(), wfID, status, limit, offset)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 		return
 	}
+	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(instances)
 }
 
@@ -198,9 +230,12 @@ func (h *handlers) getExecution(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	instance, err := h.coordinator.GetWorkflowInstance(r.Context(), id)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusNotFound)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 		return
 	}
+	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(instance)
 }
 
@@ -212,8 +247,12 @@ func (h *handlers) cancelExecution(w http.ResponseWriter, r *http.Request) {
 	json.NewDecoder(r.Body).Decode(&payload)
 
 	if err := h.coordinator.CancelWorkflowInstance(r.Context(), id, payload.Reason); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 		return
 	}
+	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]string{"message": "Execution cancelled successfully"})
 }

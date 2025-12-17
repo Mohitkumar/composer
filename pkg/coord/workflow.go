@@ -205,13 +205,14 @@ func (c *Coordinator) DeleteWorkflow(ctx context.Context, workflowID string, ver
 // GetWorkflowInstance retrieves a workflow instance (run) by ID.
 func (c *Coordinator) GetWorkflowInstance(ctx context.Context, instanceID string) (*model.WorkflowInstanceRecord, error) {
 	var inst model.WorkflowInstanceRecord
+	var completedAt sql.NullTime
 
 	err := c.DB.QueryRow(ctx,
-		`SELECT id, workflow_definition_id, workflow_version, status, input_json, created_at, updated_at 
+		`SELECT id, workflow_definition_id, workflow_version, status, input_json, created_at, updated_at, completed_at 
 		 FROM workflow_runs WHERE id = $1`,
 		instanceID).Scan(
 		&inst.ID, &inst.WorkflowDefinitionID, &inst.WorkflowVersion, &inst.Status,
-		&inst.Input, &inst.CreatedAt, &inst.UpdatedAt)
+		&inst.Input, &inst.CreatedAt, &inst.UpdatedAt, &completedAt)
 
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -220,13 +221,17 @@ func (c *Coordinator) GetWorkflowInstance(ctx context.Context, instanceID string
 		return nil, err
 	}
 
+	if completedAt.Valid {
+		inst.CompletedAt = &completedAt.Time
+	}
+
 	return &inst, nil
 }
 
 // ListWorkflowInstances lists workflow instances, optionally filtered by workflow ID and status.
 func (c *Coordinator) ListWorkflowInstances(ctx context.Context, workflowID *string,
 	status *model.WorkflowInstanceStatus, limit, offset int) ([]model.WorkflowInstanceRecord, error) {
-	query := `SELECT id, workflow_definition_id, workflow_version, status, input_json, created_at, updated_at 
+	query := `SELECT id, workflow_definition_id, workflow_version, status, input_json, created_at, updated_at, completed_at 
 	          FROM workflow_runs WHERE 1=1`
 	args := []interface{}{}
 	argPos := 1
@@ -264,9 +269,13 @@ func (c *Coordinator) ListWorkflowInstances(ctx context.Context, workflowID *str
 	var instances []model.WorkflowInstanceRecord
 	for rows.Next() {
 		var inst model.WorkflowInstanceRecord
+		var completedAt sql.NullTime
 		if err := rows.Scan(&inst.ID, &inst.WorkflowDefinitionID, &inst.WorkflowVersion,
-			&inst.Status, &inst.Input, &inst.CreatedAt, &inst.UpdatedAt); err != nil {
+			&inst.Status, &inst.Input, &inst.CreatedAt, &inst.UpdatedAt, &completedAt); err != nil {
 			return nil, err
+		}
+		if completedAt.Valid {
+			inst.CompletedAt = &completedAt.Time
 		}
 		instances = append(instances, inst)
 	}
