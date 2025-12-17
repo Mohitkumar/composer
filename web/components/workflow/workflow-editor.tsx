@@ -128,6 +128,7 @@ interface WorkflowEditorProps {
   workflowId?: string;
   workflowName?: string;
   onSave: (spec: WorkflowDefinitionSpec, name: string, id: string) => Promise<void>;
+  isSaving?: boolean;
 }
 
 export function WorkflowEditor({
@@ -135,6 +136,7 @@ export function WorkflowEditor({
   workflowId,
   workflowName,
   onSave,
+  isSaving = false,
 }: WorkflowEditorProps) {
   const initialNodes = initialSpec?.nodes?.map((node) => ({
     id: node.node_id,
@@ -373,9 +375,19 @@ export function WorkflowEditor({
           <Button 
             onClick={handleSaveWithLayout}
             title="Save the workflow"
+            disabled={isSaving}
           >
-            <Save className="mr-2 h-4 w-4" />
-            Save Workflow
+            {isSaving ? (
+              <>
+                <div className="mr-2 h-4 w-4 animate-spin rounded-full border-2 border-background border-t-transparent" />
+                Saving...
+              </>
+            ) : (
+              <>
+                <Save className="mr-2 h-4 w-4" />
+                Save Workflow
+              </>
+            )}
           </Button>
         </div>
       </div>
@@ -407,7 +419,7 @@ export function WorkflowEditor({
       </div>
 
       <Dialog open={nodeConfigOpen} onOpenChange={setNodeConfigOpen}>
-        <DialogContent className="max-w-[90vw] w-[90vw] max-h-[95vh] flex flex-col">
+        <DialogContent className="max-w-[90vw] w-[90vw] max-h-[95vh] flex flex-col sm:max-w-[90vw]">
           <DialogHeader className="flex-shrink-0">
             <DialogTitle>Configure Node</DialogTitle>
             <DialogDescription>
