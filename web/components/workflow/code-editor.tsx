@@ -274,48 +274,65 @@ export function CodeEditor({
       acceptSuggestionOnCommitCharacter: false, // Don't accept on space/commit chars
       acceptSuggestionOnEnter: 'on',
       quickSuggestionsDelay: 500,
-      // Ensure space key always works
-      snippetSuggestions: 'none', // Disable snippet suggestions that might interfere
+      snippetSuggestions: 'none',
+      // Disable features that might interfere with space key
+      tabCompletion: 'off',
+      wordBasedSuggestions: 'off',
     });
 
-    // Add keyboard handler to ensure space key always works
-    const keyDownDisposable = editor.onKeyDown((e) => {
-      // If space is pressed, ensure it always works
-      if (e.keyCode === monacoInstance.KeyCode.Space) {
-        // Check if suggestion widget is open
+    // Add a handler that ensures space key works in Chrome
+    // Chrome handles keyboard events differently than Safari
+    editor.onKeyDown((e) => {
+      // Check for space key using both keyCode and key for browser compatibility
+      const isSpace = e.keyCode === monacoInstance.KeyCode.Space || 
+                      e.browserEvent.key === ' ' || 
+                      e.browserEvent.code === 'Space';
+      
+      if (isSpace) {
+        // Check if autocomplete is open
         const suggestController = editor.getContribution('editor.contrib.suggestController') as any;
-        const isSuggestWidgetOpen = suggestController?.widget?.value?.isOpen?.();
+        let isOpen = false;
         
-        if (isSuggestWidgetOpen) {
+        try {
+          isOpen = suggestController?.widget?.value?.isOpen?.() || false;
+        } catch (err) {
+          isOpen = false;
+        }
+        
+        if (isOpen) {
           // Dismiss autocomplete first
-          suggestController.cancel();
-          // Use requestAnimationFrame to ensure cancellation completes
+          try {
+            suggestController.cancel();
+          } catch (err) {
+            // Ignore errors
+          }
+          
+          // For Chrome, explicitly insert space after dismissing autocomplete
+          // Use requestAnimationFrame for better timing
           requestAnimationFrame(() => {
             const position = editor.getPosition();
             if (position) {
-              // Insert space at current position
               const range = new monacoInstance.Range(
                 position.lineNumber,
                 position.column,
                 position.lineNumber,
                 position.column
               );
-              editor.executeEdits('insert-space', [{
+              editor.executeEdits('chrome-space-fix', [{
                 range,
                 text: ' ',
               }]);
             }
           });
+          
           e.preventDefault();
           e.stopPropagation();
           return false;
         }
-        // If no autocomplete is open, don't prevent default - let space work normally
+        // If autocomplete is NOT open, don't prevent default
+        // Let Monaco handle space normally - this is crucial for Chrome
       }
     });
-
-    // Store disposable for cleanup
-    (editor as any)._spaceKeyHandler = keyDownDisposable;
 
     // Set cursor to top and scroll to top if editor is empty or has placeholder
     const currentValue = editor.getValue();
@@ -351,19 +368,28 @@ export function CodeEditor({
           tabSize: 2,
           wordWrap: 'on',
           formatOnPaste: true,
-          formatOnType: false, // Disable to prevent space key issues
+          formatOnType: false,
           suggestOnTriggerCharacters: true,
           quickSuggestions: {
             other: false, // Disable automatic suggestions - only show on Ctrl+Space
             comments: false,
             strings: false,
           },
-          acceptSuggestionOnCommitCharacter: false, // Don't accept on space/commit chars
+          // CRITICAL: These settings ensure space key works in all browsers
+          acceptSuggestionOnCommitCharacter: false, // Don't accept suggestions on space
           acceptSuggestionOnEnter: 'on',
           quickSuggestionsDelay: 500,
           snippetSuggestions: 'none',
           tabCompletion: 'off',
           wordBasedSuggestions: 'off',
+          // Additional Chrome-specific fixes
+          autoIndent: 'full',
+          autoClosingBrackets: 'always',
+          autoClosingQuotes: 'always',
+          parameterHints: {
+            enabled: false,
+          },
+          multiCursorModifier: 'ctrlCmd',
         }}
       />
       <div className="px-3 py-2 bg-muted border-t text-xs text-muted-foreground flex-shrink-0">
