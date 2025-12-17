@@ -1,14 +1,12 @@
 'use client';
 
-import { useRouter, useParams } from 'next/navigation';
-import { WorkflowEditor } from '@/components/workflow/workflow-editor';
+import { useParams } from 'next/navigation';
+import { JsonWorkflowEditor } from '@/components/workflow/json-workflow-editor';
 import { workflowApi } from '@/lib/api-client';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import type { WorkflowDefinitionSpec } from '@/lib/api-client';
-import { toast } from 'sonner';
 
 export default function EditWorkflowPage() {
-  const router = useRouter();
   const params = useParams();
   const workflowId = params.id as string;
   const queryClient = useQueryClient();
@@ -22,11 +20,12 @@ export default function EditWorkflowPage() {
     mutationFn: async (data: {
       spec: WorkflowDefinitionSpec;
       name: string;
+      id: string;
     }) => {
       // Get current workflow to determine next version
       const currentWorkflow = await workflowApi.get(workflowId);
       const nextVersion = (currentWorkflow.version || 1) + 1;
-      
+
       // Create new version with updated spec
       await workflowApi.create({
         workflow_id: workflowId,
@@ -35,24 +34,21 @@ export default function EditWorkflowPage() {
         spec: data.spec,
         created_by: currentWorkflow.created_by || 'user',
       });
-      
+
       // Update name if changed
       if (data.name !== currentWorkflow.name) {
-        await workflowApi.update(workflowId, {
-          name: data.name,
-        }, nextVersion);
+        await workflowApi.update(
+          workflowId,
+          {
+            name: data.name,
+          },
+          nextVersion
+        );
       }
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['workflows'] });
       queryClient.invalidateQueries({ queryKey: ['workflow', workflowId] });
-      toast.success('Workflow saved successfully!');
-      // Don't redirect - stay on the edit page
-    },
-    onError: (error) => {
-      toast.error('Failed to save workflow', {
-        description: error instanceof Error ? error.message : 'An unknown error occurred',
-      });
     },
   });
 
@@ -72,21 +68,20 @@ export default function EditWorkflowPage() {
     spec = workflow.spec as WorkflowDefinitionSpec;
   }
 
-  const handleSave = async (
-    updatedSpec: WorkflowDefinitionSpec,
-    name: string,
-    _id: string
-  ) => {
-    // TODO: Implement spec update when backend supports it
-    await updateMutation.mutateAsync({ spec: updatedSpec, name });
+  const handleSave = async (args: {
+    spec: WorkflowDefinitionSpec;
+    name: string;
+    id: string;
+  }) => {
+    await updateMutation.mutateAsync(args);
   };
 
   return (
     <div className="h-[calc(100vh-8rem)]">
-      <WorkflowEditor
+      <JsonWorkflowEditor
         initialSpec={spec}
-        workflowId={workflow.id}
-        workflowName={workflow.name}
+        initialName={workflow.name}
+        initialId={workflow.id}
         onSave={handleSave}
         isSaving={updateMutation.isPending}
       />

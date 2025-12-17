@@ -256,3 +256,60 @@ func (h *handlers) cancelExecution(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(map[string]string{"message": "Execution cancelled successfully"})
 }
+
+// Template handlers
+
+func (h *handlers) listNodeTemplates(w http.ResponseWriter, r *http.Request) {
+	runtime := r.URL.Query().Get("runtime")
+	category := r.URL.Query().Get("category")
+
+	templates, err := h.coordinator.ListNodeTemplates(r.Context(), runtime, category)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(templates)
+}
+
+func (h *handlers) getNodeTemplate(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	template, err := h.coordinator.GetNodeTemplate(r.Context(), id)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(template)
+}
+
+func (h *handlers) listWorkflowTemplates(w http.ResponseWriter, r *http.Request) {
+	category := r.URL.Query().Get("category")
+
+	templates, err := h.coordinator.ListWorkflowTemplates(r.Context(), category)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(templates)
+}
+
+func (h *handlers) getWorkflowTemplate(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	template, err := h.coordinator.GetWorkflowTemplate(r.Context(), id)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(template)
+}

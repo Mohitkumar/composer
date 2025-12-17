@@ -1,18 +1,15 @@
 'use client';
 
-import { useRouter } from 'next/navigation';
 import { useState } from 'react';
-import { WorkflowEditor } from '@/components/workflow/workflow-editor';
+import { JsonWorkflowEditor } from '@/components/workflow/json-workflow-editor';
 import { workflowApi } from '@/lib/api-client';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import type { WorkflowDefinitionSpec } from '@/lib/api-client';
-import { toast } from 'sonner';
 
 export default function NewWorkflowPage() {
-  const router = useRouter();
   const queryClient = useQueryClient();
-  const [workflowId, setWorkflowId] = useState<string | null>(null);
   const [isFirstSave, setIsFirstSave] = useState(true);
+  const [workflowId, setWorkflowId] = useState<string | null>(null);
 
   const createMutation = useMutation({
     mutationFn: async (data: {
@@ -33,14 +30,6 @@ export default function NewWorkflowPage() {
       queryClient.invalidateQueries({ queryKey: ['workflows'] });
       setWorkflowId(id);
       setIsFirstSave(false);
-      toast.success('Workflow created successfully!');
-      // Don't redirect - stay on the editor
-      // Subsequent saves will be treated as edits (new versions)
-    },
-    onError: (error) => {
-      toast.error('Failed to create workflow', {
-        description: error instanceof Error ? error.message : 'An unknown error occurred',
-      });
     },
   });
 
@@ -53,7 +42,7 @@ export default function NewWorkflowPage() {
       // Get current workflow to determine next version
       const currentWorkflow = await workflowApi.get(data.id);
       const nextVersion = (currentWorkflow.version || 1) + 1;
-      
+
       // Create new version with updated spec
       await workflowApi.create({
         workflow_id: data.id,
@@ -62,37 +51,33 @@ export default function NewWorkflowPage() {
         spec: data.spec,
         created_by: 'user',
       });
-      
+
       // Update name if changed
       if (data.name !== currentWorkflow.name) {
-        await workflowApi.update(data.id, {
-          name: data.name,
-        }, nextVersion);
+        await workflowApi.update(
+          data.id,
+          {
+            name: data.name,
+          },
+          nextVersion
+        );
       }
     },
     onSuccess: (_, variables) => {
       queryClient.invalidateQueries({ queryKey: ['workflows'] });
       queryClient.invalidateQueries({ queryKey: ['workflow', variables.id] });
-      toast.success('Workflow updated successfully!');
-      // Don't redirect - stay on the page
-    },
-    onError: (error) => {
-      toast.error('Failed to update workflow', {
-        description: error instanceof Error ? error.message : 'An unknown error occurred',
-      });
     },
   });
 
-  const handleSave = async (
-    spec: WorkflowDefinitionSpec,
-    name: string,
-    id: string
-  ) => {
-    if (isFirstSave) {
-      await createMutation.mutateAsync({ spec, name, id });
+  const handleSave = async (args: {
+    spec: WorkflowDefinitionSpec;
+    name: string;
+    id: string;
+  }) => {
+    if (isFirstSave || !workflowId) {
+      await createMutation.mutateAsync(args);
     } else {
-      // Subsequent saves are edits - create new version
-      await updateMutation.mutateAsync({ spec, name, id });
+      await updateMutation.mutateAsync(args);
     }
   };
 
@@ -100,10 +85,11 @@ export default function NewWorkflowPage() {
 
   return (
     <div className="h-[calc(100vh-8rem)]">
-      <WorkflowEditor 
+      <JsonWorkflowEditor
         onSave={handleSave}
-        workflowId={workflowId || undefined}
         isSaving={isSaving}
+        initialId={workflowId ?? undefined}
+        isNew={true}
       />
     </div>
   );

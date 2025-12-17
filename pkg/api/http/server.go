@@ -73,6 +73,18 @@ func NewServer(config *api.APIConfig, coordinator *coord.Coordinator) *Server {
 			r.Get("/{id}", h.getExecution)
 			r.Post("/{id}/cancel", h.cancelExecution)
 		})
+
+		// Template endpoints
+		r.Route("/templates", func(r chi.Router) {
+			r.Route("/nodes", func(r chi.Router) {
+				r.Get("/", h.listNodeTemplates)
+				r.Get("/{id}", h.getNodeTemplate)
+			})
+			r.Route("/workflows", func(r chi.Router) {
+				r.Get("/", h.listWorkflowTemplates)
+				r.Get("/{id}", h.getWorkflowTemplate)
+			})
+		})
 	})
 
 	return &Server{

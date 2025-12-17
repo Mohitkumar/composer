@@ -206,3 +206,54 @@ export const executionApi = {
     await apiClient.post(`/executions/${id}/cancel`, { reason });
   },
 };
+
+export interface NodeTemplate {
+  id: string;
+  name: string;
+  description?: string;
+  runtime: string;
+  node_type: string;
+  spec_json: Record<string, any>;
+  category?: string;
+  tags?: string[];
+  created_at: string;
+  updated_at: string;
+}
+
+export interface WorkflowTemplate {
+  id: string;
+  name: string;
+  description?: string;
+  spec_json: WorkflowDefinitionSpec;
+  category?: string;
+  tags?: string[];
+  created_at: string;
+  updated_at: string;
+}
+
+export const templateApi = {
+  listNodeTemplates: async (params?: {
+    runtime?: string;
+    category?: string;
+  }): Promise<NodeTemplate[]> => {
+    const response = await apiClient.get('/templates/nodes', { params });
+    return response.data;
+  },
+
+  getNodeTemplate: async (id: string): Promise<NodeTemplate> => {
+    const response = await apiClient.get(`/templates/nodes/${id}`);
+    return response.data;
+  },
+
+  listWorkflowTemplates: async (params?: {
+    category?: string;
+  }): Promise<WorkflowTemplate[]> => {
+    const response = await apiClient.get('/templates/workflows', { params });
+    return response.data;
+  },
+
+  getWorkflowTemplate: async (id: string): Promise<WorkflowTemplate> => {
+    const response = await apiClient.get(`/templates/workflows/${id}`);
+    return response.data;
+  },
+};
