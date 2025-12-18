@@ -14,9 +14,10 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table';
-import { Eye } from 'lucide-react';
+import { Eye, RotateCw } from 'lucide-react';
 import { useState } from 'react';
 import { ExecutionDetailDialog } from '@/components/execution/execution-detail-dialog';
+import { RetryExecutionDialog } from '@/components/execution/retry-execution-dialog';
 import {
   Select,
   SelectContent,
@@ -32,8 +33,17 @@ export default function ExecutionsPage() {
   const [page, setPage] = useState(1);
   const [selectedExecutionId, setSelectedExecutionId] = useState<string | null>(null);
   const [detailDialogOpen, setDetailDialogOpen] = useState(false);
+  const [retryExecutionId, setRetryExecutionId] = useState<string | null>(null);
+  const [retryDialogOpen, setRetryDialogOpen] = useState(false);
   const pageSize = 20;
   const queryClient = useQueryClient();
+
+  // Fetch execution details for retry
+  const { data: retryExecutionDetail } = useQuery({
+    queryKey: ['execution-detail', retryExecutionId],
+    queryFn: () => retryExecutionId ? executionApi.getDetails(retryExecutionId) : null,
+    enabled: retryDialogOpen && !!retryExecutionId,
+  });
 
   const { data: executions, isLoading, error, isError } = useQuery({
     queryKey: ['executions', statusFilter, workflowFilter],
@@ -201,16 +211,32 @@ export default function ExecutionsPage() {
                           : '-'}
                       </TableCell>
                       <TableCell className="text-right">
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          onClick={() => {
-                            setSelectedExecutionId(execution.id);
-                            setDetailDialogOpen(true);
-                          }}
-                        >
-                          <Eye className="h-4 w-4" />
-                        </Button>
+                        <div className="flex items-center justify-end gap-1">
+                          {(execution.status === 'FAILED' || execution.status === 'COMPLETED') && (
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              onClick={() => {
+                                setRetryExecutionId(execution.id);
+                                setRetryDialogOpen(true);
+                              }}
+                              title="Retry execution"
+                            >
+                              <RotateCw className="h-4 w-4" />
+                            </Button>
+                          )}
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            onClick={() => {
+                              setSelectedExecutionId(execution.id);
+                              setDetailDialogOpen(true);
+                            }}
+                            title="View details"
+                          >
+                            <Eye className="h-4 w-4" />
+                          </Button>
+                        </div>
                       </TableCell>
                     </TableRow>
                   ))}
@@ -255,6 +281,19 @@ export default function ExecutionsPage() {
             setDetailDialogOpen(open);
             if (!open) {
               setSelectedExecutionId(null);
+            }
+          }}
+        />
+      )}
+
+      {retryExecutionDetail && (
+        <RetryExecutionDialog
+          executionDetail={retryExecutionDetail}
+          open={retryDialogOpen}
+          onOpenChange={(open) => {
+            setRetryDialogOpen(open);
+            if (!open) {
+              setRetryExecutionId(null);
             }
           }}
         />

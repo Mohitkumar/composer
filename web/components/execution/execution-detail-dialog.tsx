@@ -37,6 +37,16 @@ export function ExecutionDetailDialog({
     queryKey: ['execution-detail', executionId],
     queryFn: () => executionApi.getDetails(executionId),
     enabled: open && !!executionId,
+    refetchInterval: (query) => {
+      const data = query.state.data as ExecutionDetail | undefined;
+      if (!data) return false;
+      const status = data.execution?.status;
+      // Poll if status is PENDING or RUNNING, stop polling once it's COMPLETED, SUCCEEDED, or FAILED
+      if (status === 'PENDING' || status === 'RUNNING') {
+        return 2000; // Poll every 2 seconds
+      }
+      return false; // Stop polling for terminal states
+    },
   });
 
   const cancelMutation = useMutation({
@@ -191,7 +201,6 @@ export function ExecutionDetailDialog({
               <TabsList>
                 <TabsTrigger value="tasks">Task Execution</TabsTrigger>
                 <TabsTrigger value="context">Context</TabsTrigger>
-                <TabsTrigger value="input">Input</TabsTrigger>
               </TabsList>
 
               {/* Task Execution Tab */}
@@ -405,42 +414,6 @@ export function ExecutionDetailDialog({
                       </div>
                     ) : (
                       <p className="text-muted-foreground">No context data available</p>
-                    )}
-                  </CardContent>
-                </Card>
-              </TabsContent>
-
-              {/* Input Tab */}
-              <TabsContent value="input" className="flex-1 overflow-auto">
-                <Card>
-                  <CardHeader>
-                    <CardTitle>Execution Input</CardTitle>
-                    <CardDescription>Input data passed to the workflow execution</CardDescription>
-                  </CardHeader>
-                  <CardContent>
-                    {execution.input ? (
-                      <div className="border rounded-md overflow-hidden" style={{ height: '400px' }}>
-                        <Editor
-                          height="400px"
-                          defaultLanguage="json"
-                          value={
-                            typeof execution.input === 'string'
-                              ? execution.input
-                              : JSON.stringify(execution.input, null, 2)
-                          }
-                          options={{
-                            readOnly: true,
-                            minimap: { enabled: false },
-                            fontSize: 14,
-                            lineNumbers: "on",
-                            wordWrap: "on",
-                            scrollBeyondLastLine: false,
-                          }}
-                          theme="vs-dark"
-                        />
-                      </div>
-                    ) : (
-                      <p className="text-muted-foreground">No input data</p>
                     )}
                   </CardContent>
                 </Card>

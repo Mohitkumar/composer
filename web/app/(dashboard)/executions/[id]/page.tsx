@@ -23,6 +23,16 @@ export default function ExecutionDetailPage() {
   const { data: executionDetail, isLoading } = useQuery({
     queryKey: ['execution-detail', executionId],
     queryFn: () => executionApi.getDetails(executionId),
+    refetchInterval: (query) => {
+      const data = query.state.data as ExecutionDetail | undefined;
+      if (!data) return false;
+      const status = data.execution?.status;
+      // Poll if status is PENDING or RUNNING, stop polling once it's COMPLETED, SUCCEEDED, or FAILED
+      if (status === 'PENDING' || status === 'RUNNING') {
+        return 2000; // Poll every 2 seconds
+      }
+      return false; // Stop polling for terminal states
+    },
   });
 
   const cancelMutation = useMutation({
@@ -151,62 +161,45 @@ export default function ExecutionDetailPage() {
         )}
       </div>
 
-      {/* Overview Cards */}
-      <div className="grid gap-4 md:grid-cols-4">
-        <Card>
-          <CardHeader className="pb-3">
-            <CardTitle className="text-sm font-medium">Status</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <Badge variant={getStatusBadgeVariant(execution.status)} className="text-sm">
-              {execution.status}
-            </Badge>
-          </CardContent>
-        </Card>
-        <Card>
-          <CardHeader className="pb-3">
-            <CardTitle className="text-sm font-medium">Duration</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <p className="text-sm">{duration || 'N/A'}</p>
-          </CardContent>
-        </Card>
-        <Card>
-          <CardHeader className="pb-3">
-            <CardTitle className="text-sm font-medium">Tasks</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <p className="text-sm">
-              {taskInstances.length} total
-              {taskInstances.filter((t) => t.state === 'FAILED').length > 0 && (
-                <span className="text-destructive ml-1">
-                  ({taskInstances.filter((t) => t.state === 'FAILED').length} failed)
-                </span>
-              )}
-            </p>
-          </CardContent>
-        </Card>
-        <Card>
-          <CardHeader className="pb-3">
-            <CardTitle className="text-sm font-medium">Workflow</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <Link
-              href={`/workflows/${execution.workflow_definition_id}`}
-              className="text-sm text-primary hover:underline font-mono"
-            >
-              {execution.workflow_definition_id}
-            </Link>
-            <p className="text-xs text-muted-foreground">v{execution.workflow_version}</p>
-          </CardContent>
-        </Card>
+      {/* Compact Overview Info */}
+      <div className="flex flex-wrap items-center gap-4 text-sm border-b pb-3">
+        <div className="flex items-center gap-2">
+          <span className="text-muted-foreground">Status:</span>
+          <Badge variant={getStatusBadgeVariant(execution.status)} className="text-sm">
+            {execution.status}
+          </Badge>
+        </div>
+        <div className="flex items-center gap-2">
+          <span className="text-muted-foreground">Duration:</span>
+          <span>{duration || 'N/A'}</span>
+        </div>
+        <div className="flex items-center gap-2">
+          <span className="text-muted-foreground">Tasks:</span>
+          <span>
+            {taskInstances.length} total
+            {taskInstances.filter((t) => t.state === 'FAILED').length > 0 && (
+              <span className="text-destructive ml-1">
+                ({taskInstances.filter((t) => t.state === 'FAILED').length} failed)
+              </span>
+            )}
+          </span>
+        </div>
+        <div className="flex items-center gap-2">
+          <span className="text-muted-foreground">Workflow:</span>
+          <Link
+            href={`/workflows/${execution.workflow_definition_id}`}
+            className="text-primary hover:underline font-mono"
+          >
+            {execution.workflow_definition_id}
+          </Link>
+          <span className="text-muted-foreground">v{execution.workflow_version}</span>
+        </div>
       </div>
 
       <Tabs defaultValue="tasks" className="space-y-4">
         <TabsList>
           <TabsTrigger value="tasks">Task Execution</TabsTrigger>
           <TabsTrigger value="context">Context</TabsTrigger>
-          <TabsTrigger value="input">Input</TabsTrigger>
         </TabsList>
 
         {/* Task Execution Tab */}
@@ -420,42 +413,6 @@ export default function ExecutionDetailPage() {
                 </div>
               ) : (
                 <p className="text-muted-foreground">No context data available</p>
-              )}
-            </CardContent>
-          </Card>
-        </TabsContent>
-
-        {/* Input Tab */}
-        <TabsContent value="input" className="space-y-4">
-          <Card>
-            <CardHeader>
-              <CardTitle>Execution Input</CardTitle>
-              <CardDescription>Input data passed to the workflow execution</CardDescription>
-            </CardHeader>
-            <CardContent>
-              {execution.input ? (
-                <div className="border rounded-md overflow-hidden" style={{ height: '400px' }}>
-                  <Editor
-                    height="400px"
-                    defaultLanguage="json"
-                    value={
-                      typeof execution.input === 'string'
-                        ? execution.input
-                        : JSON.stringify(execution.input, null, 2)
-                    }
-                    options={{
-                      readOnly: true,
-                      minimap: { enabled: false },
-                      fontSize: 14,
-                      lineNumbers: "on",
-                      wordWrap: "on",
-                      scrollBeyondLastLine: false,
-                    }}
-                    theme="vs-dark"
-                  />
-                </div>
-              ) : (
-                <p className="text-muted-foreground">No input data</p>
               )}
             </CardContent>
           </Card>
