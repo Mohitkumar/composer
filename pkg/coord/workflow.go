@@ -408,42 +408,71 @@ func (c *Coordinator) GetExecutionDetails(ctx context.Context, instanceID string
 	}, nil
 }
 
-// ListWorkflowInstances lists workflow instances, optionally filtered by workflow ID and status.
+// ListWorkflowInstancesResponse represents a paginated list of workflow instances
+type ListWorkflowInstancesResponse struct {
+	Executions []model.WorkflowInstanceRecord `json:"executions"`
+	Total      int                            `json:"total"`
+	Page       int                            `json:"page"`
+	PageSize   int                            `json:"page_size"`
+	TotalPages int                            `json:"total_pages"`
+}
+
+// ListWorkflowInstances lists workflow instances with search, pagination, and optional filters.
 // Excludes soft-deleted instances by default.
 func (c *Coordinator) ListWorkflowInstances(ctx context.Context, workflowID *string,
-	status *model.WorkflowInstanceStatus, limit, offset int) ([]model.WorkflowInstanceRecord, error) {
-	query := `SELECT id, workflow_definition_id, workflow_version, status, input_json, created_at, updated_at, completed_at 
-	          FROM workflow_runs WHERE deleted_at IS NULL`
+	status *model.WorkflowInstanceStatus, search string, page, pageSize int) (*ListWorkflowInstancesResponse, error) {
+	// Build base query with filters
+	baseQuery := `FROM workflow_runs WHERE deleted_at IS NULL`
 	args := []interface{}{}
 	argPos := 1
 
 	if workflowID != nil {
-		query += fmt.Sprintf(` AND workflow_definition_id = $%d`, argPos)
+		baseQuery += fmt.Sprintf(` AND workflow_definition_id = $%d`, argPos)
 		args = append(args, *workflowID)
 		argPos++
 	}
 
 	if status != nil {
-		query += fmt.Sprintf(` AND status = $%d`, argPos)
+		baseQuery += fmt.Sprintf(` AND status = $%d`, argPos)
 		args = append(args, string(*status))
 		argPos++
 	}
 
-	query += ` ORDER BY created_at DESC`
-
-	if limit > 0 {
-		query += fmt.Sprintf(` LIMIT $%d`, argPos)
-		args = append(args, limit)
+	// Add search filter (search in execution ID and workflow ID)
+	if search != "" {
+		baseQuery += fmt.Sprintf(` AND (id ILIKE $%d OR workflow_definition_id ILIKE $%d)`, argPos, argPos)
+		args = append(args, "%"+search+"%")
 		argPos++
-		if offset > 0 {
-			query += fmt.Sprintf(` OFFSET $%d`, argPos)
-			args = append(args, offset)
-		}
 	}
+
+	// Get total count
+	var total int
+	countQuery := `SELECT COUNT(*) ` + baseQuery
+	err := c.DB.QueryRow(ctx, countQuery, args...).Scan(&total)
+	if err != nil {
+		return nil, fmt.Errorf("failed to count executions: %w", err)
+	}
+
+	// Calculate pagination
+	if page < 1 {
+		page = 1
+	}
+	if pageSize < 1 {
+		pageSize = 20
+	}
+	offset := (page - 1) * pageSize
+	totalPages := (total + pageSize - 1) / pageSize
+
+	// Build main query with pagination
+	query := `SELECT id, workflow_definition_id, workflow_version, status, input_json, created_at, updated_at, completed_at 
+	          ` + baseQuery + ` 
+	          ORDER BY created_at DESC
+	          LIMIT $` + strconv.Itoa(argPos) + ` OFFSET $` + strconv.Itoa(argPos+1)
+	args = append(args, pageSize, offset)
 
 	rows, err := c.DB.Query(ctx, query, args...)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to query executions: %w", err)
 	}
 	defer rows.Close()
 
@@ -453,7 +482,7 @@ func (c *Coordinator) ListWorkflowInstances(ctx context.Context, workflowID *str
 		var completedAt sql.NullTime
 		if err := rows.Scan(&inst.ID, &inst.WorkflowDefinitionID, &inst.WorkflowVersion,
 			&inst.Status, &inst.Input, &inst.CreatedAt, &inst.UpdatedAt, &completedAt); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("failed to scan execution: %w", err)
 		}
 		if completedAt.Valid {
 			inst.CompletedAt = &completedAt.Time
@@ -461,7 +490,17 @@ func (c *Coordinator) ListWorkflowInstances(ctx context.Context, workflowID *str
 		instances = append(instances, inst)
 	}
 
-	return instances, rows.Err()
+	if err = rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating executions: %w", err)
+	}
+
+	return &ListWorkflowInstancesResponse{
+		Executions: instances,
+		Total:      total,
+		Page:       page,
+		PageSize:   pageSize,
+		TotalPages: totalPages,
+	}, nil
 }
 
 // GetWorkflowInstanceStatus retrieves detailed status information for a workflow instance.

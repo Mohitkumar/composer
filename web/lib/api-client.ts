@@ -239,13 +239,23 @@ export interface ExecutionDetail {
   task_instances: TaskInstance[];
 }
 
+// Paginated execution list response
+export interface ExecutionListResponse {
+  executions: WorkflowInstance[];
+  total: number;
+  page: number;
+  page_size: number;
+  total_pages: number;
+}
+
 export const executionApi = {
   list: async (params?: {
     workflow_id?: string;
     status?: string;
-    limit?: number;
-    offset?: number;
-  }): Promise<WorkflowInstance[]> => {
+    search?: string;
+    page?: number;
+    page_size?: number;
+  }): Promise<ExecutionListResponse> => {
     const response = await apiClient.get('/executions', { params });
     return response.data;
   },

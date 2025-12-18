@@ -14,8 +14,8 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table';
-import { Eye, RotateCw } from 'lucide-react';
-import { useState } from 'react';
+import { Eye, RotateCw, Search } from 'lucide-react';
+import { useState, useEffect } from 'react';
 import { ExecutionDetailDialog } from '@/components/execution/execution-detail-dialog';
 import { RetryExecutionDialog } from '@/components/execution/retry-execution-dialog';
 import {
@@ -30,6 +30,8 @@ import { Input } from '@/components/ui/input';
 export default function ExecutionsPage() {
   const [statusFilter, setStatusFilter] = useState<string>('all');
   const [workflowFilter, setWorkflowFilter] = useState<string>('');
+  const [searchQuery, setSearchQuery] = useState('');
+  const [debouncedSearch, setDebouncedSearch] = useState('');
   const [page, setPage] = useState(1);
   const [selectedExecutionId, setSelectedExecutionId] = useState<string | null>(null);
   const [detailDialogOpen, setDetailDialogOpen] = useState(false);
@@ -38,6 +40,15 @@ export default function ExecutionsPage() {
   const pageSize = 20;
   const queryClient = useQueryClient();
 
+  // Debounce search query
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      setDebouncedSearch(searchQuery);
+      setPage(1); // Reset to first page when search changes
+    }, 300);
+    return () => clearTimeout(timer);
+  }, [searchQuery]);
+
   // Fetch execution details for retry
   const { data: retryExecutionDetail } = useQuery({
     queryKey: ['execution-detail', retryExecutionId],
@@ -45,16 +56,25 @@ export default function ExecutionsPage() {
     enabled: retryDialogOpen && !!retryExecutionId,
   });
 
-  const { data: executions, isLoading, error, isError } = useQuery({
-    queryKey: ['executions', statusFilter, workflowFilter],
+  const { data: executionResponse, isLoading, error, isError } = useQuery({
+    queryKey: ['executions', statusFilter, workflowFilter, debouncedSearch, page],
     queryFn: () =>
       executionApi.list({
         status: statusFilter !== 'all' ? statusFilter : undefined,
         workflow_id: workflowFilter || undefined,
-        limit: 100,
+        search: debouncedSearch || undefined,
+        page,
+        page_size: pageSize,
       }),
     retry: 2,
   });
+
+  // Handle both old format (array) and new format (object) for backward compatibility
+  const executions = Array.isArray(executionResponse)
+    ? executionResponse
+    : executionResponse?.executions || [];
+  const totalPages = executionResponse?.total_pages || (executions.length > 0 ? 1 : 0);
+  const total = executionResponse?.total || executions.length;
 
   if (isLoading) {
     return (
@@ -95,15 +115,6 @@ export default function ExecutionsPage() {
     );
   }
 
-  // Filter out duplicates by ID
-  const filteredExecutions = executions?.filter((execution, index, self) => 
-    index === self.findIndex((e) => e.id === execution.id)
-  ) || [];
-  const paginatedExecutions = filteredExecutions.slice(
-    (page - 1) * pageSize,
-    page * pageSize
-  );
-  const totalPages = Math.ceil(filteredExecutions.length / pageSize);
 
   const getStatusBadgeVariant = (status: string) => {
     switch (status) {
@@ -134,11 +145,23 @@ export default function ExecutionsPage() {
             <div>
               <CardTitle>All Executions</CardTitle>
               <CardDescription>
-                {filteredExecutions.length} execution{filteredExecutions.length !== 1 ? 's' : ''} found
+                {total} execution{total !== 1 ? 's' : ''} total
               </CardDescription>
             </div>
             <div className="flex gap-2">
-              <Select value={statusFilter} onValueChange={setStatusFilter}>
+              <div className="relative w-64">
+                <Search className="absolute left-2 top-1/2 transform -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+                <Input
+                  placeholder="Search by execution ID or workflow ID..."
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  className="pl-8"
+                />
+              </div>
+              <Select value={statusFilter} onValueChange={(value) => {
+                setStatusFilter(value);
+                setPage(1); // Reset to first page when filter changes
+              }}>
                 <SelectTrigger className="w-[180px]">
                   <SelectValue placeholder="Filter by status" />
                 </SelectTrigger>
@@ -154,14 +177,17 @@ export default function ExecutionsPage() {
               <Input
                 placeholder="Filter by workflow ID"
                 value={workflowFilter}
-                onChange={(e) => setWorkflowFilter(e.target.value)}
+                onChange={(e) => {
+                  setWorkflowFilter(e.target.value);
+                  setPage(1); // Reset to first page when filter changes
+                }}
                 className="w-[200px]"
               />
             </div>
           </div>
         </CardHeader>
         <CardContent>
-          {paginatedExecutions.length === 0 ? (
+          {executions.length === 0 ? (
             <div className="text-center py-12">
               <p className="text-muted-foreground">No executions found</p>
             </div>
@@ -181,7 +207,7 @@ export default function ExecutionsPage() {
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {paginatedExecutions.map((execution, index) => (
+                  {executions.map((execution, index) => (
                     <TableRow key={`${execution.id}-${index}`}>
                       <TableCell className="font-mono text-sm">
                         {execution.id}
@@ -246,22 +272,26 @@ export default function ExecutionsPage() {
               {totalPages > 1 && (
                 <div className="flex items-center justify-between mt-4">
                   <div className="text-sm text-muted-foreground">
-                    Page {page} of {totalPages}
+                    Showing {executions.length > 0 ? (page - 1) * pageSize + 1 : 0} to{' '}
+                    {Math.min(page * pageSize, total)} of {total} executions
                   </div>
                   <div className="flex gap-2">
                     <Button
                       variant="outline"
                       size="sm"
                       onClick={() => setPage((p) => Math.max(1, p - 1))}
-                      disabled={page === 1}
+                      disabled={page === 1 || isLoading}
                     >
                       Previous
                     </Button>
+                    <div className="text-sm text-muted-foreground flex items-center px-2">
+                      Page {page} of {totalPages}
+                    </div>
                     <Button
                       variant="outline"
                       size="sm"
                       onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
-                      disabled={page === totalPages}
+                      disabled={page === totalPages || isLoading}
                     >
                       Next
                     </Button>

@@ -213,16 +213,19 @@ func (h *handlers) listExecutions(w http.ResponseWriter, r *http.Request) {
 		status = &s
 	}
 
-	limit := 100
-	offset := 0
-	if l := r.URL.Query().Get("limit"); l != "" {
-		if li, err := strconv.Atoi(l); err == nil {
-			limit = li
+	search := r.URL.Query().Get("search")
+
+	// Parse pagination parameters
+	page := 1
+	pageSize := 20
+	if pageStr := r.URL.Query().Get("page"); pageStr != "" {
+		if p, err := strconv.Atoi(pageStr); err == nil && p > 0 {
+			page = p
 		}
 	}
-	if o := r.URL.Query().Get("offset"); o != "" {
-		if oi, err := strconv.Atoi(o); err == nil {
-			offset = oi
+	if pageSizeStr := r.URL.Query().Get("page_size"); pageSizeStr != "" {
+		if ps, err := strconv.Atoi(pageSizeStr); err == nil && ps > 0 && ps <= 100 {
+			pageSize = ps
 		}
 	}
 
@@ -231,7 +234,7 @@ func (h *handlers) listExecutions(w http.ResponseWriter, r *http.Request) {
 		wfID = &workflowID
 	}
 
-	instances, err := h.coordinator.ListWorkflowInstances(r.Context(), wfID, status, limit, offset)
+	result, err := h.coordinator.ListWorkflowInstances(r.Context(), wfID, status, search, page, pageSize)
 	if err != nil {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusInternalServerError)
@@ -239,7 +242,7 @@ func (h *handlers) listExecutions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(instances)
+	json.NewEncoder(w).Encode(result)
 }
 
 func (h *handlers) getExecution(w http.ResponseWriter, r *http.Request) {
