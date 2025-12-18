@@ -76,7 +76,7 @@ export interface WorkflowDefinition {
   id: string;
   name: string;
   version: number;
-  spec: WorkflowDefinitionSpec | string; // Can be object or JSON string
+  spec: string; // YAML string
   created_by?: string;
   enabled: boolean;
   webhook_url?: string;
@@ -88,7 +88,7 @@ export interface CreateWorkflowRequest {
   workflow_id: string;
   name: string;
   version: number;
-  spec: WorkflowDefinitionSpec;
+  spec: string; // YAML string
   created_by?: string;
 }
 
@@ -172,7 +172,22 @@ export const workflowApi = {
   },
 
   create: async (data: CreateWorkflowRequest): Promise<void> => {
-    await apiClient.post('/workflows', data);
+    // Send as YAML string (backend expects YAML format)
+    // The data.spec is already a YAML string, construct the full YAML document
+    const yaml = require('yaml');
+    const yamlBody = yaml.stringify({
+      workflow_id: data.workflow_id,
+      name: data.name,
+      version: data.version,
+      spec: yaml.parse(data.spec), // Parse YAML spec string to object for inclusion
+      ...(data.created_by ? { created_by: data.created_by } : {}),
+    });
+    
+    await apiClient.post('/workflows', yamlBody, {
+      headers: {
+        'Content-Type': 'application/x-yaml',
+      },
+    });
   },
 
   update: async (

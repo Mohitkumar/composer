@@ -2,12 +2,14 @@ package http
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"strconv"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/mohitkumar/composer/pkg/coord"
 	"github.com/mohitkumar/composer/pkg/model"
+	"gopkg.in/yaml.v3"
 )
 
 // handlers wraps coordinator for HTTP handlers
@@ -18,14 +20,49 @@ type handlers struct {
 // Workflow handlers
 
 func (h *handlers) createWorkflow(w http.ResponseWriter, r *http.Request) {
-	var p model.RegisterWorkflowRequest
-	if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
+	// Read request body
+	bodyBytes, err := io.ReadAll(r.Body)
+	if err != nil {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
 		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 		return
 	}
-	if err := h.coordinator.RegisterWorkflow(r.Context(), &p); err != nil {
+
+	// Parse as YAML
+	var p struct {
+		WorkflowID string      `yaml:"workflow_id"`
+		Name       string      `yaml:"name"`
+		Version    int         `yaml:"version"`
+		Spec       interface{} `yaml:"spec"` // YAML spec
+		CreatedBy  string      `yaml:"created_by,omitempty"`
+	}
+	if err := yaml.Unmarshal(bodyBytes, &p); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid YAML: " + err.Error()})
+		return
+	}
+
+	// Convert spec from YAML (interface{}) to JSON
+	specJSON, err := json.Marshal(p.Spec)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to convert spec to JSON: " + err.Error()})
+		return
+	}
+
+	// Create RegisterWorkflowRequest with JSON spec
+	req := model.RegisterWorkflowRequest{
+		WorkflowID: p.WorkflowID,
+		Name:       p.Name,
+		Version:    p.Version,
+		Spec:       specJSON,
+		CreatedBy:  p.CreatedBy,
+	}
+
+	if err := h.coordinator.RegisterWorkflow(r.Context(), &req); err != nil {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusInternalServerError)
 		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
@@ -61,8 +98,52 @@ func (h *handlers) listWorkflows(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 		return
 	}
+
+	// Convert spec from JSON to YAML for each workflow
+	workflowsWithYAML := make([]map[string]interface{}, len(result.Workflows))
+	for i, wf := range result.Workflows {
+		var specObj interface{}
+		if err := json.Unmarshal(wf.Spec, &specObj); err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]string{"error": "Failed to parse spec for workflow " + wf.ID + ": " + err.Error()})
+			return
+		}
+
+		specYAML, err := yaml.Marshal(specObj)
+		if err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]string{"error": "Failed to convert spec to YAML for workflow " + wf.ID + ": " + err.Error()})
+			return
+		}
+
+		workflowMap := map[string]interface{}{
+			"id":           wf.ID,
+			"name":         wf.Name,
+			"version":      wf.Version,
+			"spec":         string(specYAML),
+			"created_by":   wf.CreatedBy,
+			"enabled":      wf.Enabled,
+			"created_at":   wf.CreatedAt,
+			"success_rate": wf.SuccessRate,
+		}
+		if wf.WebhookURL.Valid {
+			workflowMap["webhook_url"] = wf.WebhookURL.String
+		}
+		workflowsWithYAML[i] = workflowMap
+	}
+
+	response := map[string]interface{}{
+		"workflows":   workflowsWithYAML,
+		"total":       result.Total,
+		"page":        result.Page,
+		"page_size":   result.PageSize,
+		"total_pages": result.TotalPages,
+	}
+
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(result)
+	json.NewEncoder(w).Encode(response)
 }
 
 func (h *handlers) getWorkflow(w http.ResponseWriter, r *http.Request) {
@@ -85,8 +166,40 @@ func (h *handlers) getWorkflow(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 		return
 	}
+
+	// Convert spec from JSON to YAML
+	var specObj interface{}
+	if err := json.Unmarshal(wf.Spec, &specObj); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to parse spec: " + err.Error()})
+		return
+	}
+
+	specYAML, err := yaml.Marshal(specObj)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to convert spec to YAML: " + err.Error()})
+		return
+	}
+
+	// Create response with YAML spec
+	response := map[string]interface{}{
+		"id":         wf.ID,
+		"name":       wf.Name,
+		"version":    wf.Version,
+		"spec":       string(specYAML),
+		"created_by": wf.CreatedBy,
+		"enabled":    wf.Enabled,
+		"created_at": wf.CreatedAt,
+	}
+	if wf.WebhookURL.Valid {
+		response["webhook_url"] = wf.WebhookURL.String
+	}
+
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(wf)
+	json.NewEncoder(w).Encode(response)
 }
 
 func (h *handlers) updateWorkflow(w http.ResponseWriter, r *http.Request) {

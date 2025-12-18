@@ -22,22 +22,22 @@ export const SAMPLE_NODES = [
   },
 ];
 
-export const DEFAULT_TEMPLATE = JSON.stringify(
+import * as yaml from 'yaml';
+
+export const DEFAULT_TEMPLATE = yaml.stringify(
   {
     nodes: [],
     edges: [],
   },
-  null,
-  2
+  { indent: 2 }
 );
 
-export const SAMPLE_TEMPLATE = JSON.stringify(
+export const SAMPLE_TEMPLATE = yaml.stringify(
   {
     nodes: SAMPLE_NODES,
     edges: [
       { from: "start_node", to: "process_node" },
     ],
   },
-  null,
-  2
+  { indent: 2 }
 );

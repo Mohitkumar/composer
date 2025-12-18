@@ -4,7 +4,7 @@ import { useState, useEffect } from 'react';
 import { JsonWorkflowEditor } from '@/components/workflow/json-workflow-editor';
 import { workflowApi, templateApi } from '@/lib/api-client';
 import { useMutation, useQueryClient, useQuery } from '@tanstack/react-query';
-import type { WorkflowDefinitionSpec } from '@/lib/api-client';
+import * as yaml from 'yaml';
 import {
   Dialog,
   DialogContent,
@@ -30,7 +30,7 @@ export default function NewWorkflowPage() {
 
   const createMutation = useMutation({
     mutationFn: async (data: {
-      spec: WorkflowDefinitionSpec;
+      spec: string; // YAML string
       name: string;
       id: string;
     }) => {
@@ -38,7 +38,7 @@ export default function NewWorkflowPage() {
         workflow_id: data.id,
         name: data.name,
         version: 1,
-        spec: data.spec,
+        spec: data.spec, // YAML string
         created_by: 'user', // TODO: Get from auth
       });
       return data.id;
@@ -52,7 +52,7 @@ export default function NewWorkflowPage() {
 
   const updateMutation = useMutation({
     mutationFn: async (data: {
-      spec: WorkflowDefinitionSpec;
+      spec: string; // YAML string
       name: string;
       id: string;
     }) => {
@@ -60,12 +60,12 @@ export default function NewWorkflowPage() {
       const currentWorkflow = await workflowApi.get(data.id);
       const nextVersion = (currentWorkflow.version || 1) + 1;
 
-      // Create new version with updated spec
+      // Create new version with updated spec (YAML string)
       await workflowApi.create({
         workflow_id: data.id,
         name: data.name,
         version: nextVersion,
-        spec: data.spec,
+        spec: data.spec, // YAML string
         created_by: 'user',
       });
 
@@ -87,7 +87,7 @@ export default function NewWorkflowPage() {
   });
 
   const handleSave = async (args: {
-    spec: WorkflowDefinitionSpec;
+    spec: string; // YAML string
     name: string;
     id: string;
   }) => {
@@ -101,7 +101,12 @@ export default function NewWorkflowPage() {
   const handleTemplateSelect = async (templateId: string) => {
     try {
       const template = await templateApi.getWorkflowTemplate(templateId);
-      setInitialSpec(template.spec_json);
+      // Template spec_json is JSON, convert to YAML
+      const specObj = typeof template.spec_json === 'string' 
+        ? JSON.parse(template.spec_json) 
+        : template.spec_json;
+      const yaml = require('yaml');
+      setInitialSpec(yaml.stringify(specObj, { indent: 2 }));
       setSelectedTemplate(templateId);
       setTemplateDialogOpen(false);
     } catch (err) {

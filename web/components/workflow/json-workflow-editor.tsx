@@ -15,14 +15,15 @@ import { SAMPLE_TEMPLATE, DEFAULT_TEMPLATE } from "@/lib/workflow-constants";
 import { createCompletionProvider } from "@/components/workflow/monaco-completion-provider";
 import { NodeTemplateDialog } from "@/components/workflow/node-template-dialog";
 import { ValidationResults } from "@/components/workflow/validation-results";
+import * as yaml from "yaml";
 
 interface JsonWorkflowEditorProps {
-  initialSpec?: WorkflowDefinitionSpec;
+  initialSpec?: WorkflowDefinitionSpec | string; // Can be object or YAML string
   initialName?: string;
   initialId?: string;
   isSaving?: boolean;
   isNew?: boolean;
-  onSave: (args: { spec: WorkflowDefinitionSpec; name: string; id: string }) => Promise<void>;
+  onSave: (args: { spec: string; name: string; id: string }) => Promise<void>; // spec is YAML string
 }
 
 export function JsonWorkflowEditor({
@@ -35,9 +36,14 @@ export function JsonWorkflowEditor({
 }: JsonWorkflowEditorProps) {
   const [workflowId, setWorkflowId] = useState(initialId ?? "");
   const [name, setName] = useState(initialName ?? "");
-  const [jsonText, setJsonText] = useState(() => {
+  const [yamlText, setYamlText] = useState(() => {
     if (initialSpec) {
-      return JSON.stringify(initialSpec, null, 2);
+      // If it's already a string (YAML), use it directly
+      if (typeof initialSpec === 'string') {
+        return initialSpec;
+      }
+      // Otherwise convert from object to YAML
+      return yaml.stringify(initialSpec, { indent: 2 });
     }
     // Use sample template for new workflows
     return isNew ? SAMPLE_TEMPLATE : DEFAULT_TEMPLATE;
@@ -95,23 +101,29 @@ export function JsonWorkflowEditor({
 
   useEffect(() => {
     if (initialSpec) {
-      setJsonText(JSON.stringify(initialSpec, null, 2));
+      // If it's already a string (YAML), use it directly
+      if (typeof initialSpec === 'string') {
+        setYamlText(initialSpec);
+      } else {
+        // Otherwise convert from object to YAML
+        setYamlText(yaml.stringify(initialSpec, { indent: 2 }));
+      }
     }
   }, [initialSpec]);
 
-  // Auto-validate on JSON change (debounced)
+  // Auto-validate on YAML change (debounced)
   useEffect(() => {
     const timer = setTimeout(() => {
       try {
-        const parsed = JSON.parse(jsonText);
+        const parsed = yaml.parse(yamlText);
         const result = validateWorkflowSpec(parsed);
         setValidationResult(result);
       } catch (err: any) {
-        // Only show errors for invalid JSON, not on every keystroke
-        if (jsonText.trim().length > 0) {
+        // Only show errors for invalid YAML, not on every keystroke
+        if (yamlText.trim().length > 0) {
           setValidationResult({
             isValid: false,
-            errors: [`JSON Parse Error: ${err?.message ?? "Invalid JSON"}`],
+            errors: [`YAML Parse Error: ${err?.message ?? "Invalid YAML"}`],
             warnings: [],
           });
         } else {
@@ -121,13 +133,14 @@ export function JsonWorkflowEditor({
     }, 500); // Debounce validation
 
     return () => clearTimeout(timer);
-  }, [jsonText]);
+  }, [yamlText]);
 
   const handleSaveClick = async () => {
     setValidationResult(null);
 
     try {
-      const parsed = JSON.parse(jsonText);
+      // Parse YAML to JSON
+      const parsed = yaml.parse(yamlText);
       const result = validateWorkflowSpec(parsed);
       
       if (!result.isValid) {
@@ -145,8 +158,10 @@ export function JsonWorkflowEditor({
       }
       const finalName = name || finalId;
 
+      // Convert parsed object back to YAML for saving
+      const yamlForSave = yaml.stringify(parsed, { indent: 2 });
       await onSave({
-        spec: parsed as WorkflowDefinitionSpec,
+        spec: yamlForSave,
         name: finalName,
         id: finalId,
       });
@@ -185,12 +200,11 @@ export function JsonWorkflowEditor({
     editorRef.current = editor;
     monacoRef.current = monaco;
     
-    // Configure JSON schema validation
-    monaco.languages.json.jsonDefaults.setDiagnosticsOptions({
-      validate: true,
-      schemas: [],
-      allowComments: false,
-    });
+    // Register YAML language if not already registered
+    const languages = monaco.languages.getLanguages();
+    if (!languages.find((lang: { id: string }) => lang.id === 'yaml')) {
+      monaco.languages.register({ id: 'yaml' });
+    }
 
     // Register completion provider (will be updated when configurations change)
     registerCompletionProvider(monaco);
@@ -229,7 +243,7 @@ export function JsonWorkflowEditor({
 
   const insertNodeTemplate = async (template: NodeTemplate) => {
     try {
-      const currentSpec = JSON.parse(jsonText) as WorkflowDefinitionSpec;
+      const currentSpec = yaml.parse(yamlText) as WorkflowDefinitionSpec;
       const templateNode = {
         node_id: `${template.runtime}_${Date.now()}`,
         name: template.name,
@@ -239,7 +253,7 @@ export function JsonWorkflowEditor({
       };
 
       currentSpec.nodes.push(templateNode);
-      setJsonText(JSON.stringify(currentSpec, null, 2));
+      setYamlText(yaml.stringify(currentSpec, { indent: 2 }));
       setNodeTemplateDialogOpen(false);
       setSelectedRuntime("");
     } catch (err) {
@@ -292,15 +306,15 @@ export function JsonWorkflowEditor({
       </div>
 
       <div className="flex-1 min-h-0 flex flex-col">
-        <Label htmlFor="workflow-json" className="mb-1 block">
-          Workflow JSON
+        <Label htmlFor="workflow-yaml" className="mb-1 block">
+          Workflow YAML
         </Label>
         <div className="flex-1 border rounded-md overflow-hidden">
           <Editor
             height="100%"
-            defaultLanguage="json"
-            value={jsonText}
-            onChange={(value) => setJsonText(value || "")}
+            defaultLanguage="yaml"
+            value={yamlText}
+            onChange={(value) => setYamlText(value || "")}
             onMount={handleEditorDidMount}
             options={{
               minimap: { enabled: false },
@@ -317,8 +331,8 @@ export function JsonWorkflowEditor({
           />
         </div>
         <p className="mt-2 text-xs text-muted-foreground">
-          The JSON should contain a <code>nodes</code> array and an <code>edges</code> array.
-          JSON is automatically formatted and validated as you type.
+          The YAML should contain a <code>nodes</code> array and an <code>edges</code> array.
+          YAML is automatically validated as you type.
         </p>
       </div>
 

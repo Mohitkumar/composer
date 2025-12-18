@@ -18,7 +18,7 @@ export default function EditWorkflowPage() {
 
   const updateMutation = useMutation({
     mutationFn: async (data: {
-      spec: WorkflowDefinitionSpec;
+      spec: string; // YAML string
       name: string;
       id: string;
     }) => {
@@ -26,12 +26,12 @@ export default function EditWorkflowPage() {
       const currentWorkflow = await workflowApi.get(workflowId);
       const nextVersion = (currentWorkflow.version || 1) + 1;
 
-      // Create new version with updated spec
+      // Create new version with updated spec (YAML string)
       await workflowApi.create({
         workflow_id: workflowId,
         name: data.name,
         version: nextVersion,
-        spec: data.spec,
+        spec: data.spec, // YAML string
         created_by: currentWorkflow.created_by || 'user',
       });
 
@@ -60,16 +60,11 @@ export default function EditWorkflowPage() {
     return <div>Workflow not found</div>;
   }
 
-  // Parse the spec from JSON if it's a string
-  let spec: WorkflowDefinitionSpec;
-  if (typeof workflow.spec === 'string') {
-    spec = JSON.parse(workflow.spec);
-  } else {
-    spec = workflow.spec as WorkflowDefinitionSpec;
-  }
+  // Spec is now YAML string from backend, pass it directly
+  const spec = workflow.spec as string;
 
   const handleSave = async (args: {
-    spec: WorkflowDefinitionSpec;
+    spec: string; // YAML string
     name: string;
     id: string;
   }) => {
