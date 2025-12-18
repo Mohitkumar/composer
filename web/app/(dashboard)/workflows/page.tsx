@@ -26,10 +26,14 @@ import {
 } from '@/components/ui/dialog';
 import { useState } from 'react';
 import { useRouter } from 'next/navigation';
+import { ExecuteWorkflowDialog } from '@/components/workflow/execute-workflow-dialog';
+import { toast } from 'sonner';
 
 export default function WorkflowsPage() {
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [workflowToDelete, setWorkflowToDelete] = useState<WorkflowDefinition | null>(null);
+  const [executeDialogOpen, setExecuteDialogOpen] = useState(false);
+  const [workflowToExecute, setWorkflowToExecute] = useState<WorkflowDefinition | null>(null);
   const [page, setPage] = useState(1);
   const pageSize = 10;
   const router = useRouter();
@@ -51,13 +55,28 @@ export default function WorkflowsPage() {
   });
 
   const executeMutation = useMutation({
-    mutationFn: (id: string) =>
-      workflowApi.execute(id, {
-        workflow_version: 1,
-        input: {},
-      }),
+    mutationFn: async (data: {
+      id: string;
+      version: number;
+      input: Record<string, any>;
+      execution_options?: Record<string, any>;
+    }) => {
+      return workflowApi.execute(data.id, {
+        workflow_version: data.version,
+        input: data.input,
+        execution_options: data.execution_options,
+      });
+    },
     onSuccess: (data) => {
+      toast.success('Workflow execution started');
+      setExecuteDialogOpen(false);
+      setWorkflowToExecute(null);
       router.push(`/executions/${data.run_id}`);
+    },
+    onError: (error) => {
+      toast.error('Failed to execute workflow', {
+        description: error instanceof Error ? error.message : 'Unknown error occurred',
+      });
     },
   });
 
@@ -125,7 +144,21 @@ export default function WorkflowsPage() {
   };
 
   const handleExecute = (workflow: WorkflowDefinition) => {
-    executeMutation.mutate(workflow.id);
+    setWorkflowToExecute(workflow);
+    setExecuteDialogOpen(true);
+  };
+
+  const handleExecuteConfirm = async (data: {
+    input: Record<string, any>;
+    execution_options?: Record<string, any>;
+  }) => {
+    if (!workflowToExecute) return;
+    await executeMutation.mutateAsync({
+      id: workflowToExecute.id,
+      version: workflowToExecute.version || 1,
+      input: data.input,
+      execution_options: data.execution_options,
+    });
   };
 
   return (
@@ -211,7 +244,7 @@ export default function WorkflowsPage() {
                             size="sm"
                             onClick={() => handleExecute(workflow)}
                             title="Execute workflow"
-                            disabled={executeMutation.isPending}
+                            disabled={executeMutation.isPending || executeDialogOpen}
                           >
                             <Play className="h-4 w-4" />
                           </Button>
@@ -287,6 +320,22 @@ export default function WorkflowsPage() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {workflowToExecute && (
+        <ExecuteWorkflowDialog
+          open={executeDialogOpen}
+          onOpenChange={(open) => {
+            setExecuteDialogOpen(open);
+            if (!open) {
+              setWorkflowToExecute(null);
+            }
+          }}
+          workflowId={workflowToExecute.id}
+          workflowVersion={workflowToExecute.version || 1}
+          onExecute={handleExecuteConfirm}
+          isExecuting={executeMutation.isPending}
+        />
+      )}
     </div>
   );
 }
