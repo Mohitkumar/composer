@@ -54,7 +54,7 @@ func (h *handlers) listWorkflows(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	result, err := h.coordinator.ListWorkflows(r.Context(), enabledOnly, search, page, pageSize)
+	result, err := h.coordinator.ListWorkflowsWithStats(r.Context(), enabledOnly, search, page, pageSize)
 	if err != nil {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusInternalServerError)
@@ -435,4 +435,25 @@ func (h *handlers) deleteConfiguration(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(map[string]string{"message": "Configuration deleted successfully"})
+}
+
+func (h *handlers) getWorkflowIssueSummary(w http.ResponseWriter, r *http.Request) {
+	workflowID := chi.URLParam(r, "id")
+	if workflowID == "" {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "workflow ID is required"})
+		return
+	}
+
+	summary, err := h.coordinator.GetWorkflowIssueSummary(r.Context(), workflowID)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(summary)
 }

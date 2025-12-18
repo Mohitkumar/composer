@@ -1,11 +1,11 @@
 'use client';
 
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { workflowApi, type WorkflowDefinition } from '@/lib/api-client';
+import { workflowApi, type WorkflowDefinition, type WorkflowIssueSummary } from '@/lib/api-client';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { Plus, Edit, Trash2, Play, Search } from 'lucide-react';
+import { Plus, Edit, Trash2, Play, Search, MoreVertical, AlertTriangle } from 'lucide-react';
 import Link from 'next/link';
 import { format } from 'date-fns';
 import { Badge } from '@/components/ui/badge';
@@ -25,6 +25,13 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog';
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu';
+import { ScrollArea } from '@/components/ui/scroll-area';
 import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import { ExecuteWorkflowDialog } from '@/components/workflow/execute-workflow-dialog';
@@ -35,6 +42,8 @@ export default function WorkflowsPage() {
   const [workflowToDelete, setWorkflowToDelete] = useState<WorkflowDefinition | null>(null);
   const [executeDialogOpen, setExecuteDialogOpen] = useState(false);
   const [workflowToExecute, setWorkflowToExecute] = useState<WorkflowDefinition | null>(null);
+  const [issueSummaryDialogOpen, setIssueSummaryDialogOpen] = useState(false);
+  const [workflowForIssueSummary, setWorkflowForIssueSummary] = useState<WorkflowDefinition | null>(null);
   const [page, setPage] = useState(1);
   const [searchQuery, setSearchQuery] = useState('');
   const [debouncedSearch, setDebouncedSearch] = useState('');
@@ -55,6 +64,14 @@ export default function WorkflowsPage() {
     queryKey: ['workflows', page, debouncedSearch],
     queryFn: () => workflowApi.list(undefined, debouncedSearch || undefined, page, pageSize),
     retry: 2,
+  });
+
+  // Issue summary query - must be called before early returns
+  const { data: issueSummary, isLoading: isLoadingIssueSummary } = useQuery({
+    queryKey: ['workflow-issue-summary', workflowForIssueSummary?.id],
+    queryFn: () => workflowForIssueSummary ? workflowApi.getIssueSummary(workflowForIssueSummary.id) : null,
+    enabled: issueSummaryDialogOpen && !!workflowForIssueSummary,
+    retry: 1,
   });
 
   // Handle both old format (array) and new format (object) for backward compatibility
@@ -176,6 +193,11 @@ export default function WorkflowsPage() {
     });
   };
 
+  const handleViewIssueSummary = (workflow: WorkflowDefinition) => {
+    setWorkflowForIssueSummary(workflow);
+    setIssueSummaryDialogOpen(true);
+  };
+
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
@@ -233,6 +255,7 @@ export default function WorkflowsPage() {
                     <TableHead>ID</TableHead>
                     <TableHead>Version</TableHead>
                     <TableHead>Status</TableHead>
+                    <TableHead>Success Rate</TableHead>
                     <TableHead>Created</TableHead>
                     <TableHead className="text-right">Actions</TableHead>
                   </TableRow>
@@ -251,6 +274,23 @@ export default function WorkflowsPage() {
                         <Badge variant={workflow.enabled ? 'default' : 'secondary'}>
                           {workflow.enabled ? 'Enabled' : 'Disabled'}
                         </Badge>
+                      </TableCell>
+                      <TableCell>
+                        {workflow.success_rate !== undefined ? (
+                          <Badge
+                            variant={
+                              workflow.success_rate >= 95
+                                ? 'default'
+                                : workflow.success_rate >= 80
+                                ? 'secondary'
+                                : 'destructive'
+                            }
+                          >
+                            {workflow.success_rate.toFixed(1)}%
+                          </Badge>
+                        ) : (
+                          <span className="text-muted-foreground">N/A</span>
+                        )}
                       </TableCell>
                       <TableCell>
                         {format(new Date(workflow.created_at), 'MMM d, yyyy')}
@@ -276,6 +316,27 @@ export default function WorkflowsPage() {
                           >
                             <Play className="h-4 w-4" />
                           </Button>
+                          {workflow.success_rate !== undefined && workflow.success_rate < 95 && (
+                            <DropdownMenu>
+                              <DropdownMenuTrigger asChild>
+                                <Button
+                                  variant="ghost"
+                                  size="sm"
+                                  title="View issue summary"
+                                >
+                                  <AlertTriangle className="h-4 w-4 text-destructive" />
+                                </Button>
+                              </DropdownMenuTrigger>
+                              <DropdownMenuContent align="end">
+                                <DropdownMenuItem
+                                  onClick={() => handleViewIssueSummary(workflow)}
+                                >
+                                  <AlertTriangle className="mr-2 h-4 w-4" />
+                                  View Issue Summary
+                                </DropdownMenuItem>
+                              </DropdownMenuContent>
+                            </DropdownMenu>
+                          )}
                           <Button
                             variant="ghost"
                             size="sm"
@@ -368,6 +429,60 @@ export default function WorkflowsPage() {
           isExecuting={executeMutation.isPending}
         />
       )}
+
+      <Dialog open={issueSummaryDialogOpen} onOpenChange={setIssueSummaryDialogOpen}>
+        <DialogContent className="max-w-3xl max-h-[80vh] flex flex-col">
+          <DialogHeader>
+            <DialogTitle>Issue Summary</DialogTitle>
+            <DialogDescription>
+              {workflowForIssueSummary
+                ? `Analysis for workflow: ${workflowForIssueSummary.name} (${workflowForIssueSummary.id})`
+                : 'Loading...'}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="flex-1 overflow-hidden">
+            {isLoadingIssueSummary ? (
+              <div className="flex items-center justify-center min-h-[200px]">
+                <div className="text-center">
+                  <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary mx-auto mb-4"></div>
+                  <p className="text-muted-foreground">Analyzing issues...</p>
+                </div>
+              </div>
+            ) : issueSummary ? (
+              <div className="space-y-4">
+                <div>
+                  <h4 className="font-medium mb-2">Summary</h4>
+                  <div className="bg-muted rounded-md p-4">
+                    <p className="text-sm whitespace-pre-wrap">{issueSummary.summary}</p>
+                  </div>
+                </div>
+                {issueSummary.errors.length > 0 && (
+                  <div>
+                    <h4 className="font-medium mb-2">Errors ({issueSummary.errors.length})</h4>
+                    <ScrollArea className="h-[300px] border rounded-md p-4">
+                      <div className="space-y-2">
+                        {issueSummary.errors.map((error, index) => (
+                          <div
+                            key={index}
+                            className="text-sm bg-destructive/10 border border-destructive/20 rounded p-2"
+                          >
+                            <pre className="whitespace-pre-wrap text-xs">{error}</pre>
+                          </div>
+                        ))}
+                      </div>
+                    </ScrollArea>
+                  </div>
+                )}
+              </div>
+            ) : (
+              <p className="text-muted-foreground">No issue summary available</p>
+            )}
+          </div>
+          <DialogFooter>
+            <Button onClick={() => setIssueSummaryDialogOpen(false)}>Close</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

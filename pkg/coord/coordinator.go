@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"github.com/mohitkumar/composer/pkg/db"
+	"github.com/mohitkumar/composer/pkg/intelligence"
 	"github.com/mohitkumar/composer/pkg/lease"
 	"github.com/mohitkumar/composer/pkg/outbox"
 	"github.com/mohitkumar/composer/pkg/redisq"
@@ -19,6 +20,7 @@ type Coordinator struct {
 	LeaseManager *lease.Manager
 	Outbox       *outbox.OutboxEnqueuer
 	Template     *template.Resolver
+	Intelligence *intelligence.Client
 }
 
 func NewCoordinator(config *Config, logger *zerolog.Logger) (*Coordinator, error) {
@@ -52,6 +54,9 @@ func NewCoordinator(config *Config, logger *zerolog.Logger) (*Coordinator, error
 		return nil, err
 	}
 
+	// Create intelligence client
+	intelligenceClient := intelligence.NewClient(config.IntelligenceConfig, *logger)
+
 	return &Coordinator{
 		Config:       config,
 		Logger:       logger,
@@ -60,6 +65,7 @@ func NewCoordinator(config *Config, logger *zerolog.Logger) (*Coordinator, error
 		LeaseManager: leaseManager,
 		Outbox:       outboxEnqueuer,
 		Template:     templateResolver,
+		Intelligence: intelligenceClient,
 	}, nil
 }
 

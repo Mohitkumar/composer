@@ -65,6 +65,7 @@ func NewServer(config *api.APIConfig, coordinator *coord.Coordinator) *Server {
 			r.Delete("/{id}", h.deleteWorkflow)
 			r.Post("/{id}/execute", h.executeWorkflow)
 			r.Get("/{id}/status", h.getWorkflowStatus)
+			r.Get("/{id}/issue-summary", h.getWorkflowIssueSummary)
 		})
 
 		// Execution endpoints

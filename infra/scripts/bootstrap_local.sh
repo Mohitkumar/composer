@@ -29,6 +29,7 @@ COORDINATOR_HTTP_PORT="${COORDINATOR_HTTP_PORT:-8080}"
 COORDINATOR_GRPC_PORT="${COORDINATOR_GRPC_PORT:-50051}"
 WORKER_JS_PORT="${WORKER_JS_PORT:-50052}"
 WORKER_PY_PORT="${WORKER_PY_PORT:-50053}"
+INTELLIGENCE_AGENT_URL="${INTELLIGENCE_AGENT_URL:-}"
 
 # Check prerequisites
 echo -e "${YELLOW}Checking prerequisites...${NC}"
@@ -165,17 +166,26 @@ trap cleanup EXIT INT TERM
 
 # Start Coordinator
 echo -e "${BLUE}Starting Coordinator...${NC}"
+COORDINATOR_ARGS=(
+    --store.url="$STORE_URL"
+    --redis.addrs="$REDIS_ADDR"
+    --api.http_port="$COORDINATOR_HTTP_PORT"
+    --api.grpc_port="$COORDINATOR_GRPC_PORT"
+    --disable-observability
+)
+
+# Add intelligence agent URL if provided
+if [ -n "$INTELLIGENCE_AGENT_URL" ]; then
+    COORDINATOR_ARGS+=(--intelligence.agent_url="$INTELLIGENCE_AGENT_URL")
+    echo -e "${GREEN}✓ Intelligence agent configured: $INTELLIGENCE_AGENT_URL${NC}"
+fi
+
 STORE_URL="$STORE_URL" \
 COMPOSER_REDIS_ADDRS="$REDIS_ADDR" \
 COMPOSER_API_HTTP_PORT="$COORDINATOR_HTTP_PORT" \
 COMPOSER_API_GRPC_PORT="$COORDINATOR_GRPC_PORT" \
 COMPOSER_LOG_LEVEL=info \
-./bin/coordinator \
-    --store.url="$STORE_URL" \
-    --redis.addrs="$REDIS_ADDR" \
-    --api.http_port="$COORDINATOR_HTTP_PORT" \
-    --api.grpc_port="$COORDINATOR_GRPC_PORT" \
-    --disable-observability \
+./bin/coordinator "${COORDINATOR_ARGS[@]}" \
     > "$PROJECT_ROOT/logs/coordinator.log" 2>&1 &
 COORDINATOR_PID=$!
 echo -e "${GREEN}✓ Coordinator started (PID: $COORDINATOR_PID)${NC}"

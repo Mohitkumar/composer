@@ -81,6 +81,7 @@ export interface WorkflowDefinition {
   enabled: boolean;
   webhook_url?: string;
   created_at: string;
+  success_rate?: number; // Success rate percentage (0-100)
 }
 
 export interface CreateWorkflowRequest {
@@ -138,6 +139,11 @@ export interface WorkflowListResponse {
   page: number;
   page_size: number;
   total_pages: number;
+}
+
+export interface WorkflowIssueSummary {
+  summary: string;
+  errors: string[];
 }
 
 // API functions
@@ -202,7 +208,17 @@ export const workflowApi = {
     });
     return response.data;
   },
+
+  getIssueSummary: async (id: string): Promise<WorkflowIssueSummary> => {
+    const response = await apiClient.get(`/workflows/${id}/issue-summary`);
+    return response.data;
+  },
 };
+
+export interface WorkflowIssueSummary {
+  summary: string;
+  errors: string[];
+}
 
 export interface TaskInstance {
   id: string;

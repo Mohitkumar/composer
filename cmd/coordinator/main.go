@@ -9,6 +9,7 @@ import (
 	"github.com/mohitkumar/composer/pkg/api"
 	"github.com/mohitkumar/composer/pkg/coord"
 	"github.com/mohitkumar/composer/pkg/db"
+	"github.com/mohitkumar/composer/pkg/intelligence"
 	"github.com/mohitkumar/composer/pkg/redisq"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
@@ -53,6 +54,10 @@ func setupFlags(cmd *cobra.Command) {
 	cmd.Flags().Int("outbox.concurrency", 2, "Outbox concurrency (number of concurrent workers)")
 	cmd.Flags().Duration("outbox.poll_interval", time.Second, "Outbox poll interval (how often to check for new messages)")
 	cmd.Flags().String("outbox.stream_prefix", "workflow.", "Outbox stream prefix (e.g., 'workflow.' for 'workflow.tasks')")
+
+	// Intelligence flags
+	cmd.Flags().String("intelligence.agent_url", "", "AI intelligence agent URL (e.g., http://localhost:8000)")
+	cmd.Flags().Duration("intelligence.timeout", 30*time.Second, "AI intelligence agent request timeout")
 
 	// Config file flag
 	cmd.Flags().String("config", "", "Config file path (default: ./config.yaml)")
@@ -119,6 +124,10 @@ func generateConfig() *coord.Config {
 			Concurrency:  viper.GetInt("outbox.concurrency"),
 			PollInterval: viper.GetDuration("outbox.poll_interval"),
 			StreamPrefix: viper.GetString("outbox.stream_prefix"),
+		},
+		IntelligenceConfig: intelligence.Config{
+			AgentURL: viper.GetString("intelligence.agent_url"),
+			Timeout:  viper.GetDuration("intelligence.timeout"),
 		},
 	}
 

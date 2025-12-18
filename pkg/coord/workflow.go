@@ -149,6 +149,7 @@ func (c *Coordinator) ListWorkflows(ctx context.Context, enabledOnly bool, searc
 	defer rows.Close()
 
 	var workflows []model.WorkflowDefinitionRecord
+	var workflowIDs []string
 	for rows.Next() {
 		var wf model.WorkflowDefinitionRecord
 		var webhookURL sql.NullString
@@ -163,6 +164,7 @@ func (c *Coordinator) ListWorkflows(ctx context.Context, enabledOnly bool, searc
 		}
 
 		workflows = append(workflows, wf)
+		workflowIDs = append(workflowIDs, wf.ID)
 	}
 
 	if err = rows.Err(); err != nil {
@@ -175,6 +177,200 @@ func (c *Coordinator) ListWorkflows(ctx context.Context, enabledOnly bool, searc
 		Page:       page,
 		PageSize:   pageSize,
 		TotalPages: totalPages,
+	}, nil
+}
+
+// WorkflowWithStats extends WorkflowDefinitionRecord with statistics
+type WorkflowWithStats struct {
+	model.WorkflowDefinitionRecord
+	SuccessRate float64 `json:"success_rate"`
+}
+
+// ListWorkflowsWithStatsResponse represents a paginated list of workflows with statistics
+type ListWorkflowsWithStatsResponse struct {
+	Workflows  []WorkflowWithStats `json:"workflows"`
+	Total      int                 `json:"total"`
+	Page       int                 `json:"page"`
+	PageSize   int                 `json:"page_size"`
+	TotalPages int                 `json:"total_pages"`
+}
+
+// ListWorkflowsWithStats lists workflow definitions with success rate statistics
+func (c *Coordinator) ListWorkflowsWithStats(ctx context.Context, enabledOnly bool, search string, page, pageSize int) (*ListWorkflowsWithStatsResponse, error) {
+	// First get workflows using existing logic
+	result, err := c.ListWorkflows(ctx, enabledOnly, search, page, pageSize)
+	if err != nil {
+		return nil, err
+	}
+
+	// Extract workflow IDs
+	workflowIDs := make([]string, 0, len(result.Workflows))
+	for _, wf := range result.Workflows {
+		workflowIDs = append(workflowIDs, wf.ID)
+	}
+
+	// Calculate success rates
+	successRates, err := c.calculateWorkflowSuccessRates(ctx, workflowIDs)
+	if err != nil {
+		// Log error but don't fail the entire request
+		c.Logger.Warn().Err(err).Msg("failed to calculate success rates")
+		successRates = make(map[string]float64)
+	}
+
+	// Build workflows with stats
+	workflowsWithStats := make([]WorkflowWithStats, 0, len(result.Workflows))
+	for _, wf := range result.Workflows {
+		rate := successRates[wf.ID]
+		workflowsWithStats = append(workflowsWithStats, WorkflowWithStats{
+			WorkflowDefinitionRecord: wf,
+			SuccessRate:              rate,
+		})
+	}
+
+	return &ListWorkflowsWithStatsResponse{
+		Workflows:  workflowsWithStats,
+		Total:      result.Total,
+		Page:       result.Page,
+		PageSize:   result.PageSize,
+		TotalPages: result.TotalPages,
+	}, nil
+}
+
+// calculateWorkflowSuccessRates calculates success rates for multiple workflows in batch
+func (c *Coordinator) calculateWorkflowSuccessRates(ctx context.Context, workflowIDs []string) (map[string]float64, error) {
+	if len(workflowIDs) == 0 {
+		return make(map[string]float64), nil
+	}
+
+	// Build query to get success rates for all workflows
+	query := `
+		SELECT 
+			workflow_definition_id,
+			COUNT(*) as total,
+			COUNT(*) FILTER (WHERE status IN ('COMPLETED', 'SUCCEEDED')) as successful
+		FROM workflow_runs
+		WHERE workflow_definition_id = ANY($1)
+		  AND deleted_at IS NULL
+		  AND status IN ('COMPLETED', 'SUCCEEDED', 'FAILED')
+		GROUP BY workflow_definition_id
+	`
+
+	rows, err := c.DB.Query(ctx, query, workflowIDs)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query success rates: %w", err)
+	}
+	defer rows.Close()
+
+	rates := make(map[string]float64)
+	for rows.Next() {
+		var workflowID string
+		var total, successful int
+		if err := rows.Scan(&workflowID, &total, &successful); err != nil {
+			return nil, fmt.Errorf("failed to scan success rate: %w", err)
+		}
+		if total > 0 {
+			rates[workflowID] = float64(successful) / float64(total) * 100
+		} else {
+			rates[workflowID] = 100.0 // No executions means 100% success (or N/A)
+		}
+	}
+
+	// Set default rate for workflows with no executions
+	for _, id := range workflowIDs {
+		if _, exists := rates[id]; !exists {
+			rates[id] = 100.0
+		}
+	}
+
+	return rates, rows.Err()
+}
+
+// WorkflowIssueSummary represents a summary of issues for a workflow
+type WorkflowIssueSummary struct {
+	Summary string   `json:"summary"`
+	Errors  []string `json:"errors"`
+}
+
+// GetWorkflowIssueSummary collects errors from failed executions and calls AI agent for summary
+func (c *Coordinator) GetWorkflowIssueSummary(ctx context.Context, workflowID string) (*WorkflowIssueSummary, error) {
+	// Get failed executions for this workflow
+	query := `
+		SELECT id, context_json
+		FROM workflow_runs
+		WHERE workflow_definition_id = $1
+		  AND status = 'FAILED'
+		  AND deleted_at IS NULL
+		ORDER BY created_at DESC
+		LIMIT 50
+	`
+
+	rows, err := c.DB.Query(ctx, query, workflowID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query failed executions: %w", err)
+	}
+	defer rows.Close()
+
+	var errors []string
+	var executionIDs []string
+
+	for rows.Next() {
+		var executionID string
+		var contextJSON json.RawMessage
+
+		if err := rows.Scan(&executionID, &contextJSON); err != nil {
+			continue // Skip invalid rows
+		}
+
+		executionIDs = append(executionIDs, executionID)
+
+		// Parse context to extract errors (errors might be in task results, but Err field is not serialized)
+		// We'll rely on task instances for error extraction
+
+		// Also get errors from task instances
+		taskQuery := `
+			SELECT last_error
+			FROM task_instances
+			WHERE run_id = $1 AND state = 'FAILED' AND last_error IS NOT NULL
+		`
+		taskRows, err := c.DB.Query(ctx, taskQuery, executionID)
+		if err == nil {
+			for taskRows.Next() {
+				var taskError json.RawMessage
+				if err := taskRows.Scan(&taskError); err == nil && len(taskError) > 0 {
+					errors = append(errors, string(taskError))
+				}
+			}
+			taskRows.Close()
+		}
+	}
+
+	if len(errors) == 0 {
+		return &WorkflowIssueSummary{
+			Summary: "No errors found in recent failed executions.",
+			Errors:  []string{},
+		}, nil
+	}
+
+	// Try to get AI summary if configured, but always fall back to raw summary
+	summary := ""
+	if c.Intelligence != nil && c.Intelligence.IsConfigured() {
+		aiSummary, err := c.Intelligence.SummarizeErrors(ctx, workflowID, errors)
+		if err != nil {
+			c.Logger.Warn().Err(err).Msg("failed to call AI agent, using raw summary")
+			// Fall through to create raw summary
+		} else {
+			summary = aiSummary
+		}
+	}
+
+	// If no summary from AI (either not configured or failed), create a raw summary
+	if summary == "" {
+		summary = fmt.Sprintf("Found %d error(s) across %d failed execution(s). Review the errors below for details.", len(errors), len(executionIDs))
+	}
+
+	return &WorkflowIssueSummary{
+		Summary: summary,
+		Errors:  errors,
 	}, nil
 }
 
