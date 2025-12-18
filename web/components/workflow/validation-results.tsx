@@ -45,7 +45,7 @@ export function ValidationResults({
       {validationResult.isValid && validationResult.errors.length === 0 && (
         <div className="p-3 rounded-md bg-emerald-500/10 border border-emerald-500/20">
           <p className="text-sm font-semibold text-emerald-700 dark:text-emerald-400">
-            ✓ Workflow JSON is valid
+            ✓ Valid
           </p>
         </div>
       )}

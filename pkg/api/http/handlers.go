@@ -9,6 +9,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/mohitkumar/composer/pkg/coord"
 	"github.com/mohitkumar/composer/pkg/model"
+	"github.com/mohitkumar/composer/pkg/util"
 	"gopkg.in/yaml.v3"
 )
 
@@ -34,7 +35,7 @@ func (h *handlers) createWorkflow(w http.ResponseWriter, r *http.Request) {
 		WorkflowID string      `yaml:"workflow_id"`
 		Name       string      `yaml:"name"`
 		Version    int         `yaml:"version"`
-		Spec       interface{} `yaml:"spec"` // YAML spec
+		Spec       interface{} `yaml:"spec"` // YAML spec as object
 		CreatedBy  string      `yaml:"created_by,omitempty"`
 	}
 	if err := yaml.Unmarshal(bodyBytes, &p); err != nil {
@@ -44,7 +45,8 @@ func (h *handlers) createWorkflow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Convert spec from YAML (interface{}) to JSON
+	// Convert spec from YAML object to JSON
+	// Since the spec is already parsed as interface{}, we can directly marshal to JSON
 	specJSON, err := json.Marshal(p.Spec)
 	if err != nil {
 		w.Header().Set("Content-Type", "application/json")
@@ -110,7 +112,7 @@ func (h *handlers) listWorkflows(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		specYAML, err := yaml.Marshal(specObj)
+		specYAML, err := util.ObjectToYAML(specObj)
 		if err != nil {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusInternalServerError)
@@ -122,7 +124,7 @@ func (h *handlers) listWorkflows(w http.ResponseWriter, r *http.Request) {
 			"id":           wf.ID,
 			"name":         wf.Name,
 			"version":      wf.Version,
-			"spec":         string(specYAML),
+			"spec":         specYAML,
 			"created_by":   wf.CreatedBy,
 			"enabled":      wf.Enabled,
 			"created_at":   wf.CreatedAt,
@@ -168,15 +170,7 @@ func (h *handlers) getWorkflow(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Convert spec from JSON to YAML
-	var specObj interface{}
-	if err := json.Unmarshal(wf.Spec, &specObj); err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to parse spec: " + err.Error()})
-		return
-	}
-
-	specYAML, err := yaml.Marshal(specObj)
+	specYAML, err := util.JSONToYAML(wf.Spec)
 	if err != nil {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusInternalServerError)
@@ -189,7 +183,7 @@ func (h *handlers) getWorkflow(w http.ResponseWriter, r *http.Request) {
 		"id":         wf.ID,
 		"name":       wf.Name,
 		"version":    wf.Version,
-		"spec":       string(specYAML),
+		"spec":       specYAML,
 		"created_by": wf.CreatedBy,
 		"enabled":    wf.Enabled,
 		"created_at": wf.CreatedAt,

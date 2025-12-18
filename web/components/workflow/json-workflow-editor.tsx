@@ -330,10 +330,6 @@ export function JsonWorkflowEditor({
             theme="vs-dark"
           />
         </div>
-        <p className="mt-2 text-xs text-muted-foreground">
-          The YAML should contain a <code>nodes</code> array and an <code>edges</code> array.
-          YAML is automatically validated as you type.
-        </p>
       </div>
 
       {/* Validation results at the bottom */}

@@ -1,0 +1,23 @@
+# Dockerfile for Composer AI Service
+FROM python:3.11-slim
+
+# Install uv
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+
+WORKDIR /app
+
+# Copy dependency files
+COPY ai/pyproject.toml ./
+COPY ai/.python-version* ./ 2>/dev/null || true
+
+# Install dependencies
+RUN uv sync --frozen
+
+# Copy application code
+COPY ai/ ./
+
+# Expose port
+EXPOSE 8000
+
+# Run the application
+CMD ["uv", "run", "python", "main.py"]

@@ -69,7 +69,7 @@ func (c *Client) SummarizeErrors(ctx context.Context, workflowID string, errors 
 	}
 
 	// Make HTTP request to AI agent
-	url := c.config.AgentURL + "/summarize"
+	url := c.config.AgentURL + "/summarize-errors"
 	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(payloadJSON))
 	if err != nil {
 		return "", fmt.Errorf("failed to create request: %w", err)
