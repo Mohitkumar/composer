@@ -135,7 +135,14 @@ export function JsonWorkflowEditor({
         return;
       }
 
-      const finalId = workflowId || `workflow_${Date.now()}`;
+      // Generate ID from name if not provided
+      let finalId = workflowId;
+      if (!finalId && name) {
+        finalId = generateWorkflowId(name);
+      }
+      if (!finalId) {
+        finalId = `workflow_${Date.now()}`;
+      }
       const finalName = name || finalId;
 
       await onSave({
@@ -189,6 +196,37 @@ export function JsonWorkflowEditor({
     registerCompletionProvider(monaco);
   };
 
+  // Generate workflow ID from name
+  const generateWorkflowId = (name: string): string => {
+    if (!name.trim()) return "";
+    // Convert to lowercase, replace spaces and special chars with underscores
+    let id = name
+      .toLowerCase()
+      .trim()
+      .replace(/[^a-z0-9]+/g, "_")
+      .replace(/^_+|_+$/g, ""); // Remove leading/trailing underscores
+    
+    // Ensure it starts with a letter or number
+    if (id && !/^[a-z0-9]/.test(id)) {
+      id = "workflow_" + id;
+    }
+    
+    // Ensure it's not empty
+    if (!id) {
+      id = "workflow";
+    }
+    
+    return id;
+  };
+
+  // Auto-generate ID when name changes (only for new workflows)
+  useEffect(() => {
+    if (isNew && name && !workflowId) {
+      const generatedId = generateWorkflowId(name);
+      setWorkflowId(generatedId);
+    }
+  }, [name, isNew, workflowId]);
+
   const insertNodeTemplate = async (template: NodeTemplate) => {
     try {
       const currentSpec = JSON.parse(jsonText) as WorkflowDefinitionSpec;
@@ -209,63 +247,49 @@ export function JsonWorkflowEditor({
     }
   };
 
-
-
   return (
     <div className="flex flex-col gap-4 h-[calc(100vh-8rem)]">
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        <div className="space-y-2">
-          <Label htmlFor="workflow-id">Workflow ID</Label>
-          <Input
-            id="workflow-id"
-            value={workflowId}
-            onChange={(e) => setWorkflowId(e.target.value)}
-            placeholder="Leave blank to auto-generate"
-          />
+      {/* Header: ID/Name on left, buttons on right */}
+      <div className="flex items-end gap-4">
+        <div className="flex-1 grid grid-cols-1 md:grid-cols-2 gap-4">
+          <div className="space-y-2">
+            <Label htmlFor="workflow-id">Workflow ID</Label>
+            <Input
+              id="workflow-id"
+              value={workflowId}
+              onChange={(e) => setWorkflowId(e.target.value)}
+              placeholder={isNew ? "Auto-generated from name" : "Workflow ID"}
+              disabled={!isNew && !!initialId}
+            />
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="workflow-name">Workflow Name</Label>
+            <Input
+              id="workflow-name"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              placeholder="My workflow"
+            />
+          </div>
         </div>
-        <div className="space-y-2">
-          <Label htmlFor="workflow-name">Workflow Name</Label>
-          <Input
-            id="workflow-name"
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            placeholder="My workflow"
-          />
-        </div>
-      </div>
-
-      <div className="flex items-center gap-2 flex-wrap">
-        <Button
-          type="button"
-          variant="outline"
-          onClick={() => setNodeTemplateDialogOpen(true)}
-        >
-          <Plus className="mr-2 h-4 w-4" />
-          Insert Node Template
-        </Button>
-        <Button
-          type="button"
-          onClick={handleSaveClick}
-          disabled={isSaving}
-        >
-          {isSaving ? "Saving..." : "Save Workflow"}
-        </Button>
-        {validationResult && validationResult.warnings.length > 0 && (
+        <div className="flex items-center gap-2">
           <Button
             type="button"
-            variant="ghost"
-            size="sm"
-            onClick={() => setShowWarnings(!showWarnings)}
+            variant="outline"
+            onClick={() => setNodeTemplateDialogOpen(true)}
           >
-            {showWarnings ? "Hide" : "Show"} Warnings ({validationResult.warnings.length})
+            <Plus className="mr-2 h-4 w-4" />
+            Insert Node Template
           </Button>
-        )}
+          <Button
+            type="button"
+            onClick={handleSaveClick}
+            disabled={isSaving}
+          >
+            {isSaving ? "Saving..." : "Save Workflow"}
+          </Button>
+        </div>
       </div>
-
-      <ValidationResults
-        validationResult={validationResult}
-        showWarnings={showWarnings}
-      />
 
       <div className="flex-1 min-h-0 flex flex-col">
         <Label htmlFor="workflow-json" className="mb-1 block">
@@ -297,6 +321,13 @@ export function JsonWorkflowEditor({
           JSON is automatically formatted and validated as you type.
         </p>
       </div>
+
+      {/* Validation results at the bottom */}
+      <ValidationResults
+        validationResult={validationResult}
+        showWarnings={showWarnings}
+        onToggleWarnings={() => setShowWarnings(!showWarnings)}
+      />
 
       <NodeTemplateDialog
         open={nodeTemplateDialogOpen}

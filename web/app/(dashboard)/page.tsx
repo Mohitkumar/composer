@@ -18,9 +18,9 @@ export default function HomePage() {
   
   const workflows = workflowResponse?.workflows || [];
 
-  const { data: executions, isLoading: executionsLoading, error: executionsError } = useQuery({
+  const { data: executionResponse, isLoading: executionsLoading, error: executionsError } = useQuery({
     queryKey: ['executions'],
-    queryFn: () => executionApi.list({ limit: 1000 }),
+    queryFn: () => executionApi.list({ page_size: 1000 }),
     retry: 2,
   });
 
@@ -70,10 +70,11 @@ export default function HomePage() {
   const enabledCount = workflows.filter((w) => w.enabled).length || 0;
   const totalCount = workflows.length;
 
-  // Filter out duplicates by ID and calculate execution metrics
-  const allExecutions = executions?.filter((execution, index, self) => 
+  // Extract executions array from response and filter out duplicates by ID
+  const executions = executionResponse?.executions || [];
+  const allExecutions = executions.filter((execution, index, self) => 
     index === self.findIndex((e) => e.id === execution.id)
-  ) || [];
+  );
   const runningExecutions = allExecutions.filter((e) => e.status === 'RUNNING').length;
   const completedExecutions = allExecutions.filter(
     (e) => e.status === 'COMPLETED' || e.status === 'SUCCEEDED'
