@@ -6,8 +6,10 @@ import (
 	"encoding/json"
 	"errors"
 	"strconv"
+	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/mohitkumar/composer/pkg/model"
 	"github.com/mohitkumar/composer/pkg/util"
 )
@@ -164,6 +166,14 @@ func (c *Coordinator) CreateConfiguration(ctx context.Context, req *model.Create
 	if err != nil {
 		logger.Error().Err(err).Msg("failed to insert configuration")
 		util.RecordError(span, err)
+		// Check if it's a unique constraint violation on name
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			// PostgreSQL unique constraint violation error code
+			if strings.Contains(pgErr.ConstraintName, "unique_configuration_name") || strings.Contains(pgErr.Message, "name") {
+				return errors.New("configuration name already exists")
+			}
+		}
 		return err
 	}
 
@@ -196,6 +206,17 @@ func (c *Coordinator) UpdateConfiguration(ctx context.Context, id string, req *m
 	argIndex := 1
 
 	if req.Name != nil {
+		// Check if the new name conflicts with another configuration
+		var existingID string
+		err := tx.QueryRow(ctx, `SELECT id FROM configurations WHERE name = $1 AND id != $2`, *req.Name, id).Scan(&existingID)
+		if err == nil {
+			// Name already exists for another configuration
+			return errors.New("configuration name already exists")
+		} else if !errors.Is(err, sql.ErrNoRows) {
+			// Some other error occurred
+			return err
+		}
+
 		updates = append(updates, `name = $`+strconv.Itoa(argIndex))
 		args = append(args, *req.Name)
 		argIndex++

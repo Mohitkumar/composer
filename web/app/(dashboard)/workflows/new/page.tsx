@@ -1,15 +1,32 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { JsonWorkflowEditor } from '@/components/workflow/json-workflow-editor';
-import { workflowApi } from '@/lib/api-client';
-import { useMutation, useQueryClient } from '@tanstack/react-query';
+import { workflowApi, templateApi } from '@/lib/api-client';
+import { useMutation, useQueryClient, useQuery } from '@tanstack/react-query';
 import type { WorkflowDefinitionSpec } from '@/lib/api-client';
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog';
+import { Button } from '@/components/ui/button';
 
 export default function NewWorkflowPage() {
   const queryClient = useQueryClient();
   const [isFirstSave, setIsFirstSave] = useState(true);
   const [workflowId, setWorkflowId] = useState<string | null>(null);
+  const [templateDialogOpen, setTemplateDialogOpen] = useState(true);
+  const [selectedTemplate, setSelectedTemplate] = useState<string | null>(null);
+  const [initialSpec, setInitialSpec] = useState<WorkflowDefinitionSpec | undefined>(undefined);
+
+  // Fetch workflow templates
+  const { data: workflowTemplates = [], isLoading: loadingTemplates } = useQuery({
+    queryKey: ['workflowTemplates'],
+    queryFn: () => templateApi.listWorkflowTemplates(),
+  });
 
   const createMutation = useMutation({
     mutationFn: async (data: {
@@ -81,16 +98,85 @@ export default function NewWorkflowPage() {
     }
   };
 
+  const handleTemplateSelect = async (templateId: string) => {
+    try {
+      const template = await templateApi.getWorkflowTemplate(templateId);
+      setInitialSpec(template.spec_json);
+      setSelectedTemplate(templateId);
+      setTemplateDialogOpen(false);
+    } catch (err) {
+      console.error('Failed to load template:', err);
+    }
+  };
+
+  const handleSkipTemplate = () => {
+    setTemplateDialogOpen(false);
+    // Use default empty template
+    setInitialSpec(undefined);
+  };
+
   const isSaving = createMutation.isPending || updateMutation.isPending;
 
   return (
-    <div className="h-[calc(100vh-8rem)]">
-      <JsonWorkflowEditor
-        onSave={handleSave}
-        isSaving={isSaving}
-        initialId={workflowId ?? undefined}
-        isNew={true}
-      />
-    </div>
+    <>
+      <Dialog open={templateDialogOpen} onOpenChange={(open) => {
+        if (!open) {
+          // If dialog is being closed and no template was selected, use blank template
+          if (!selectedTemplate && initialSpec === undefined) {
+            handleSkipTemplate();
+          }
+        } else {
+          setTemplateDialogOpen(open);
+        }
+      }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Select Workflow Template</DialogTitle>
+            <DialogDescription>
+              Choose a template to start with, or skip to create a blank workflow
+            </DialogDescription>
+          </DialogHeader>
+          <div className="max-h-[500px] overflow-y-auto space-y-2">
+            {loadingTemplates ? (
+              <p className="text-sm text-muted-foreground">Loading templates...</p>
+            ) : workflowTemplates.length === 0 ? (
+              <p className="text-sm text-muted-foreground">No templates available</p>
+            ) : (
+              workflowTemplates.map((template) => (
+                <div
+                  key={template.id}
+                  className={`p-3 border rounded-md hover:bg-accent cursor-pointer ${
+                    selectedTemplate === template.id ? 'border-primary bg-accent' : ''
+                  }`}
+                  onClick={() => handleTemplateSelect(template.id)}
+                >
+                  <div className="font-medium">{template.name}</div>
+                  {template.description && (
+                    <div className="text-sm text-muted-foreground mt-1">
+                      {template.description}
+                    </div>
+                  )}
+                </div>
+              ))
+            )}
+          </div>
+          <div className="flex justify-end gap-2 mt-4">
+            <Button variant="outline" onClick={handleSkipTemplate}>
+              Skip (Blank Workflow)
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      <div className="h-[calc(100vh-8rem)]">
+        <JsonWorkflowEditor
+          onSave={handleSave}
+          isSaving={isSaving}
+          initialId={workflowId ?? undefined}
+          initialSpec={initialSpec}
+          isNew={true}
+        />
+      </div>
+    </>
   );
 }
