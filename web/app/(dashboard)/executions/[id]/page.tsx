@@ -2,38 +2,50 @@
 
 import { useParams } from 'next/navigation';
 import { useQuery } from '@tanstack/react-query';
-import { executionApi } from '@/lib/api-client';
+import { executionApi, type ExecutionDetail, type TaskInstance } from '@/lib/api-client';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
-import { format } from 'date-fns';
+import { format, formatDistance } from 'date-fns';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { ArrowLeft, X } from 'lucide-react';
 import Link from 'next/link';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
+import { ChevronDown, CheckCircle2, XCircle, Clock, PlayCircle, AlertCircle } from 'lucide-react';
+import Editor from '@monaco-editor/react';
 
 export default function ExecutionDetailPage() {
   const params = useParams();
   const executionId = params.id as string;
   const queryClient = useQueryClient();
 
-  const { data: execution, isLoading } = useQuery({
-    queryKey: ['execution', executionId],
-    queryFn: () => executionApi.get(executionId),
+  const { data: executionDetail, isLoading } = useQuery({
+    queryKey: ['execution-detail', executionId],
+    queryFn: () => executionApi.getDetails(executionId),
   });
 
   const cancelMutation = useMutation({
     mutationFn: () => executionApi.cancel(executionId, 'Cancelled by user'),
     onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['execution-detail', executionId] });
       queryClient.invalidateQueries({ queryKey: ['execution', executionId] });
       queryClient.invalidateQueries({ queryKey: ['executions'] });
     },
   });
 
   if (isLoading) {
-    return <div>Loading execution details...</div>;
+    return (
+      <div className="flex items-center justify-center min-h-[400px]">
+        <div className="text-center">
+          <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary mx-auto mb-4"></div>
+          <p className="text-muted-foreground">Loading execution details...</p>
+        </div>
+      </div>
+    );
   }
 
-  if (!execution) {
+  if (!executionDetail) {
     return (
       <div className="text-center py-12">
         <p className="text-muted-foreground">Execution not found</p>
@@ -46,6 +58,10 @@ export default function ExecutionDetailPage() {
       </div>
     );
   }
+
+  const execution = executionDetail.execution;
+  const context = executionDetail.context;
+  const taskInstances = executionDetail.task_instances || [];
 
   const getStatusBadgeVariant = (status: string) => {
     switch (status) {
@@ -61,7 +77,54 @@ export default function ExecutionDetailPage() {
     }
   };
 
+  const getTaskStatusIcon = (state: string) => {
+    switch (state) {
+      case 'COMPLETED':
+      case 'SUCCEEDED':
+        return <CheckCircle2 className="h-4 w-4 text-green-500" />;
+      case 'FAILED':
+        return <XCircle className="h-4 w-4 text-red-500" />;
+      case 'RUNNING':
+        return <PlayCircle className="h-4 w-4 text-blue-500" />;
+      case 'PENDING':
+      case 'QUEUED':
+        return <Clock className="h-4 w-4 text-yellow-500" />;
+      default:
+        return <AlertCircle className="h-4 w-4 text-gray-500" />;
+    }
+  };
+
+  const getTaskStatusBadgeVariant = (state: string) => {
+    switch (state) {
+      case 'COMPLETED':
+      case 'SUCCEEDED':
+        return 'default';
+      case 'FAILED':
+        return 'destructive';
+      case 'RUNNING':
+        return 'secondary';
+      default:
+        return 'outline';
+    }
+  };
+
   const canCancel = execution.status === 'PENDING' || execution.status === 'RUNNING';
+
+  const duration = execution.completed_at
+    ? formatDistance(
+        new Date(execution.completed_at),
+        new Date(execution.created_at)
+      )
+    : execution.status === 'RUNNING'
+    ? formatDistance(new Date(), new Date(execution.created_at))
+    : null;
+
+  const formatError = (error: any): string => {
+    if (typeof error === 'string') return error;
+    if (error?.message) return error.message;
+    if (error?.error) return error.error;
+    return JSON.stringify(error, null, 2);
+  };
 
   return (
     <div className="space-y-6">
@@ -88,83 +151,316 @@ export default function ExecutionDetailPage() {
         )}
       </div>
 
-      <div className="grid gap-4 md:grid-cols-2">
+      {/* Overview Cards */}
+      <div className="grid gap-4 md:grid-cols-4">
         <Card>
-          <CardHeader>
-            <CardTitle>Basic Information</CardTitle>
+          <CardHeader className="pb-3">
+            <CardTitle className="text-sm font-medium">Status</CardTitle>
           </CardHeader>
-          <CardContent className="space-y-4">
-            <div>
-              <p className="text-sm text-muted-foreground">Execution ID</p>
-              <p className="font-mono text-sm">{execution.id}</p>
-            </div>
-            <div>
-              <p className="text-sm text-muted-foreground">Workflow ID</p>
-              <p className="font-mono text-sm">{execution.workflow_definition_id}</p>
-            </div>
-            <div>
-              <p className="text-sm text-muted-foreground">Version</p>
-              <p>v{execution.workflow_version}</p>
-            </div>
-            <div>
-              <p className="text-sm text-muted-foreground">Status</p>
-              <Badge variant={getStatusBadgeVariant(execution.status)}>
-                {execution.status}
-              </Badge>
-            </div>
+          <CardContent>
+            <Badge variant={getStatusBadgeVariant(execution.status)} className="text-sm">
+              {execution.status}
+            </Badge>
           </CardContent>
         </Card>
-
         <Card>
-          <CardHeader>
-            <CardTitle>Timestamps</CardTitle>
+          <CardHeader className="pb-3">
+            <CardTitle className="text-sm font-medium">Duration</CardTitle>
           </CardHeader>
-          <CardContent className="space-y-4">
-            <div>
-              <p className="text-sm text-muted-foreground">Created At</p>
-              <p>
-                {execution.created_at
-                  ? format(new Date(execution.created_at), 'PPpp')
-                  : 'N/A'}
-              </p>
-            </div>
-            <div>
-              <p className="text-sm text-muted-foreground">Updated At</p>
-              <p>
-                {execution.updated_at
-                  ? format(new Date(execution.updated_at), 'PPpp')
-                  : 'N/A'}
-              </p>
-            </div>
-            {execution.completed_at && (
-              <div>
-                <p className="text-sm text-muted-foreground">Completed At</p>
-                <p>
-                  {typeof execution.completed_at === 'string'
-                    ? format(new Date(execution.completed_at), 'PPpp')
-                    : 'N/A'}
-                </p>
-              </div>
-            )}
+          <CardContent>
+            <p className="text-sm">{duration || 'N/A'}</p>
+          </CardContent>
+        </Card>
+        <Card>
+          <CardHeader className="pb-3">
+            <CardTitle className="text-sm font-medium">Tasks</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <p className="text-sm">
+              {taskInstances.length} total
+              {taskInstances.filter((t) => t.state === 'FAILED').length > 0 && (
+                <span className="text-destructive ml-1">
+                  ({taskInstances.filter((t) => t.state === 'FAILED').length} failed)
+                </span>
+              )}
+            </p>
+          </CardContent>
+        </Card>
+        <Card>
+          <CardHeader className="pb-3">
+            <CardTitle className="text-sm font-medium">Workflow</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <Link
+              href={`/workflows/${execution.workflow_definition_id}`}
+              className="text-sm text-primary hover:underline font-mono"
+            >
+              {execution.workflow_definition_id}
+            </Link>
+            <p className="text-xs text-muted-foreground">v{execution.workflow_version}</p>
           </CardContent>
         </Card>
       </div>
 
-      {execution.input && (
-        <Card>
-          <CardHeader>
-            <CardTitle>Input</CardTitle>
-            <CardDescription>Execution input data</CardDescription>
-          </CardHeader>
-          <CardContent>
-            <pre className="bg-muted p-4 rounded-md overflow-auto text-sm">
-              {execution.input
-                ? JSON.stringify(execution.input, null, 2)
-                : 'No input data'}
-            </pre>
-          </CardContent>
-        </Card>
-      )}
+      <Tabs defaultValue="tasks" className="space-y-4">
+        <TabsList>
+          <TabsTrigger value="tasks">Task Execution</TabsTrigger>
+          <TabsTrigger value="context">Context</TabsTrigger>
+          <TabsTrigger value="input">Input</TabsTrigger>
+        </TabsList>
+
+        {/* Task Execution Tab */}
+        <TabsContent value="tasks" className="space-y-4">
+          {taskInstances.length === 0 ? (
+            <Card>
+              <CardContent className="pt-6">
+                <p className="text-center text-muted-foreground">No task instances found</p>
+              </CardContent>
+            </Card>
+          ) : (
+            <div className="space-y-4">
+              {taskInstances.map((task) => (
+                <Card key={task.id}>
+                  <CardHeader>
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-3">
+                        {getTaskStatusIcon(task.state)}
+                        <div>
+                          <CardTitle className="text-base">{task.node_id}</CardTitle>
+                          <CardDescription>
+                            {task.node_type} • Attempt {task.attempt}
+                          </CardDescription>
+                        </div>
+                      </div>
+                      <Badge variant={getTaskStatusBadgeVariant(task.state)}>
+                        {task.state}
+                      </Badge>
+                    </div>
+                  </CardHeader>
+                  <CardContent className="space-y-4">
+                    {/* Timestamps */}
+                    <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
+                      {task.scheduled_at && (
+                        <div>
+                          <p className="text-muted-foreground">Scheduled</p>
+                          <p>{format(new Date(task.scheduled_at), 'PPpp')}</p>
+                        </div>
+                      )}
+                      {task.started_at && (
+                        <div>
+                          <p className="text-muted-foreground">Started</p>
+                          <p>{format(new Date(task.started_at), 'PPpp')}</p>
+                        </div>
+                      )}
+                      {task.finished_at && (
+                        <div>
+                          <p className="text-muted-foreground">Finished</p>
+                          <p>{format(new Date(task.finished_at), 'PPpp')}</p>
+                        </div>
+                      )}
+                      {task.completed_at && (
+                        <div>
+                          <p className="text-muted-foreground">Completed</p>
+                          <p>{format(new Date(task.completed_at), 'PPpp')}</p>
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Error Display */}
+                    {task.state === 'FAILED' && task.last_error && (
+                      <div className="border border-destructive rounded-md p-4 bg-destructive/10">
+                        <div className="flex items-center gap-2 mb-2">
+                          <XCircle className="h-4 w-4 text-destructive" />
+                          <h4 className="font-semibold text-destructive">Error</h4>
+                        </div>
+                        <pre className="text-sm overflow-auto whitespace-pre-wrap">
+                          {formatError(task.last_error)}
+                        </pre>
+                      </div>
+                    )}
+
+                    {/* Input/Output */}
+                    <div className="grid gap-4 md:grid-cols-2">
+                      {task.input && (
+                        <Collapsible>
+                          <CollapsibleTrigger className="flex items-center justify-between w-full text-left">
+                            <span className="font-medium text-sm">Input</span>
+                            <ChevronDown className="h-4 w-4" />
+                          </CollapsibleTrigger>
+                          <CollapsibleContent className="mt-2">
+                            <div className="border rounded-md overflow-hidden" style={{ height: '200px' }}>
+                              <Editor
+                                height="200px"
+                                defaultLanguage="json"
+                                value={JSON.stringify(task.input, null, 2)}
+                                options={{
+                                  readOnly: true,
+                                  minimap: { enabled: false },
+                                  fontSize: 12,
+                                  lineNumbers: "on",
+                                  wordWrap: "on",
+                                  scrollBeyondLastLine: false,
+                                }}
+                                theme="vs-dark"
+                              />
+                            </div>
+                          </CollapsibleContent>
+                        </Collapsible>
+                      )}
+
+                      {task.output && (
+                        <Collapsible>
+                          <CollapsibleTrigger className="flex items-center justify-between w-full text-left">
+                            <span className="font-medium text-sm">Output</span>
+                            <ChevronDown className="h-4 w-4" />
+                          </CollapsibleTrigger>
+                          <CollapsibleContent className="mt-2">
+                            <div className="border rounded-md overflow-hidden" style={{ height: '200px' }}>
+                              <Editor
+                                height="200px"
+                                defaultLanguage="json"
+                                value={JSON.stringify(task.output, null, 2)}
+                                options={{
+                                  readOnly: true,
+                                  minimap: { enabled: false },
+                                  fontSize: 12,
+                                  lineNumbers: "on",
+                                  wordWrap: "on",
+                                  scrollBeyondLastLine: false,
+                                }}
+                                theme="vs-dark"
+                              />
+                            </div>
+                          </CollapsibleContent>
+                        </Collapsible>
+                      )}
+                    </div>
+                  </CardContent>
+                </Card>
+              ))}
+            </div>
+          )}
+        </TabsContent>
+
+        {/* Context Tab */}
+        <TabsContent value="context" className="space-y-4">
+          <Card>
+            <CardHeader>
+              <CardTitle>Workflow Context</CardTitle>
+              <CardDescription>
+                Runtime context including input, config, and task results
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              {context ? (
+                <div className="space-y-4">
+                  {context.input && (
+                    <div>
+                      <h4 className="font-medium mb-2">Input</h4>
+                      <div className="border rounded-md overflow-hidden" style={{ height: '200px' }}>
+                        <Editor
+                          height="200px"
+                          defaultLanguage="json"
+                          value={JSON.stringify(context.input, null, 2)}
+                          options={{
+                            readOnly: true,
+                            minimap: { enabled: false },
+                            fontSize: 12,
+                            lineNumbers: "on",
+                            wordWrap: "on",
+                            scrollBeyondLastLine: false,
+                          }}
+                          theme="vs-dark"
+                        />
+                      </div>
+                    </div>
+                  )}
+                  {context.config && (
+                    <div>
+                      <h4 className="font-medium mb-2">Config</h4>
+                      <div className="border rounded-md overflow-hidden" style={{ height: '200px' }}>
+                        <Editor
+                          height="200px"
+                          defaultLanguage="json"
+                          value={JSON.stringify(context.config, null, 2)}
+                          options={{
+                            readOnly: true,
+                            minimap: { enabled: false },
+                            fontSize: 12,
+                            lineNumbers: "on",
+                            wordWrap: "on",
+                            scrollBeyondLastLine: false,
+                          }}
+                          theme="vs-dark"
+                        />
+                      </div>
+                    </div>
+                  )}
+                  {context.tasks && Object.keys(context.tasks).length > 0 && (
+                    <div>
+                      <h4 className="font-medium mb-2">Task Results</h4>
+                      <div className="border rounded-md overflow-hidden" style={{ height: '300px' }}>
+                        <Editor
+                          height="300px"
+                          defaultLanguage="json"
+                          value={JSON.stringify(context.tasks, null, 2)}
+                          options={{
+                            readOnly: true,
+                            minimap: { enabled: false },
+                            fontSize: 12,
+                            lineNumbers: "on",
+                            wordWrap: "on",
+                            scrollBeyondLastLine: false,
+                          }}
+                          theme="vs-dark"
+                        />
+                      </div>
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <p className="text-muted-foreground">No context data available</p>
+              )}
+            </CardContent>
+          </Card>
+        </TabsContent>
+
+        {/* Input Tab */}
+        <TabsContent value="input" className="space-y-4">
+          <Card>
+            <CardHeader>
+              <CardTitle>Execution Input</CardTitle>
+              <CardDescription>Input data passed to the workflow execution</CardDescription>
+            </CardHeader>
+            <CardContent>
+              {execution.input ? (
+                <div className="border rounded-md overflow-hidden" style={{ height: '400px' }}>
+                  <Editor
+                    height="400px"
+                    defaultLanguage="json"
+                    value={
+                      typeof execution.input === 'string'
+                        ? execution.input
+                        : JSON.stringify(execution.input, null, 2)
+                    }
+                    options={{
+                      readOnly: true,
+                      minimap: { enabled: false },
+                      fontSize: 14,
+                      lineNumbers: "on",
+                      wordWrap: "on",
+                      scrollBeyondLastLine: false,
+                    }}
+                    theme="vs-dark"
+                  />
+                </div>
+              ) : (
+                <p className="text-muted-foreground">No input data</p>
+              )}
+            </CardContent>
+          </Card>
+        </TabsContent>
+      </Tabs>
     </div>
   );
 }

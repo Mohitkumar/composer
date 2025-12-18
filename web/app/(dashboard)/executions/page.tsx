@@ -15,8 +15,8 @@ import {
   TableRow,
 } from '@/components/ui/table';
 import { Eye } from 'lucide-react';
-import Link from 'next/link';
 import { useState } from 'react';
+import { ExecutionDetailDialog } from '@/components/execution/execution-detail-dialog';
 import {
   Select,
   SelectContent,
@@ -30,6 +30,8 @@ export default function ExecutionsPage() {
   const [statusFilter, setStatusFilter] = useState<string>('all');
   const [workflowFilter, setWorkflowFilter] = useState<string>('');
   const [page, setPage] = useState(1);
+  const [selectedExecutionId, setSelectedExecutionId] = useState<string | null>(null);
+  const [detailDialogOpen, setDetailDialogOpen] = useState(false);
   const pageSize = 20;
   const queryClient = useQueryClient();
 
@@ -199,11 +201,16 @@ export default function ExecutionsPage() {
                           : '-'}
                       </TableCell>
                       <TableCell className="text-right">
-                        <Link href={`/executions/${execution.id}`}>
-                          <Button variant="ghost" size="icon">
-                            <Eye className="h-4 w-4" />
-                          </Button>
-                        </Link>
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          onClick={() => {
+                            setSelectedExecutionId(execution.id);
+                            setDetailDialogOpen(true);
+                          }}
+                        >
+                          <Eye className="h-4 w-4" />
+                        </Button>
                       </TableCell>
                     </TableRow>
                   ))}
@@ -239,6 +246,19 @@ export default function ExecutionsPage() {
           )}
         </CardContent>
       </Card>
+
+      {selectedExecutionId && (
+        <ExecutionDetailDialog
+          executionId={selectedExecutionId}
+          open={detailDialogOpen}
+          onOpenChange={(open) => {
+            setDetailDialogOpen(open);
+            if (!open) {
+              setSelectedExecutionId(null);
+            }
+          }}
+        />
+      )}
     </div>
   );
 }

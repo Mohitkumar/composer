@@ -228,15 +228,33 @@ func (h *handlers) listExecutions(w http.ResponseWriter, r *http.Request) {
 
 func (h *handlers) getExecution(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
-	instance, err := h.coordinator.GetWorkflowInstance(r.Context(), id)
-	if err != nil {
+
+	// Check if detailed query parameter is set
+	detailed := r.URL.Query().Get("detailed") == "true"
+
+	if detailed {
+		// Return comprehensive execution details
+		details, err := h.coordinator.GetExecutionDetails(r.Context(), id)
+		if err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusNotFound)
+			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusNotFound)
-		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
-		return
+		json.NewEncoder(w).Encode(details)
+	} else {
+		// Return basic execution info (backward compatible)
+		instance, err := h.coordinator.GetWorkflowInstance(r.Context(), id)
+		if err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusNotFound)
+			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(instance)
 	}
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(instance)
 }
 
 func (h *handlers) cancelExecution(w http.ResponseWriter, r *http.Request) {

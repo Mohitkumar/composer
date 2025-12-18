@@ -186,6 +186,41 @@ export const workflowApi = {
   },
 };
 
+export interface TaskInstance {
+  id: string;
+  run_id: string;
+  node_id: string;
+  node_type: string;
+  state: string;
+  attempt: number;
+  input?: Record<string, any>;
+  output?: Record<string, any>;
+  last_error?: Record<string, any> | string;
+  scheduled_at?: string;
+  started_at?: string;
+  finished_at?: string;
+  completed_at?: string;
+  created_at: string;
+  updated_at: string;
+  lease_owner?: string;
+  lease_expires_at?: string;
+}
+
+export interface RunContext {
+  input?: Record<string, any>;
+  config?: Record<string, any>;
+  tasks?: Record<string, {
+    status: string;
+    output?: any;
+  }>;
+}
+
+export interface ExecutionDetail {
+  execution: WorkflowInstance;
+  context?: RunContext;
+  task_instances: TaskInstance[];
+}
+
 export const executionApi = {
   list: async (params?: {
     workflow_id?: string;
@@ -199,6 +234,13 @@ export const executionApi = {
 
   get: async (id: string): Promise<WorkflowInstance> => {
     const response = await apiClient.get(`/executions/${id}`);
+    return response.data;
+  },
+
+  getDetails: async (id: string): Promise<ExecutionDetail> => {
+    const response = await apiClient.get(`/executions/${id}`, {
+      params: { detailed: 'true' },
+    });
     return response.data;
   },
 

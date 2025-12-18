@@ -3,6 +3,7 @@ package coord
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strconv"
@@ -226,6 +227,94 @@ func (c *Coordinator) GetWorkflowInstance(ctx context.Context, instanceID string
 	}
 
 	return &inst, nil
+}
+
+// GetExecutionDetails retrieves comprehensive execution details including context and task instances
+func (c *Coordinator) GetExecutionDetails(ctx context.Context, instanceID string) (*model.ExecutionDetailResponse, error) {
+	// Get execution
+	execution, err := c.GetWorkflowInstance(ctx, instanceID)
+	if err != nil {
+		return nil, err
+	}
+
+	// Get context
+	var contextJSON json.RawMessage
+	err = c.DB.QueryRow(ctx,
+		`SELECT context_json FROM workflow_runs WHERE id = $1`,
+		instanceID).Scan(&contextJSON)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return nil, fmt.Errorf("failed to load context: %w", err)
+	}
+
+	var runContext *model.RunContext
+	if len(contextJSON) > 0 {
+		runContext = &model.RunContext{}
+		if err := json.Unmarshal(contextJSON, runContext); err != nil {
+			// If context is invalid JSON, just skip it
+			runContext = nil
+		}
+	}
+
+	// Get task instances
+	rows, err := c.DB.Query(ctx,
+		`SELECT id, run_id, node_id, node_type, state, attempt, input_json, output_json, last_error,
+		        scheduled_at, started_at, finished_at, completed_at, created_at, updated_at,
+		        lease_owner, lease_expires_at
+		 FROM task_instances WHERE run_id = $1 ORDER BY created_at ASC`,
+		instanceID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query task instances: %w", err)
+	}
+	defer rows.Close()
+
+	var taskInstances []model.TaskInstanceRecord
+	for rows.Next() {
+		var task model.TaskInstanceRecord
+		var scheduledAt, startedAt, finishedAt, completedAt, leaseExpiresAt sql.NullTime
+		var leaseOwner sql.NullString
+
+		err := rows.Scan(
+			&task.ID, &task.RunID, &task.NodeID, &task.NodeType, &task.State, &task.Attempt,
+			&task.Input, &task.Output, &task.LastError,
+			&scheduledAt, &startedAt, &finishedAt, &completedAt,
+			&task.CreatedAt, &task.UpdatedAt,
+			&leaseOwner, &leaseExpiresAt,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("failed to scan task instance: %w", err)
+		}
+
+		if scheduledAt.Valid {
+			task.ScheduledAt = &scheduledAt.Time
+		}
+		if startedAt.Valid {
+			task.StartedAt = &startedAt.Time
+		}
+		if finishedAt.Valid {
+			task.FinishedAt = &finishedAt.Time
+		}
+		if completedAt.Valid {
+			task.CompletedAt = &completedAt.Time
+		}
+		if leaseOwner.Valid {
+			task.LeaseOwner = &leaseOwner.String
+		}
+		if leaseExpiresAt.Valid {
+			task.LeaseExpiresAt = &leaseExpiresAt.Time
+		}
+
+		taskInstances = append(taskInstances, task)
+	}
+
+	if err = rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating task instances: %w", err)
+	}
+
+	return &model.ExecutionDetailResponse{
+		Execution:     execution,
+		Context:       runContext,
+		TaskInstances: taskInstances,
+	}, nil
 }
 
 // ListWorkflowInstances lists workflow instances, optionally filtered by workflow ID and status.

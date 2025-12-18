@@ -42,3 +42,31 @@ type StartWorkflowRequest struct {
 	StartNodeID      string          `json:"start_node_id,omitempty"`
 	StartedAtUnixMs  int64           `json:"started_at_unix_ms,omitempty"`
 }
+
+// TaskInstanceRecord represents a task instance record in the database
+type TaskInstanceRecord struct {
+	ID             string             `json:"id"`
+	RunID          string             `json:"run_id"`
+	NodeID         string             `json:"node_id"`
+	NodeType       string             `json:"node_type"`
+	State          TaskInstanceStatus `json:"state"`
+	Attempt        int                `json:"attempt"`
+	Input          json.RawMessage    `json:"input,omitempty"`
+	Output         json.RawMessage    `json:"output,omitempty"`
+	LastError      json.RawMessage    `json:"last_error,omitempty"`
+	ScheduledAt    *time.Time         `json:"scheduled_at,omitempty"`
+	StartedAt      *time.Time         `json:"started_at,omitempty"`
+	FinishedAt     *time.Time         `json:"finished_at,omitempty"`
+	CompletedAt    *time.Time         `json:"completed_at,omitempty"`
+	CreatedAt      time.Time          `json:"created_at"`
+	UpdatedAt      time.Time          `json:"updated_at"`
+	LeaseOwner     *string            `json:"lease_owner,omitempty"`
+	LeaseExpiresAt *time.Time         `json:"lease_expires_at,omitempty"`
+}
+
+// ExecutionDetailResponse represents comprehensive execution details
+type ExecutionDetailResponse struct {
+	Execution     *WorkflowInstanceRecord `json:"execution"`
+	Context       *RunContext             `json:"context,omitempty"`
+	TaskInstances []TaskInstanceRecord    `json:"task_instances"`
+}
