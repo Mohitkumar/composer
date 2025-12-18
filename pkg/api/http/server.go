@@ -85,6 +85,15 @@ func NewServer(config *api.APIConfig, coordinator *coord.Coordinator) *Server {
 				r.Get("/{id}", h.getWorkflowTemplate)
 			})
 		})
+
+		// Configuration endpoints
+		r.Route("/configurations", func(r chi.Router) {
+			r.Get("/", h.listConfigurations)
+			r.Post("/", h.createConfiguration)
+			r.Get("/{id}", h.getConfiguration)
+			r.Put("/{id}", h.updateConfiguration)
+			r.Delete("/{id}", h.deleteConfiguration)
+		})
 	})
 
 	return &Server{

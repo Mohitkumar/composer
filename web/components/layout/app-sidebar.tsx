@@ -7,6 +7,7 @@ import {
   Workflow,
   LogOut,
   User,
+  Key,
 } from 'lucide-react';
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
@@ -51,6 +52,11 @@ const menuItems = [
     title: 'Executions',
     url: '/executions',
     icon: Play,
+  },
+  {
+    title: 'Configurations',
+    url: '/configurations',
+    icon: Key,
   },
   {
     title: 'Settings',

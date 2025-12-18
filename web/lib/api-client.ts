@@ -257,3 +257,55 @@ export const templateApi = {
     return response.data;
   },
 };
+
+export interface Configuration {
+  id: string;
+  name: string;
+  description?: string;
+  type: string; // 's3', 'http', 'database', 'api_key', etc.
+  config_json: Record<string, any>;
+  created_by?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CreateConfigurationRequest {
+  id: string;
+  name: string;
+  description?: string;
+  type: string;
+  config_json: Record<string, any>;
+  created_by?: string;
+}
+
+export interface UpdateConfigurationRequest {
+  name?: string;
+  description?: string;
+  config_json?: Record<string, any>;
+}
+
+export const configurationApi = {
+  list: async (params?: {
+    type?: string;
+  }): Promise<Configuration[]> => {
+    const response = await apiClient.get('/configurations', { params });
+    return response.data;
+  },
+
+  get: async (id: string): Promise<Configuration> => {
+    const response = await apiClient.get(`/configurations/${id}`);
+    return response.data;
+  },
+
+  create: async (data: CreateConfigurationRequest): Promise<void> => {
+    await apiClient.post('/configurations', data);
+  },
+
+  update: async (id: string, data: UpdateConfigurationRequest): Promise<void> => {
+    await apiClient.put(`/configurations/${id}`, data);
+  },
+
+  delete: async (id: string): Promise<void> => {
+    await apiClient.delete(`/configurations/${id}`);
+  },
+};

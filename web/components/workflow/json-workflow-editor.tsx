@@ -24,7 +24,8 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { useQuery } from "@tanstack/react-query";
-import { Plus, FileCode } from "lucide-react";
+import { Plus, FileCode, Key } from "lucide-react";
+import { configurationApi } from "@/lib/api-client";
 
 interface JsonWorkflowEditorProps {
   initialSpec?: WorkflowDefinitionSpec;
@@ -378,7 +379,9 @@ export function JsonWorkflowEditor({
   const [showWarnings, setShowWarnings] = useState(true);
   const [nodeTemplateDialogOpen, setNodeTemplateDialogOpen] = useState(false);
   const [workflowTemplateDialogOpen, setWorkflowTemplateDialogOpen] = useState(false);
+  const [configDialogOpen, setConfigDialogOpen] = useState(false);
   const [selectedRuntime, setSelectedRuntime] = useState<string>("");
+  const [selectedConfigType, setSelectedConfigType] = useState<string>("");
   const editorRef = useRef<any>(null);
 
   // Fetch node templates
@@ -391,6 +394,12 @@ export function JsonWorkflowEditor({
   const { data: workflowTemplates = [], isLoading: loadingWorkflowTemplates } = useQuery({
     queryKey: ["workflowTemplates"],
     queryFn: () => templateApi.listWorkflowTemplates(),
+  });
+
+  // Fetch configurations
+  const { data: configurations = [], isLoading: loadingConfigurations } = useQuery({
+    queryKey: ["configurations", selectedConfigType],
+    queryFn: () => configurationApi.list({ type: selectedConfigType || undefined }),
   });
 
   useEffect(() => {
@@ -507,6 +516,54 @@ export function JsonWorkflowEditor({
     }
   };
 
+  const insertConfigurationReference = (configId: string) => {
+    try {
+      const currentSpec = JSON.parse(jsonText) as WorkflowDefinitionSpec;
+      const editor = editorRef.current;
+      
+      if (editor) {
+        const position = editor.getPosition();
+        const model = editor.getModel();
+        
+        if (position && model) {
+          // Get the current line
+          const line = model.getLineContent(position.lineNumber);
+          const beforeCursor = line.substring(0, position.column - 1);
+          const afterCursor = line.substring(position.column - 1);
+          
+          // Try to detect if we're in a spec object
+          // Insert config_id reference
+          const configRef = `"config_id": "${configId}"`;
+          
+          // Insert at cursor position
+          editor.executeEdits('insert-config', [{
+            range: {
+              startLineNumber: position.lineNumber,
+              startColumn: position.column,
+              endLineNumber: position.lineNumber,
+              endColumn: position.column,
+            },
+            text: configRef + (afterCursor.trim() ? ', ' : ''),
+          }]);
+        }
+      } else {
+        // Fallback: add to the first node's spec if editor is not available
+        if (currentSpec.nodes.length > 0 && currentSpec.nodes[0].spec) {
+          const firstNode = currentSpec.nodes[0];
+          if (typeof firstNode.spec === 'object') {
+            (firstNode.spec as any).config_id = configId;
+            setJsonText(JSON.stringify(currentSpec, null, 2));
+          }
+        }
+      }
+      
+      setConfigDialogOpen(false);
+      setSelectedConfigType("");
+    } catch (err) {
+      console.error("Failed to insert configuration reference:", err);
+    }
+  };
+
   return (
     <div className="flex flex-col gap-4 h-[calc(100vh-8rem)]">
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -546,6 +603,14 @@ export function JsonWorkflowEditor({
         >
           <FileCode className="mr-2 h-4 w-4" />
           Insert Workflow Template
+        </Button>
+        <Button
+          type="button"
+          variant="outline"
+          onClick={() => setConfigDialogOpen(true)}
+        >
+          <Key className="mr-2 h-4 w-4" />
+          Insert Configuration
         </Button>
         <Button type="button" variant="outline" onClick={handleValidate}>
           Validate JSON
@@ -726,6 +791,62 @@ export function JsonWorkflowEditor({
                 </div>
               ))
             )}
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* Configuration Dialog */}
+      <Dialog open={configDialogOpen} onOpenChange={setConfigDialogOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Insert Configuration Reference</DialogTitle>
+            <DialogDescription>
+              Select a configuration to reference in your workflow. The configuration will be available to nodes via config_id.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4">
+            <div className="space-y-2">
+              <Label>Filter by Type</Label>
+              <Select value={selectedConfigType || "all"} onValueChange={(value) => setSelectedConfigType(value === "all" ? "" : value)}>
+                <SelectTrigger>
+                  <SelectValue placeholder="All types" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">All types</SelectItem>
+                  <SelectItem value="s3">S3</SelectItem>
+                  <SelectItem value="http">HTTP</SelectItem>
+                  <SelectItem value="database">Database</SelectItem>
+                  <SelectItem value="api_key">API Key</SelectItem>
+                  <SelectItem value="oauth">OAuth</SelectItem>
+                  <SelectItem value="custom">Custom</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="max-h-[400px] overflow-y-auto space-y-2">
+              {loadingConfigurations ? (
+                <p className="text-sm text-muted-foreground">Loading configurations...</p>
+              ) : configurations.length === 0 ? (
+                <p className="text-sm text-muted-foreground">No configurations found</p>
+              ) : (
+                configurations.map((config) => (
+                  <div
+                    key={config.id}
+                    className="p-3 border rounded-md hover:bg-accent cursor-pointer"
+                    onClick={() => insertConfigurationReference(config.id)}
+                  >
+                    <div className="font-medium">{config.name}</div>
+                    {config.description && (
+                      <div className="text-sm text-muted-foreground mt-1">
+                        {config.description}
+                      </div>
+                    )}
+                    <div className="text-xs text-muted-foreground mt-1">
+                      Type: {config.type} | ID: {config.id}
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
           </div>
         </DialogContent>
       </Dialog>
