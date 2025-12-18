@@ -83,21 +83,68 @@ func (c *Coordinator) GetWorkflow(ctx context.Context, workflowID string, versio
 	return &wf, nil
 }
 
-// ListWorkflows lists all workflow definitions, optionally filtered by enabled status.
-func (c *Coordinator) ListWorkflows(ctx context.Context, enabledOnly bool) ([]model.WorkflowDefinitionRecord, error) {
-	query := `SELECT id, name, version, spec_json, created_by, enabled, webhook_url, created_at 
-	          FROM workflow_definitions WHERE deleted_at IS NULL`
+// ListWorkflowsResponse represents a paginated list of workflows
+type ListWorkflowsResponse struct {
+	Workflows  []model.WorkflowDefinitionRecord `json:"workflows"`
+	Total      int                              `json:"total"`
+	Page       int                              `json:"page"`
+	PageSize   int                              `json:"page_size"`
+	TotalPages int                              `json:"total_pages"`
+}
+
+// ListWorkflows lists workflow definitions with search, pagination, and optional enabled filter.
+// Excludes soft-deleted workflows by default.
+func (c *Coordinator) ListWorkflows(ctx context.Context, enabledOnly bool, search string, page, pageSize int) (*ListWorkflowsResponse, error) {
+	// Build base query with filters
+	baseQuery := `FROM workflow_definitions WHERE deleted_at IS NULL`
 	args := []interface{}{}
+	argPos := 1
 
 	if enabledOnly {
-		query += ` AND enabled = true`
+		baseQuery += ` AND enabled = true`
 	}
 
-	query += ` ORDER BY id, version DESC`
+	// Add search filter (search in name and id)
+	if search != "" {
+		baseQuery += fmt.Sprintf(` AND (name ILIKE $%d OR id ILIKE $%d)`, argPos, argPos)
+		args = append(args, "%"+search+"%")
+		argPos++
+	}
+
+	// Get total count
+	var total int
+	countQuery := `SELECT COUNT(DISTINCT id) ` + baseQuery
+	err := c.DB.QueryRow(ctx, countQuery, args...).Scan(&total)
+	if err != nil {
+		return nil, fmt.Errorf("failed to count workflows: %w", err)
+	}
+
+	// Calculate pagination
+	if page < 1 {
+		page = 1
+	}
+	if pageSize < 1 {
+		pageSize = 10
+	}
+	offset := (page - 1) * pageSize
+	totalPages := (total + pageSize - 1) / pageSize
+
+	// Build main query with pagination
+	// Use DISTINCT ON to get only the latest version of each workflow
+	// DISTINCT ON requires the ORDER BY to start with the DISTINCT ON columns
+	// We need to wrap it in a subquery to apply LIMIT/OFFSET after DISTINCT ON
+	query := `SELECT * FROM (
+	          SELECT DISTINCT ON (id) id, name, version, spec_json, created_by, enabled, webhook_url, created_at 
+	          ` + baseQuery + ` 
+	          ORDER BY id, version DESC
+	          ) AS latest_workflows
+	          ORDER BY id
+	          LIMIT $` + strconv.Itoa(argPos) + ` OFFSET $` + strconv.Itoa(argPos+1)
+	args = append(args, pageSize, offset)
 
 	rows, err := c.DB.Query(ctx, query, args...)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to query workflows: %w", err)
 	}
 	defer rows.Close()
 
@@ -108,7 +155,7 @@ func (c *Coordinator) ListWorkflows(ctx context.Context, enabledOnly bool) ([]mo
 
 		if err := rows.Scan(&wf.ID, &wf.Name, &wf.Version, &wf.Spec, &wf.CreatedBy,
 			&wf.Enabled, &webhookURL, &wf.CreatedAt); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("failed to scan workflow: %w", err)
 		}
 
 		if webhookURL.Valid {
@@ -118,7 +165,17 @@ func (c *Coordinator) ListWorkflows(ctx context.Context, enabledOnly bool) ([]mo
 		workflows = append(workflows, wf)
 	}
 
-	return workflows, rows.Err()
+	if err = rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating workflows: %w", err)
+	}
+
+	return &ListWorkflowsResponse{
+		Workflows:  workflows,
+		Total:      total,
+		Page:       page,
+		PageSize:   pageSize,
+		TotalPages: totalPages,
+	}, nil
 }
 
 // UpdateWorkflow updates a workflow definition's metadata (name, enabled, webhook_url).

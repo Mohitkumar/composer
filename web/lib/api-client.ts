@@ -131,12 +131,30 @@ export interface StartWorkflowRequest {
   started_at_unix_ms?: number;
 }
 
+// Paginated workflow list response
+export interface WorkflowListResponse {
+  workflows: WorkflowDefinition[];
+  total: number;
+  page: number;
+  page_size: number;
+  total_pages: number;
+}
+
 // API functions
 export const workflowApi = {
-  list: async (enabledOnly?: boolean): Promise<WorkflowDefinition[]> => {
-    const response = await apiClient.get('/workflows', {
-      params: enabledOnly ? { enabled: 'true' } : {},
-    });
+  list: async (
+    enabledOnly?: boolean,
+    search?: string,
+    page?: number,
+    pageSize?: number
+  ): Promise<WorkflowListResponse> => {
+    const params: Record<string, string> = {};
+    if (enabledOnly) params.enabled = 'true';
+    if (search) params.search = search;
+    if (page !== undefined) params.page = page.toString();
+    if (pageSize !== undefined) params.page_size = pageSize.toString();
+    
+    const response = await apiClient.get('/workflows', { params });
     return response.data;
   },
 

@@ -38,7 +38,23 @@ func (h *handlers) createWorkflow(w http.ResponseWriter, r *http.Request) {
 
 func (h *handlers) listWorkflows(w http.ResponseWriter, r *http.Request) {
 	enabledOnly := r.URL.Query().Get("enabled") == "true"
-	workflows, err := h.coordinator.ListWorkflows(r.Context(), enabledOnly)
+	search := r.URL.Query().Get("search")
+
+	// Parse pagination parameters
+	page := 1
+	pageSize := 10
+	if pageStr := r.URL.Query().Get("page"); pageStr != "" {
+		if p, err := strconv.Atoi(pageStr); err == nil && p > 0 {
+			page = p
+		}
+	}
+	if pageSizeStr := r.URL.Query().Get("page_size"); pageSizeStr != "" {
+		if ps, err := strconv.Atoi(pageSizeStr); err == nil && ps > 0 && ps <= 100 {
+			pageSize = ps
+		}
+	}
+
+	result, err := h.coordinator.ListWorkflows(r.Context(), enabledOnly, search, page, pageSize)
 	if err != nil {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusInternalServerError)
@@ -46,7 +62,7 @@ func (h *handlers) listWorkflows(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(workflows)
+	json.NewEncoder(w).Encode(result)
 }
 
 func (h *handlers) getWorkflow(w http.ResponseWriter, r *http.Request) {

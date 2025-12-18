@@ -4,7 +4,8 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { workflowApi, type WorkflowDefinition } from '@/lib/api-client';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
-import { Plus, Edit, Trash2, Play } from 'lucide-react';
+import { Input } from '@/components/ui/input';
+import { Plus, Edit, Trash2, Play, Search } from 'lucide-react';
 import Link from 'next/link';
 import { format } from 'date-fns';
 import { Badge } from '@/components/ui/badge';
@@ -24,7 +25,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog';
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import { ExecuteWorkflowDialog } from '@/components/workflow/execute-workflow-dialog';
 import { toast } from 'sonner';
@@ -35,15 +36,33 @@ export default function WorkflowsPage() {
   const [executeDialogOpen, setExecuteDialogOpen] = useState(false);
   const [workflowToExecute, setWorkflowToExecute] = useState<WorkflowDefinition | null>(null);
   const [page, setPage] = useState(1);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [debouncedSearch, setDebouncedSearch] = useState('');
   const pageSize = 10;
   const router = useRouter();
   const queryClient = useQueryClient();
 
-  const { data: workflows, isLoading, error, isError } = useQuery({
-    queryKey: ['workflows'],
-    queryFn: () => workflowApi.list(),
+  // Debounce search query
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      setDebouncedSearch(searchQuery);
+      setPage(1); // Reset to first page when search changes
+    }, 300);
+    return () => clearTimeout(timer);
+  }, [searchQuery]);
+
+  const { data: workflowResponse, isLoading, error, isError } = useQuery({
+    queryKey: ['workflows', page, debouncedSearch],
+    queryFn: () => workflowApi.list(undefined, debouncedSearch || undefined, page, pageSize),
     retry: 2,
   });
+
+  // Handle both old format (array) and new format (object) for backward compatibility
+  const workflows = Array.isArray(workflowResponse) 
+    ? workflowResponse 
+    : workflowResponse?.workflows || [];
+  const totalPages = workflowResponse?.total_pages || (workflows.length > 0 ? 1 : 0);
+  const total = workflowResponse?.total || workflows.length;
 
   const deleteMutation = useMutation({
     mutationFn: (workflow: WorkflowDefinition) => workflowApi.delete(workflow.id, workflow.version),
@@ -127,16 +146,6 @@ export default function WorkflowsPage() {
     );
   }
 
-  // Filter out duplicates by ID
-  const uniqueWorkflows = workflows?.filter((workflow, index, self) => 
-    index === self.findIndex((w) => w.id === workflow.id)
-  ) || [];
-  
-  const paginatedWorkflows = uniqueWorkflows.slice(
-    (page - 1) * pageSize,
-    page * pageSize
-  );
-  const totalPages = Math.ceil(uniqueWorkflows.length / pageSize);
 
   const handleDelete = (workflow: WorkflowDefinition) => {
     setWorkflowToDelete(workflow);
@@ -186,13 +195,26 @@ export default function WorkflowsPage() {
 
       <Card>
         <CardHeader>
-          <CardTitle>All Workflows</CardTitle>
-          <CardDescription>
-            {workflows?.length || 0} workflow{workflows?.length !== 1 ? 's' : ''} total
-          </CardDescription>
+          <div className="flex items-center justify-between">
+            <div>
+              <CardTitle>All Workflows</CardTitle>
+              <CardDescription>
+                {total} workflow{total !== 1 ? 's' : ''} total
+              </CardDescription>
+            </div>
+            <div className="relative w-64">
+              <Search className="absolute left-2 top-1/2 transform -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+              <Input
+                placeholder="Search workflows..."
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                className="pl-8"
+              />
+            </div>
+          </div>
         </CardHeader>
         <CardContent>
-          {paginatedWorkflows.length === 0 ? (
+          {workflows.length === 0 ? (
             <div className="text-center py-12">
               <p className="text-muted-foreground mb-4">No workflows found</p>
               <Link href="/workflows/new">
@@ -216,7 +238,7 @@ export default function WorkflowsPage() {
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {paginatedWorkflows.map((workflow, index) => (
+                  {workflows.map((workflow, index) => (
                     <TableRow key={`${workflow.id}-${index}`}>
                       <TableCell className="font-medium">
                         {workflow.name}
@@ -273,22 +295,26 @@ export default function WorkflowsPage() {
               {totalPages > 1 && (
                 <div className="flex items-center justify-between mt-4">
                   <div className="text-sm text-muted-foreground">
-                    Page {page} of {totalPages}
+                    Showing {workflows.length > 0 ? (page - 1) * pageSize + 1 : 0} to{' '}
+                    {Math.min(page * pageSize, total)} of {total} workflows
                   </div>
                   <div className="flex gap-2">
                     <Button
                       variant="outline"
                       size="sm"
                       onClick={() => setPage((p) => Math.max(1, p - 1))}
-                      disabled={page === 1}
+                      disabled={page === 1 || isLoading}
                     >
                       Previous
                     </Button>
+                    <div className="text-sm text-muted-foreground flex items-center px-2">
+                      Page {page} of {totalPages}
+                    </div>
                     <Button
                       variant="outline"
                       size="sm"
                       onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
-                      disabled={page === totalPages}
+                      disabled={page === totalPages || isLoading}
                     >
                       Next
                     </Button>

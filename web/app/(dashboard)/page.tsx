@@ -10,11 +10,13 @@ import { format, subDays } from 'date-fns';
 import { Badge } from '@/components/ui/badge';
 
 export default function HomePage() {
-  const { data: workflows, isLoading: workflowsLoading, error: workflowsError, isError: workflowsIsError } = useQuery({
-    queryKey: ['workflows'],
-    queryFn: () => workflowApi.list(),
+  const { data: workflowResponse, isLoading: workflowsLoading, error: workflowsError, isError: workflowsIsError } = useQuery({
+    queryKey: ['workflows', 'home'],
+    queryFn: () => workflowApi.list(undefined, undefined, 1, 1000), // Get first 1000 workflows for home page
     retry: 2,
   });
+  
+  const workflows = workflowResponse?.workflows || [];
 
   const { data: executions, isLoading: executionsLoading, error: executionsError } = useQuery({
     queryKey: ['executions'],
@@ -63,13 +65,10 @@ export default function HomePage() {
     );
   }
 
-  // Filter out duplicates by ID and get recent workflows
-  const uniqueWorkflows = workflows?.filter((workflow, index, self) => 
-    index === self.findIndex((w) => w.id === workflow.id)
-  ) || [];
-  const recentWorkflows = uniqueWorkflows.slice(0, 5);
-  const enabledCount = uniqueWorkflows.filter((w) => w.enabled).length || 0;
-  const totalCount = uniqueWorkflows.length;
+  // Backend already returns only latest version of each workflow, so no need to filter duplicates
+  const recentWorkflows = workflows.slice(0, 5);
+  const enabledCount = workflows.filter((w) => w.enabled).length || 0;
+  const totalCount = workflows.length;
 
   // Filter out duplicates by ID and calculate execution metrics
   const allExecutions = executions?.filter((execution, index, self) => 
