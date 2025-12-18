@@ -193,9 +193,24 @@ func (c *Coordinator) HandleNodeCompleted(ctx context.Context, taskID string, ru
 		// Start next nodes in a separate transaction
 		err = c.startNextNodes(ctx, span, logger, runID, workflowID, nextNodes, runContext)
 		if err != nil {
-			logger.Error().Err(err).Msg("failed to start next nodes, but node completion was recorded")
+			failedNodeID := "unknown"
+			if len(nextNodes) > 0 {
+				failedNodeID = nextNodes[0].NodeID
+			}
+			logger.Error().
+				Err(err).
+				Str("failed_node_id", failedNodeID).
+				Int("next_nodes_count", len(nextNodes)).
+				Str("error_type", "TASK_INSTANCE_CREATION_ERROR").
+				Msg("failed to start next nodes: could not create task instance (likely CEL resolution error or database issue)")
+
+			// Mark workflow as FAILED since we cannot proceed
+			markErr := c.markWorkflowFailedWithReason(ctx, runID, workflowID, fmt.Sprintf("failed to create task instance for node %s: %v", failedNodeID, err), logger, span)
+			if markErr != nil {
+				logger.Error().Err(markErr).Msg("failed to mark workflow as failed after task instance creation error")
+			}
 			// Don't return error here - the node is already marked as completed
-			// The next nodes can be started later via a retry mechanism or manual intervention
+			// The workflow is now marked as failed, so execution will stop
 		}
 	}
 
@@ -266,8 +281,11 @@ func (c *Coordinator) resolveNodeInputFromSpecRaw(specRaw json.RawMessage, runCo
 
 	resolvedParameters, err := c.Template.ResolveTemplates(spec, runContext)
 	if err != nil {
-		logger.Error().Err(err).Msg("failed to resolve templates")
-		return nil, fmt.Errorf("failed to resolve templates: %w", err)
+		logger.Error().
+			Err(err).
+			Str("error_type", "CEL_RESOLUTION_ERROR").
+			Msg("failed to resolve CEL expressions in node spec - check CEL syntax and context variables")
+		return nil, fmt.Errorf("failed to resolve CEL expressions/templates: %w", err)
 	}
 
 	taskInput, err := json.Marshal(resolvedParameters)
@@ -533,24 +551,35 @@ func (c *Coordinator) startNextNodes(ctx context.Context, span trace.Span, logge
 
 			// Create new task instance
 			nextTaskID := uuid.New().String()
-
-			taskInput, err := c.resolveNodeInputFromSpecRaw(nextNode.Spec, runContext, logger)
-			if err != nil {
-				return err
-			}
 			nextTaskLogger := logger.With().
 				Str("next_task_id", nextTaskID).
 				Str("next_node_id", nextNode.NodeID).
 				Str("next_node_type", nextNode.Runtime).
 				Logger()
 
+			taskInput, err := c.resolveNodeInputFromSpecRaw(nextNode.Spec, runContext, nextTaskLogger)
+			if err != nil {
+				nextTaskLogger.Error().
+					Err(err).
+					Str("error_type", "CEL_RESOLUTION_ERROR").
+					Msg("failed to resolve CEL expressions for next node - cannot create task instance")
+				return fmt.Errorf("failed to resolve CEL expressions for node %s: %w", nextNode.NodeID, err)
+			}
 			if err := c.insertTaskInstance(ctx, tx, nextTaskID, runID, nextNode, taskInput, time.Now(), nextTaskLogger, span); err != nil {
-				return err
+				nextTaskLogger.Error().
+					Err(err).
+					Str("error_type", "TASK_INSTANCE_CREATION_ERROR").
+					Msg("failed to insert task instance into database")
+				return fmt.Errorf("failed to create task instance for node %s: %w", nextNode.NodeID, err)
 			}
 			c.recordTaskCreated(ctx, nextTaskLogger, span, nextTaskID, runID, nextNode)
 
 			if err := c.insertTaskOutbox(ctx, tx, nextTaskID, runID, nextNode, taskInput, nextTaskLogger, span); err != nil {
-				return err
+				nextTaskLogger.Error().
+					Err(err).
+					Str("error_type", "OUTBOX_CREATION_ERROR").
+					Msg("failed to create outbox entry for task")
+				return fmt.Errorf("failed to create outbox entry for node %s: %w", nextNode.NodeID, err)
 			}
 		}
 
@@ -689,6 +718,54 @@ func (c *Coordinator) HandleNodeFailed(ctx context.Context, runID string, nodeID
 		Msg("node failure handled")
 
 	return nil
+}
+
+// markWorkflowFailedWithReason marks a workflow as failed with a specific error reason
+func (c *Coordinator) markWorkflowFailedWithReason(ctx context.Context, runID, workflowID, reason string, logger zerolog.Logger, span trace.Span) error {
+	return c.ExecuteWithTransaction(ctx, span, logger, func(ctx context.Context, tx pgx.Tx) error {
+		// Check current status - only mark as failed if still running/pending
+		var currentStatus string
+		err := tx.QueryRow(ctx, `SELECT status FROM workflow_runs WHERE id=$1`, runID).Scan(&currentStatus)
+		if err != nil {
+			return fmt.Errorf("failed to check workflow status: %w", err)
+		}
+
+		// Only update if workflow is still in a non-terminal state
+		if currentStatus != "FAILED" && currentStatus != "COMPLETED" && currentStatus != "SUCCEEDED" {
+			// Get workflow start time for duration calculation
+			var workflowStartTime time.Time
+			_ = tx.QueryRow(ctx, `SELECT created_at FROM workflow_runs WHERE id=$1`, runID).Scan(&workflowStartTime)
+			workflowDuration := time.Since(workflowStartTime)
+
+			// Update workflow status to FAILED
+			_, err = tx.Exec(ctx,
+				`UPDATE workflow_runs SET status='FAILED', completed_at=now(), updated_at=now() WHERE id=$1`,
+				runID)
+			if err != nil {
+				logger.Error().Err(err).Msg("failed to mark workflow as failed")
+				util.RecordError(span, err)
+				return fmt.Errorf("failed to mark workflow as failed: %w", err)
+			}
+
+			logger.Error().
+				Str("failure_reason", reason).
+				Dur("workflow_duration_ms", workflowDuration).
+				Msg("workflow marked as failed: could not create task instance")
+
+			util.RecordWorkflowFailed(ctx, workflowID, runID, workflowDuration, reason)
+			util.SetSpanAttributes(span,
+				util.Attribute("workflow.status", "failed"),
+				util.Attribute("workflow.failure_reason", reason),
+				util.AttributeInt("workflow.duration_ms", workflowDuration.Milliseconds()),
+			)
+		} else {
+			logger.Debug().
+				Str("current_status", currentStatus).
+				Msg("workflow already in terminal state, not marking as failed")
+		}
+
+		return nil
+	})
 }
 
 // ExecuteWithTransaction executes a function within a transaction
