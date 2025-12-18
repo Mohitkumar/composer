@@ -46,11 +46,17 @@ export default function WorkflowsPage() {
   });
 
   const deleteMutation = useMutation({
-    mutationFn: (id: string) => workflowApi.delete(id),
+    mutationFn: (workflow: WorkflowDefinition) => workflowApi.delete(workflow.id, workflow.version),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['workflows'] });
       setDeleteDialogOpen(false);
       setWorkflowToDelete(null);
+      toast.success('Workflow deleted successfully');
+    },
+    onError: (error) => {
+      toast.error('Failed to delete workflow', {
+        description: error instanceof Error ? error.message : 'Unknown error occurred',
+      });
     },
   });
 
@@ -139,7 +145,7 @@ export default function WorkflowsPage() {
 
   const confirmDelete = () => {
     if (workflowToDelete) {
-      deleteMutation.mutate(workflowToDelete.id);
+      deleteMutation.mutate(workflowToDelete);
     }
   };
 

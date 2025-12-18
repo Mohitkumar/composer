@@ -164,7 +164,7 @@ export const workflowApi = {
   delete: async (id: string, version?: number, hard?: boolean): Promise<void> => {
     await apiClient.delete(`/workflows/${id}`, {
       params: {
-        ...(version ? { version } : {}),
+        ...(version !== undefined ? { version } : {}),
         ...(hard ? { hard: 'true' } : {}),
       },
     });

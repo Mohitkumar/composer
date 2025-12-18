@@ -2,7 +2,9 @@ package coord
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -254,6 +256,20 @@ func (c *Coordinator) insertWorkflowRun(ctx context.Context, tx pgx.Tx, p *model
 		logger.Error().Err(err).Msg("failed to marshal run context")
 		util.RecordError(span, err)
 		return err
+	}
+
+	// Check if workflow is deleted before creating run
+	var deletedAt sql.NullTime
+	err = tx.QueryRow(ctx, `SELECT deleted_at FROM workflow_definitions WHERE id = $1 AND version = $2`,
+		p.WorkflowID, p.WorkflowVersion).Scan(&deletedAt)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("workflow definition not found: %s v%d", p.WorkflowID, p.WorkflowVersion)
+		}
+		return fmt.Errorf("failed to check workflow definition: %w", err)
+	}
+	if deletedAt.Valid {
+		return fmt.Errorf("cannot start workflow: workflow %s v%d has been deleted", p.WorkflowID, p.WorkflowVersion)
 	}
 
 	_, err = tx.Exec(ctx, `INSERT INTO workflow_runs (id, workflow_definition_id, workflow_version, status, input_json, context_json, created_at, updated_at)

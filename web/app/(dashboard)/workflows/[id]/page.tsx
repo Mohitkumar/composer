@@ -19,6 +19,7 @@ import {
 } from '@/components/ui/dialog';
 import { useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
+import { toast } from 'sonner';
 
 export default function WorkflowDetailPage() {
   const params = useParams();
@@ -33,10 +34,16 @@ export default function WorkflowDetailPage() {
   });
 
   const deleteMutation = useMutation({
-    mutationFn: () => workflowApi.delete(workflowId),
+    mutationFn: () => workflowApi.delete(workflowId, workflow?.version),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['workflows'] });
+      toast.success('Workflow deleted successfully');
       router.push('/workflows');
+    },
+    onError: (error) => {
+      toast.error('Failed to delete workflow', {
+        description: error instanceof Error ? error.message : 'Unknown error occurred',
+      });
     },
   });
 

@@ -57,7 +57,7 @@ func (c *Coordinator) GetWorkflow(ctx context.Context, workflowID string, versio
 	var webhookURL sql.NullString
 
 	query := `SELECT id, name, version, spec_json, created_by, enabled, webhook_url, created_at 
-	          FROM workflow_definitions WHERE id = $1`
+	          FROM workflow_definitions WHERE id = $1 AND deleted_at IS NULL`
 	args := []interface{}{workflowID}
 
 	if version > 0 {
@@ -86,11 +86,11 @@ func (c *Coordinator) GetWorkflow(ctx context.Context, workflowID string, versio
 // ListWorkflows lists all workflow definitions, optionally filtered by enabled status.
 func (c *Coordinator) ListWorkflows(ctx context.Context, enabledOnly bool) ([]model.WorkflowDefinitionRecord, error) {
 	query := `SELECT id, name, version, spec_json, created_by, enabled, webhook_url, created_at 
-	          FROM workflow_definitions`
+	          FROM workflow_definitions WHERE deleted_at IS NULL`
 	args := []interface{}{}
 
 	if enabledOnly {
-		query += ` WHERE enabled = true`
+		query += ` AND enabled = true`
 	}
 
 	query += ` ORDER BY id, version DESC`
@@ -179,8 +179,8 @@ func (c *Coordinator) UpdateWorkflow(ctx context.Context, workflowID string, ver
 	return tx.Commit(ctx)
 }
 
-// DeleteWorkflow disables a workflow definition (soft delete).
-// Set hardDelete to true to actually delete the workflow.
+// DeleteWorkflow performs soft delete on a workflow definition and all its instances.
+// Set hardDelete to true to actually delete the workflow (cascade delete).
 func (c *Coordinator) DeleteWorkflow(ctx context.Context, workflowID string, version int, hardDelete bool) error {
 	tx, err := c.DB.Begin(ctx)
 	if err != nil {
@@ -189,28 +189,59 @@ func (c *Coordinator) DeleteWorkflow(ctx context.Context, workflowID string, ver
 	defer tx.Rollback(ctx)
 
 	if hardDelete {
+		// Hard delete: actually remove from database
+		// First delete workflow runs (cascade)
+		_, err = tx.Exec(ctx, `DELETE FROM workflow_runs WHERE workflow_definition_id = $1 AND workflow_version = $2`,
+			workflowID, version)
+		if err != nil {
+			return fmt.Errorf("failed to delete workflow runs: %w", err)
+		}
+		// Then delete workflow definition
 		_, err = tx.Exec(ctx, `DELETE FROM workflow_definitions WHERE id = $1 AND version = $2`,
 			workflowID, version)
+		if err != nil {
+			return fmt.Errorf("failed to delete workflow definition: %w", err)
+		}
 	} else {
-		_, err = tx.Exec(ctx, `UPDATE workflow_definitions SET enabled = false WHERE id = $1 AND version = $2`,
+		// Soft delete: mark as deleted with timestamp
+		// Mark workflow definition as deleted
+		result, err := tx.Exec(ctx,
+			`UPDATE workflow_definitions 
+			 SET deleted_at = NOW(), enabled = false 
+			 WHERE id = $1 AND version = $2 AND deleted_at IS NULL`,
 			workflowID, version)
-	}
+		if err != nil {
+			return fmt.Errorf("failed to soft delete workflow definition: %w", err)
+		}
 
-	if err != nil {
-		return err
+		rowsAffected := result.RowsAffected()
+		if rowsAffected == 0 {
+			return errors.New("workflow not found or already deleted")
+		}
+
+		// Mark all workflow instances (runs) as deleted
+		_, err = tx.Exec(ctx,
+			`UPDATE workflow_runs 
+			 SET deleted_at = NOW() 
+			 WHERE workflow_definition_id = $1 AND workflow_version = $2 AND deleted_at IS NULL`,
+			workflowID, version)
+		if err != nil {
+			return fmt.Errorf("failed to soft delete workflow instances: %w", err)
+		}
 	}
 
 	return tx.Commit(ctx)
 }
 
 // GetWorkflowInstance retrieves a workflow instance (run) by ID.
+// Returns error if instance is soft-deleted.
 func (c *Coordinator) GetWorkflowInstance(ctx context.Context, instanceID string) (*model.WorkflowInstanceRecord, error) {
 	var inst model.WorkflowInstanceRecord
 	var completedAt sql.NullTime
 
 	err := c.DB.QueryRow(ctx,
 		`SELECT id, workflow_definition_id, workflow_version, status, input_json, created_at, updated_at, completed_at 
-		 FROM workflow_runs WHERE id = $1`,
+		 FROM workflow_runs WHERE id = $1 AND deleted_at IS NULL`,
 		instanceID).Scan(
 		&inst.ID, &inst.WorkflowDefinitionID, &inst.WorkflowVersion, &inst.Status,
 		&inst.Input, &inst.CreatedAt, &inst.UpdatedAt, &completedAt)
@@ -240,7 +271,7 @@ func (c *Coordinator) GetExecutionDetails(ctx context.Context, instanceID string
 	// Get context
 	var contextJSON json.RawMessage
 	err = c.DB.QueryRow(ctx,
-		`SELECT context_json FROM workflow_runs WHERE id = $1`,
+		`SELECT context_json FROM workflow_runs WHERE id = $1 AND deleted_at IS NULL`,
 		instanceID).Scan(&contextJSON)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("failed to load context: %w", err)
@@ -255,12 +286,15 @@ func (c *Coordinator) GetExecutionDetails(ctx context.Context, instanceID string
 		}
 	}
 
-	// Get task instances
+	// Get task instances (only for non-deleted runs)
 	rows, err := c.DB.Query(ctx,
-		`SELECT id, run_id, node_id, node_type, state, attempt, input_json, output_json, last_error,
-		        scheduled_at, started_at, finished_at, completed_at, created_at, updated_at,
-		        lease_owner, lease_expires_at
-		 FROM task_instances WHERE run_id = $1 ORDER BY created_at ASC`,
+		`SELECT ti.id, ti.run_id, ti.node_id, ti.node_type, ti.state, ti.attempt, ti.input_json, ti.output_json, ti.last_error,
+		        ti.scheduled_at, ti.started_at, ti.finished_at, ti.completed_at, ti.created_at, ti.updated_at,
+		        ti.lease_owner, ti.lease_expires_at
+		 FROM task_instances ti
+		 INNER JOIN workflow_runs wr ON ti.run_id = wr.id
+		 WHERE ti.run_id = $1 AND wr.deleted_at IS NULL
+		 ORDER BY ti.created_at ASC`,
 		instanceID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query task instances: %w", err)
@@ -318,10 +352,11 @@ func (c *Coordinator) GetExecutionDetails(ctx context.Context, instanceID string
 }
 
 // ListWorkflowInstances lists workflow instances, optionally filtered by workflow ID and status.
+// Excludes soft-deleted instances by default.
 func (c *Coordinator) ListWorkflowInstances(ctx context.Context, workflowID *string,
 	status *model.WorkflowInstanceStatus, limit, offset int) ([]model.WorkflowInstanceRecord, error) {
 	query := `SELECT id, workflow_definition_id, workflow_version, status, input_json, created_at, updated_at, completed_at 
-	          FROM workflow_runs WHERE 1=1`
+	          FROM workflow_runs WHERE deleted_at IS NULL`
 	args := []interface{}{}
 	argPos := 1
 
@@ -378,7 +413,7 @@ func (c *Coordinator) GetWorkflowInstanceStatus(ctx context.Context, instanceID 
 
 	// Get instance basic info
 	err := c.DB.QueryRow(ctx,
-		`SELECT id, status, created_at, updated_at FROM workflow_runs WHERE id = $1`,
+		`SELECT id, status, created_at, updated_at FROM workflow_runs WHERE id = $1 AND deleted_at IS NULL`,
 		instanceID).Scan(&status.ID, &status.Status, &status.CreatedAt, &status.UpdatedAt)
 
 	if err != nil {
