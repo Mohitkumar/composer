@@ -346,13 +346,13 @@ export default function ExecutionDetailPage() {
             </CardHeader>
             <CardContent>
               {context ? (
-                <div className="space-y-4">
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                   {context.input && (
                     <div>
                       <h4 className="font-medium mb-2">Input</h4>
-                      <div className="border rounded-md overflow-hidden" style={{ height: '200px' }}>
+                      <div className="border rounded-md overflow-hidden" style={{ height: '300px' }}>
                         <Editor
-                          height="200px"
+                          height="300px"
                           defaultLanguage="json"
                           value={JSON.stringify(context.input, null, 2)}
                           options={{
@@ -371,32 +371,11 @@ export default function ExecutionDetailPage() {
                   {context.config && (
                     <div>
                       <h4 className="font-medium mb-2">Config</h4>
-                      <div className="border rounded-md overflow-hidden" style={{ height: '200px' }}>
-                        <Editor
-                          height="200px"
-                          defaultLanguage="json"
-                          value={JSON.stringify(context.config, null, 2)}
-                          options={{
-                            readOnly: true,
-                            minimap: { enabled: false },
-                            fontSize: 12,
-                            lineNumbers: "on",
-                            wordWrap: "on",
-                            scrollBeyondLastLine: false,
-                          }}
-                          theme="vs-dark"
-                        />
-                      </div>
-                    </div>
-                  )}
-                  {context.tasks && Object.keys(context.tasks).length > 0 && (
-                    <div>
-                      <h4 className="font-medium mb-2">Task Results</h4>
                       <div className="border rounded-md overflow-hidden" style={{ height: '300px' }}>
                         <Editor
                           height="300px"
                           defaultLanguage="json"
-                          value={JSON.stringify(context.tasks, null, 2)}
+                          value={JSON.stringify(context.config, null, 2)}
                           options={{
                             readOnly: true,
                             minimap: { enabled: false },
