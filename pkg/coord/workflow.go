@@ -270,15 +270,14 @@ func (c *Coordinator) calculateWorkflowSuccessRates(ctx context.Context, workflo
 		}
 		if total > 0 {
 			rates[workflowID] = float64(successful) / float64(total) * 100
-		} else {
-			rates[workflowID] = 100.0 // No executions means 100% success (or N/A)
 		}
+		// If total is 0, don't set a rate - we'll use -1 to indicate "no executions"
 	}
 
-	// Set default rate for workflows with no executions
+	// Set -1 for workflows with no executions (to indicate N/A)
 	for _, id := range workflowIDs {
 		if _, exists := rates[id]; !exists {
-			rates[id] = 100.0
+			rates[id] = -1.0 // Use -1 to indicate no executions
 		}
 	}
 

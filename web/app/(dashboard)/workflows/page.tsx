@@ -25,12 +25,6 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog';
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
-} from '@/components/ui/dropdown-menu';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
@@ -276,7 +270,7 @@ export default function WorkflowsPage() {
                         </Badge>
                       </TableCell>
                       <TableCell>
-                        {workflow.success_rate !== undefined ? (
+                        {workflow.success_rate !== undefined && workflow.success_rate >= 0 ? (
                           <Badge
                             variant={
                               workflow.success_rate >= 95
@@ -289,7 +283,7 @@ export default function WorkflowsPage() {
                             {workflow.success_rate.toFixed(1)}%
                           </Badge>
                         ) : (
-                          <span className="text-muted-foreground">N/A</span>
+                          <span className="text-muted-foreground">-</span>
                         )}
                       </TableCell>
                       <TableCell>
@@ -316,26 +310,15 @@ export default function WorkflowsPage() {
                           >
                             <Play className="h-4 w-4" />
                           </Button>
-                          {workflow.success_rate !== undefined && workflow.success_rate < 95 && (
-                            <DropdownMenu>
-                              <DropdownMenuTrigger asChild>
-                                <Button
-                                  variant="ghost"
-                                  size="sm"
-                                  title="View issue summary"
-                                >
-                                  <AlertTriangle className="h-4 w-4 text-destructive" />
-                                </Button>
-                              </DropdownMenuTrigger>
-                              <DropdownMenuContent align="end">
-                                <DropdownMenuItem
-                                  onClick={() => handleViewIssueSummary(workflow)}
-                                >
-                                  <AlertTriangle className="mr-2 h-4 w-4" />
-                                  View Issue Summary
-                                </DropdownMenuItem>
-                              </DropdownMenuContent>
-                            </DropdownMenu>
+                          {workflow.success_rate !== undefined && workflow.success_rate >= 0 && workflow.success_rate < 95 && (
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              onClick={() => handleViewIssueSummary(workflow)}
+                              title="View issue summary"
+                            >
+                              <AlertTriangle className="h-4 w-4 text-destructive" />
+                            </Button>
                           )}
                           <Button
                             variant="ghost"
