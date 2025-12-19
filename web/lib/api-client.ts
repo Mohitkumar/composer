@@ -172,21 +172,14 @@ export const workflowApi = {
   },
 
   create: async (data: CreateWorkflowRequest): Promise<void> => {
-    // Send as YAML string (backend expects YAML format)
-    // The data.spec is already a YAML string, construct the full YAML document
-    const yaml = require('yaml');
-    const yamlBody = yaml.stringify({
+    // Send as JSON with spec as YAML string
+    // The data.spec is already a YAML string, send it as-is in JSON body
+    await apiClient.post('/workflows', {
       workflow_id: data.workflow_id,
       name: data.name,
       version: data.version,
-      spec: yaml.parse(data.spec), // Parse YAML spec string to object for inclusion
+      spec: data.spec, // YAML string
       ...(data.created_by ? { created_by: data.created_by } : {}),
-    });
-    
-    await apiClient.post('/workflows', yamlBody, {
-      headers: {
-        'Content-Type': 'application/x-yaml',
-      },
     });
   },
 

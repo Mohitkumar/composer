@@ -2,14 +2,12 @@ package http
 
 import (
 	"encoding/json"
-	"io"
 	"net/http"
 	"strconv"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/mohitkumar/composer/pkg/coord"
 	"github.com/mohitkumar/composer/pkg/model"
-	"github.com/mohitkumar/composer/pkg/util"
 	"gopkg.in/yaml.v3"
 )
 
@@ -21,33 +19,41 @@ type handlers struct {
 // Workflow handlers
 
 func (h *handlers) createWorkflow(w http.ResponseWriter, r *http.Request) {
-	// Read request body
-	bodyBytes, err := io.ReadAll(r.Body)
-	if err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
-		return
-	}
-
-	// Parse as YAML
+	// Parse JSON request body
+	// Expected format: { "workflow_id": "...", "name": "...", "version": 1, "spec": "yaml string", "created_by": "..." }
 	var p struct {
-		WorkflowID string      `yaml:"workflow_id"`
-		Name       string      `yaml:"name"`
-		Version    int         `yaml:"version"`
-		Spec       interface{} `yaml:"spec"` // YAML spec as object
-		CreatedBy  string      `yaml:"created_by,omitempty"`
+		WorkflowID string `json:"workflow_id"`
+		Name       string `json:"name"`
+		Version    int    `json:"version"`
+		Spec       string `json:"spec"` // YAML string
+		CreatedBy  string `json:"created_by,omitempty"`
 	}
-	if err := yaml.Unmarshal(bodyBytes, &p); err != nil {
+	if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid YAML: " + err.Error()})
+		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid JSON: " + err.Error()})
 		return
 	}
 
-	// Convert spec from YAML object to JSON
-	// Since the spec is already parsed as interface{}, we can directly marshal to JSON
-	specJSON, err := json.Marshal(p.Spec)
+	// Validate that spec is not empty
+	if p.Spec == "" {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "spec field is required and cannot be empty"})
+		return
+	}
+
+	// Validate that spec is valid YAML by parsing it
+	var specObj interface{}
+	if err := yaml.Unmarshal([]byte(p.Spec), &specObj); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid YAML in spec field: " + err.Error()})
+		return
+	}
+
+	// Convert YAML spec to JSON for storage in database
+	specJSON, err := json.Marshal(specObj)
 	if err != nil {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
@@ -55,7 +61,7 @@ func (h *handlers) createWorkflow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Create RegisterWorkflowRequest with JSON spec
+	// Create RegisterWorkflowRequest with JSON spec (for database storage)
 	req := model.RegisterWorkflowRequest{
 		WorkflowID: p.WorkflowID,
 		Name:       p.Name,
@@ -112,7 +118,8 @@ func (h *handlers) listWorkflows(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		specYAML, err := util.ObjectToYAML(specObj)
+		var specYAML interface{}
+		err = yaml.Unmarshal([]byte(wf.Spec), &specYAML)
 		if err != nil {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusInternalServerError)
@@ -170,7 +177,8 @@ func (h *handlers) getWorkflow(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Convert spec from JSON to YAML
-	specYAML, err := util.JSONToYAML(wf.Spec)
+	var specObj interface{}
+	err = yaml.Unmarshal([]byte(wf.Spec), &specObj)
 	if err != nil {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusInternalServerError)
@@ -183,7 +191,7 @@ func (h *handlers) getWorkflow(w http.ResponseWriter, r *http.Request) {
 		"id":         wf.ID,
 		"name":       wf.Name,
 		"version":    wf.Version,
-		"spec":       specYAML,
+		"spec":       specObj,
 		"created_by": wf.CreatedBy,
 		"enabled":    wf.Enabled,
 		"created_at": wf.CreatedAt,
