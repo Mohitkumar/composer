@@ -5,7 +5,6 @@ import { configurationApi, type Configuration } from '@/lib/api-client';
 import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Plus, Edit, Trash2 } from 'lucide-react';
-import Link from 'next/link';
 import { format } from 'date-fns';
 import { Badge } from '@/components/ui/badge';
 import { useState } from 'react';
@@ -18,10 +17,14 @@ import {
   DeleteDialog,
   ActionButtons,
 } from '@/components/shared';
+import { ConfigurationDialog } from '@/components/configuration/configuration-dialog';
 
 export default function ConfigurationsPage() {
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [configToDelete, setConfigToDelete] = useState<Configuration | null>(null);
+  const [createDialogOpen, setCreateDialogOpen] = useState(false);
+  const [editDialogOpen, setEditDialogOpen] = useState(false);
+  const [configToEdit, setConfigToEdit] = useState<Configuration | null>(null);
   const queryClient = useQueryClient();
 
   const { data: configurations, isLoading, error, isError } = useQuery({
@@ -69,6 +72,15 @@ export default function ConfigurationsPage() {
     if (configToDelete) {
       deleteMutation.mutate(configToDelete.id);
     }
+  };
+
+  const handleEdit = (config: Configuration) => {
+    setConfigToEdit(config);
+    setEditDialogOpen(true);
+  };
+
+  const handleCreate = () => {
+    setCreateDialogOpen(true);
   };
 
   // Filter out duplicates by ID
@@ -121,7 +133,7 @@ export default function ConfigurationsPage() {
             {
               icon: Edit,
               label: 'Edit configuration',
-              href: `/configurations/${config.id}/edit`,
+              onClick: () => handleEdit(config),
             },
             {
               icon: Trash2,
@@ -142,12 +154,10 @@ export default function ConfigurationsPage() {
           title="Configurations"
           description={`${uniqueConfigs.length} configuration${uniqueConfigs.length !== 1 ? 's' : ''} total • Manage reusable configuration templates for S3, HTTP, databases, and more`}
           action={
-            <Link href="/configurations/new">
-              <Button size="sm" className="btn-small">
-                <Plus className="mr-1.5 h-3.5 w-3.5" />
-                Create Configuration
-              </Button>
-            </Link>
+            <Button size="sm" className="btn-small" onClick={handleCreate}>
+              <Plus className="mr-1.5 h-3.5 w-3.5" />
+              Create Configuration
+            </Button>
           }
         />
         <CardContent className="page-content-padding">
@@ -157,12 +167,10 @@ export default function ConfigurationsPage() {
             keyExtractor={(config, index) => `${config.id}-${index}`}
             emptyMessage="No configurations found"
             emptyAction={
-              <Link href="/configurations/new">
-                <Button size="sm" className="btn-small">
-                  <Plus className="mr-1.5 h-3.5 w-3.5" />
-                  Create Your First Configuration
-                </Button>
-              </Link>
+              <Button size="sm" className="btn-small" onClick={handleCreate}>
+                <Plus className="mr-1.5 h-3.5 w-3.5" />
+                Create Your First Configuration
+              </Button>
             }
           />
         </CardContent>
@@ -177,6 +185,24 @@ export default function ConfigurationsPage() {
         onConfirm={confirmDelete}
         isDeleting={deleteMutation.isPending}
       />
+
+      <ConfigurationDialog
+        open={createDialogOpen}
+        onOpenChange={setCreateDialogOpen}
+      />
+
+      {configToEdit && (
+        <ConfigurationDialog
+          open={editDialogOpen}
+          onOpenChange={(open) => {
+            setEditDialogOpen(open);
+            if (!open) {
+              setConfigToEdit(null);
+            }
+          }}
+          configId={configToEdit.id}
+        />
+      )}
     </>
   );
 }
