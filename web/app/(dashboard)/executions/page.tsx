@@ -89,29 +89,32 @@ export default function ExecutionsPage() {
 
   if (isError) {
     return (
-      <div className="space-y-6">
-        <div>
-          <h1 className="text-3xl font-bold tracking-tight">Executions</h1>
-          <p className="text-muted-foreground">
-            Monitor and manage workflow executions
-          </p>
-        </div>
-        <Card>
-          <CardContent className="pt-6">
-            <div className="text-center py-12">
-              <p className="text-destructive mb-2">Failed to load executions</p>
-              <p className="text-sm text-muted-foreground mb-4">
-                {error instanceof Error ? error.message : 'Unknown error occurred'}
-              </p>
-              <Button
-                onClick={() => queryClient.invalidateQueries({ queryKey: ['executions'] })}
-              >
-                Retry
-              </Button>
+      <Card>
+        <CardHeader>
+          <div className="flex items-center justify-between">
+            <div>
+              <CardTitle>Executions</CardTitle>
+              <CardDescription>
+                Monitor and manage workflow executions
+              </CardDescription>
             </div>
-          </CardContent>
-        </Card>
-      </div>
+          </div>
+        </CardHeader>
+        <CardContent className="pt-6">
+          <div className="text-center py-12">
+            <p className="text-destructive mb-2">Failed to load executions</p>
+            <p className="text-sm text-muted-foreground mb-4">
+              {error instanceof Error ? error.message : 'Unknown error occurred'}
+            </p>
+            <Button
+              onClick={() => queryClient.invalidateQueries({ queryKey: ['executions'] })}
+              size="sm"
+            >
+              Retry
+            </Button>
+          </div>
+        </CardContent>
+      </Card>
     );
   }
 
@@ -131,38 +134,31 @@ export default function ExecutionsPage() {
   };
 
   return (
-    <div className="space-y-6">
-      <div>
-        <h1 className="text-3xl font-bold tracking-tight">Executions</h1>
-        <p className="text-muted-foreground">
-          Monitor and manage workflow executions
-        </p>
-      </div>
-
+    <>
       <Card>
-        <CardHeader>
-          <div className="flex items-center justify-between">
-            <div>
-              <CardTitle>All Executions</CardTitle>
-              <CardDescription>
-                {total} execution{total !== 1 ? 's' : ''} total
+        <CardHeader className="pb-3">
+          <div className="flex items-center justify-between gap-4">
+            <div className="flex-1">
+              <CardTitle className="text-xl">Executions</CardTitle>
+              <CardDescription className="text-xs mt-0.5">
+                {total} execution{total !== 1 ? 's' : ''} total • Monitor and manage workflow executions
               </CardDescription>
             </div>
-            <div className="flex gap-2">
-              <div className="relative w-64">
-                <Search className="absolute left-2 top-1/2 transform -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+            <div className="flex items-center gap-2">
+              <div className="relative w-56">
+                <Search className="absolute left-2 top-1/2 transform -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
                 <Input
                   placeholder="Search by execution ID or workflow ID..."
                   value={searchQuery}
                   onChange={(e) => setSearchQuery(e.target.value)}
-                  className="pl-8"
+                  className="pl-7 h-8 text-sm"
                 />
               </div>
               <Select value={statusFilter} onValueChange={(value) => {
                 setStatusFilter(value);
                 setPage(1); // Reset to first page when filter changes
               }}>
-                <SelectTrigger className="w-[180px]">
+                <SelectTrigger className="w-[160px] h-8 text-sm">
                   <SelectValue placeholder="Filter by status" />
                 </SelectTrigger>
                 <SelectContent>
@@ -181,86 +177,88 @@ export default function ExecutionsPage() {
                   setWorkflowFilter(e.target.value);
                   setPage(1); // Reset to first page when filter changes
                 }}
-                className="w-[200px]"
+                className="w-[180px] h-8 text-sm"
               />
             </div>
           </div>
         </CardHeader>
-        <CardContent>
+        <CardContent className="pt-0">
           {executions.length === 0 ? (
             <div className="text-center py-12">
-              <p className="text-muted-foreground">No executions found</p>
+              <p className="text-muted-foreground text-sm">No executions found</p>
             </div>
           ) : (
             <>
               <Table>
                 <TableHeader>
                   <TableRow>
-                    <TableHead>Execution ID</TableHead>
-                    <TableHead>Workflow ID</TableHead>
-                    <TableHead>Version</TableHead>
-                    <TableHead>Status</TableHead>
-                    <TableHead>Created</TableHead>
-                    <TableHead>Updated</TableHead>
-                    <TableHead>Completed</TableHead>
-                    <TableHead className="text-right">Actions</TableHead>
+                    <TableHead className="h-9 text-xs font-medium">Execution ID</TableHead>
+                    <TableHead className="h-9 text-xs font-medium">Workflow ID</TableHead>
+                    <TableHead className="h-9 text-xs font-medium">Version</TableHead>
+                    <TableHead className="h-9 text-xs font-medium">Status</TableHead>
+                    <TableHead className="h-9 text-xs font-medium">Created</TableHead>
+                    <TableHead className="h-9 text-xs font-medium">Updated</TableHead>
+                    <TableHead className="h-9 text-xs font-medium">Completed</TableHead>
+                    <TableHead className="h-9 text-xs font-medium text-right">Actions</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
                   {executions.map((execution, index) => (
-                    <TableRow key={`${execution.id}-${index}`}>
-                      <TableCell className="font-mono text-sm">
+                    <TableRow key={`${execution.id}-${index}`} className="h-11">
+                      <TableCell className="py-2 font-mono text-xs">
                         {execution.id}
                       </TableCell>
-                      <TableCell className="font-mono text-sm">
+                      <TableCell className="py-2 font-mono text-xs">
                         {execution.workflow_definition_id}
                       </TableCell>
-                      <TableCell>v{execution.workflow_version}</TableCell>
-                      <TableCell>
-                        <Badge variant={getStatusBadgeVariant(execution.status)}>
+                      <TableCell className="py-2 text-sm">v{execution.workflow_version}</TableCell>
+                      <TableCell className="py-2">
+                        <Badge variant={getStatusBadgeVariant(execution.status)} className="text-xs">
                           {execution.status}
                         </Badge>
                       </TableCell>
-                      <TableCell>
+                      <TableCell className="py-2 text-xs text-muted-foreground">
                         {execution.created_at
                           ? format(new Date(execution.created_at), 'MMM d, yyyy HH:mm')
                           : '-'}
                       </TableCell>
-                      <TableCell>
+                      <TableCell className="py-2 text-xs text-muted-foreground">
                         {execution.updated_at
                           ? format(new Date(execution.updated_at), 'MMM d, yyyy HH:mm')
                           : '-'}
                       </TableCell>
-                      <TableCell>
+                      <TableCell className="py-2 text-xs text-muted-foreground">
                         {execution.completed_at
                           ? format(new Date(execution.completed_at), 'MMM d, yyyy HH:mm')
                           : '-'}
                       </TableCell>
-                      <TableCell className="text-right">
+                      <TableCell className="py-2 text-right">
                         <div className="flex items-center justify-end gap-1">
                           {(execution.status === 'FAILED' || execution.status === 'COMPLETED') && (
                             <Button
                               variant="ghost"
-                              size="icon"
+                              size="sm"
+                              className="h-7 w-7 p-0"
                               onClick={() => {
                                 setRetryExecutionId(execution.id);
                                 setRetryDialogOpen(true);
                               }}
                               title="Retry execution"
                             >
-                              <RotateCw className="h-4 w-4" />
+                              <RotateCw className="h-3.5 w-3.5" />
                             </Button>
                           )}
                           <Button
                             variant="ghost"
-                            size="icon"
+                            size="sm"
+                            className="h-7 w-7 p-0"
                             onClick={() => {
                               setSelectedExecutionId(execution.id);
                               setDetailDialogOpen(true);
                             }}
                             title="View details"
                           >
-                            <Eye className="h-4 w-4" />
+                            <Eye className="h-3.5 w-3.5" />
                           </Button>
                         </div>
                       </TableCell>
@@ -270,8 +268,8 @@ export default function ExecutionsPage() {
               </Table>
 
               {totalPages > 1 && (
-                <div className="flex items-center justify-between mt-4">
-                  <div className="text-sm text-muted-foreground">
+                <div className="flex items-center justify-between mt-3 pt-3 border-t">
+                  <div className="text-xs text-muted-foreground">
                     Showing {executions.length > 0 ? (page - 1) * pageSize + 1 : 0} to{' '}
                     {Math.min(page * pageSize, total)} of {total} executions
                   </div>
@@ -279,17 +277,19 @@ export default function ExecutionsPage() {
                     <Button
                       variant="outline"
                       size="sm"
+                      className="h-8"
                       onClick={() => setPage((p) => Math.max(1, p - 1))}
                       disabled={page === 1 || isLoading}
                     >
                       Previous
                     </Button>
-                    <div className="text-sm text-muted-foreground flex items-center px-2">
+                    <div className="text-xs text-muted-foreground flex items-center px-2">
                       Page {page} of {totalPages}
                     </div>
                     <Button
                       variant="outline"
                       size="sm"
+                      className="h-8"
                       onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
                       disabled={page === totalPages || isLoading}
                     >
@@ -328,6 +328,6 @@ export default function ExecutionsPage() {
           }}
         />
       )}
-    </div>
+    </>
   );
 }

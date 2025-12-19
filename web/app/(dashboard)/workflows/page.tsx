@@ -129,31 +129,38 @@ export default function WorkflowsPage() {
 
   if (isError) {
     return (
-      <div className="space-y-6">
-        <div className="flex items-center justify-between">
-          <div>
-            <h1 className="text-3xl font-bold tracking-tight">Workflows</h1>
-            <p className="text-muted-foreground">
-              Manage and monitor your workflow definitions
-            </p>
-          </div>
-        </div>
-        <Card>
-          <CardContent className="pt-6">
-            <div className="text-center py-12">
-              <p className="text-destructive mb-2">Failed to load workflows</p>
-              <p className="text-sm text-muted-foreground mb-4">
-                {error instanceof Error ? error.message : 'Unknown error occurred'}
-              </p>
-              <Button
-                onClick={() => queryClient.invalidateQueries({ queryKey: ['workflows'] })}
-              >
-                Retry
-              </Button>
+      <Card>
+        <CardHeader>
+          <div className="flex items-center justify-between">
+            <div>
+              <CardTitle>Workflows</CardTitle>
+              <CardDescription>
+                Manage and monitor your workflow definitions
+              </CardDescription>
             </div>
-          </CardContent>
-        </Card>
-      </div>
+            <Link href="/workflows/new">
+              <Button size="sm" className="h-8">
+                <Plus className="mr-1.5 h-3.5 w-3.5" />
+                Create Workflow
+              </Button>
+            </Link>
+          </div>
+        </CardHeader>
+        <CardContent className="pt-6">
+          <div className="text-center py-12">
+            <p className="text-destructive mb-2">Failed to load workflows</p>
+            <p className="text-sm text-muted-foreground mb-4">
+              {error instanceof Error ? error.message : 'Unknown error occurred'}
+            </p>
+            <Button
+              onClick={() => queryClient.invalidateQueries({ queryKey: ['workflows'] })}
+              size="sm"
+            >
+              Retry
+            </Button>
+          </div>
+        </CardContent>
+      </Card>
     );
   }
 
@@ -193,49 +200,42 @@ export default function WorkflowsPage() {
   };
 
   return (
-    <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-3xl font-bold tracking-tight">Workflows</h1>
-          <p className="text-muted-foreground">
-            Manage and monitor your workflow definitions
-          </p>
-        </div>
-        <Link href="/workflows/new">
-          <Button>
-            <Plus className="mr-2 h-4 w-4" />
-            Create Workflow
-          </Button>
-        </Link>
-      </div>
-
+    <>
       <Card>
-        <CardHeader>
-          <div className="flex items-center justify-between">
-            <div>
-              <CardTitle>All Workflows</CardTitle>
-              <CardDescription>
-                {total} workflow{total !== 1 ? 's' : ''} total
+        <CardHeader className="pb-3">
+          <div className="flex items-center justify-between gap-4">
+            <div className="flex-1">
+              <CardTitle className="text-xl">Workflows</CardTitle>
+              <CardDescription className="text-xs mt-0.5">
+                {total} workflow{total !== 1 ? 's' : ''} total • Manage and monitor your workflow definitions
               </CardDescription>
             </div>
-            <div className="relative w-64">
-              <Search className="absolute left-2 top-1/2 transform -translate-y-1/2 h-4 w-4 text-muted-foreground" />
-              <Input
-                placeholder="Search workflows..."
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                className="pl-8"
-              />
+            <div className="flex items-center gap-2">
+              <div className="relative w-56">
+                <Search className="absolute left-2 top-1/2 transform -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
+                <Input
+                  placeholder="Search workflows..."
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  className="pl-7 h-8 text-sm"
+                />
+              </div>
+              <Link href="/workflows/new">
+                <Button size="sm" className="h-8">
+                  <Plus className="mr-1.5 h-3.5 w-3.5" />
+                  Create Workflow
+                </Button>
+              </Link>
             </div>
           </div>
         </CardHeader>
-        <CardContent>
+        <CardContent className="pt-0">
           {workflows.length === 0 ? (
             <div className="text-center py-12">
-              <p className="text-muted-foreground mb-4">No workflows found</p>
+              <p className="text-muted-foreground mb-4 text-sm">No workflows found</p>
               <Link href="/workflows/new">
-                <Button>
-                  <Plus className="mr-2 h-4 w-4" />
+                <Button size="sm" className="h-8">
+                  <Plus className="mr-1.5 h-3.5 w-3.5" />
                   Create Your First Workflow
                 </Button>
               </Link>
@@ -245,31 +245,31 @@ export default function WorkflowsPage() {
               <Table>
                 <TableHeader>
                   <TableRow>
-                    <TableHead>Name</TableHead>
-                    <TableHead>ID</TableHead>
-                    <TableHead>Version</TableHead>
-                    <TableHead>Status</TableHead>
-                    <TableHead>Success Rate</TableHead>
-                    <TableHead>Created</TableHead>
-                    <TableHead className="text-right">Actions</TableHead>
+                    <TableHead className="h-9 text-xs font-medium">Name</TableHead>
+                    <TableHead className="h-9 text-xs font-medium">ID</TableHead>
+                    <TableHead className="h-9 text-xs font-medium">Version</TableHead>
+                    <TableHead className="h-9 text-xs font-medium">Status</TableHead>
+                    <TableHead className="h-9 text-xs font-medium">Success Rate</TableHead>
+                    <TableHead className="h-9 text-xs font-medium">Created</TableHead>
+                    <TableHead className="h-9 text-xs font-medium text-right">Actions</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
                   {workflows.map((workflow, index) => (
-                    <TableRow key={`${workflow.id}-${index}`}>
-                      <TableCell className="font-medium">
+                    <TableRow key={`${workflow.id}-${index}`} className="h-11">
+                      <TableCell className="py-2 text-sm font-medium">
                         {workflow.name}
                       </TableCell>
-                      <TableCell className="font-mono text-sm">
+                      <TableCell className="py-2 font-mono text-xs">
                         {workflow.id}
                       </TableCell>
-                      <TableCell>v{workflow.version}</TableCell>
-                      <TableCell>
-                        <Badge variant={workflow.enabled ? 'default' : 'secondary'}>
+                      <TableCell className="py-2 text-sm">v{workflow.version}</TableCell>
+                      <TableCell className="py-2">
+                        <Badge variant={workflow.enabled ? 'default' : 'secondary'} className="text-xs">
                           {workflow.enabled ? 'Enabled' : 'Disabled'}
                         </Badge>
                       </TableCell>
-                      <TableCell>
+                      <TableCell className="py-2">
                         {workflow.success_rate !== undefined && workflow.success_rate >= 0 ? (
                           <Badge
                             variant={
@@ -279,55 +279,59 @@ export default function WorkflowsPage() {
                                 ? 'secondary'
                                 : 'destructive'
                             }
+                            className="text-xs"
                           >
                             {workflow.success_rate.toFixed(1)}%
                           </Badge>
                         ) : (
-                          <span className="text-muted-foreground">-</span>
+                          <span className="text-xs text-muted-foreground">-</span>
                         )}
                       </TableCell>
-                      <TableCell>
+                      <TableCell className="py-2 text-xs text-muted-foreground">
                         {format(new Date(workflow.created_at), 'MMM d, yyyy')}
                       </TableCell>
-                      <TableCell>
-                        <div className="flex items-center justify-end gap-2">
+                      <TableCell className="py-2">
+                        <div className="flex items-center justify-end gap-1">
                           <Button
                             variant="ghost"
                             size="sm"
+                            className="h-7 w-7 p-0"
                             asChild
                             title="Edit workflow"
                           >
                             <Link href={`/workflows/${workflow.id}/edit`}>
-                              <Edit className="h-4 w-4" />
+                              <Edit className="h-3.5 w-3.5" />
                             </Link>
                           </Button>
                           <Button
                             variant="ghost"
                             size="sm"
+                            className="h-7 w-7 p-0"
                             onClick={() => handleExecute(workflow)}
                             title="Execute workflow"
                             disabled={executeMutation.isPending || executeDialogOpen}
                           >
-                            <Play className="h-4 w-4" />
+                            <Play className="h-3.5 w-3.5" />
                           </Button>
                           {workflow.success_rate !== undefined && workflow.success_rate >= 0 && workflow.success_rate < 95 && (
                             <Button
                               variant="ghost"
                               size="sm"
+                              className="h-7 w-7 p-0"
                               onClick={() => handleViewIssueSummary(workflow)}
                               title="View issue summary"
                             >
-                              <AlertTriangle className="h-4 w-4 text-destructive" />
+                              <AlertTriangle className="h-3.5 w-3.5 text-destructive" />
                             </Button>
                           )}
                           <Button
                             variant="ghost"
                             size="sm"
+                            className="h-7 w-7 p-0 text-destructive hover:text-destructive"
                             onClick={() => handleDelete(workflow)}
                             title="Delete workflow"
-                            className="text-destructive hover:text-destructive"
                           >
-                            <Trash2 className="h-4 w-4" />
+                            <Trash2 className="h-3.5 w-3.5" />
                           </Button>
                         </div>
                       </TableCell>
@@ -337,8 +341,8 @@ export default function WorkflowsPage() {
               </Table>
 
               {totalPages > 1 && (
-                <div className="flex items-center justify-between mt-4">
-                  <div className="text-sm text-muted-foreground">
+                <div className="flex items-center justify-between mt-3 pt-3 border-t">
+                  <div className="text-xs text-muted-foreground">
                     Showing {workflows.length > 0 ? (page - 1) * pageSize + 1 : 0} to{' '}
                     {Math.min(page * pageSize, total)} of {total} workflows
                   </div>
@@ -346,17 +350,19 @@ export default function WorkflowsPage() {
                     <Button
                       variant="outline"
                       size="sm"
+                      className="h-8"
                       onClick={() => setPage((p) => Math.max(1, p - 1))}
                       disabled={page === 1 || isLoading}
                     >
                       Previous
                     </Button>
-                    <div className="text-sm text-muted-foreground flex items-center px-2">
+                    <div className="text-xs text-muted-foreground flex items-center px-2">
                       Page {page} of {totalPages}
                     </div>
                     <Button
                       variant="outline"
                       size="sm"
+                      className="h-8"
                       onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
                       disabled={page === totalPages || isLoading}
                     >
@@ -466,6 +472,6 @@ export default function WorkflowsPage() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
-    </div>
+    </>
   );
 }

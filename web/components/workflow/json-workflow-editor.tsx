@@ -262,27 +262,29 @@ export function JsonWorkflowEditor({
   };
 
   return (
-    <div className="flex flex-col gap-4 h-[calc(100vh-8rem)]">
-      {/* Header: ID/Name on left, buttons on right */}
-      <div className="flex items-end gap-4">
-        <div className="flex-1 grid grid-cols-1 md:grid-cols-2 gap-4">
-          <div className="space-y-2">
-            <Label htmlFor="workflow-id">Workflow ID</Label>
+    <div className="flex flex-col gap-2 h-[calc(100vh-8rem)]">
+      {/* Header: ID/Name on left, buttons on right - compact layout */}
+      <div className="flex items-center gap-3 py-1">
+        <div className="flex-1 grid grid-cols-1 md:grid-cols-2 gap-3">
+          <div className="space-y-1">
+            <Label htmlFor="workflow-id" className="text-xs text-muted-foreground">Workflow ID</Label>
             <Input
               id="workflow-id"
               value={workflowId}
               onChange={(e) => setWorkflowId(e.target.value)}
               placeholder={isNew ? "Auto-generated from name" : "Workflow ID"}
               disabled={!isNew && !!initialId}
+              className="h-8 text-sm"
             />
           </div>
-          <div className="space-y-2">
-            <Label htmlFor="workflow-name">Workflow Name</Label>
+          <div className="space-y-1">
+            <Label htmlFor="workflow-name" className="text-xs text-muted-foreground">Workflow Name</Label>
             <Input
               id="workflow-name"
               value={name}
               onChange={(e) => setName(e.target.value)}
               placeholder="My workflow"
+              className="h-8 text-sm"
             />
           </div>
         </div>
@@ -291,14 +293,18 @@ export function JsonWorkflowEditor({
             type="button"
             variant="outline"
             onClick={() => setNodeTemplateDialogOpen(true)}
+            size="sm"
+            className="h-8"
           >
-            <Plus className="mr-2 h-4 w-4" />
+            <Plus className="mr-1.5 h-3.5 w-3.5" />
             Insert Node Template
           </Button>
           <Button
             type="button"
             onClick={handleSaveClick}
             disabled={isSaving}
+            size="sm"
+            className="h-8"
           >
             {isSaving ? "Saving..." : "Save Workflow"}
           </Button>
@@ -306,7 +312,7 @@ export function JsonWorkflowEditor({
       </div>
 
       <div className="flex-1 min-h-0 flex flex-col">
-        <Label htmlFor="workflow-yaml" className="mb-1 block">
+        <Label htmlFor="workflow-yaml" className="mb-0.5 block text-xs text-muted-foreground">
           Workflow YAML
         </Label>
         <div className="flex-1 border rounded-md overflow-hidden">

@@ -59,31 +59,32 @@ export default function ConfigurationsPage() {
 
   if (isError) {
     return (
-      <div className="space-y-6">
-        <div className="flex items-center justify-between">
-          <div>
-            <h1 className="text-3xl font-bold tracking-tight">Configurations</h1>
-            <p className="text-muted-foreground">
-              Manage reusable configuration templates
-            </p>
-          </div>
-        </div>
-        <Card>
-          <CardContent className="pt-6">
-            <div className="text-center py-12">
-              <p className="text-destructive mb-2">Failed to load configurations</p>
-              <p className="text-sm text-muted-foreground mb-4">
-                {error instanceof Error ? error.message : 'Unknown error occurred'}
-              </p>
-              <Button
-                onClick={() => queryClient.invalidateQueries({ queryKey: ['configurations'] })}
-              >
-                Retry
-              </Button>
+      <Card>
+        <CardHeader>
+          <div className="flex items-center justify-between">
+            <div>
+              <CardTitle>Configurations</CardTitle>
+              <CardDescription>
+                Manage reusable configuration templates
+              </CardDescription>
             </div>
-          </CardContent>
-        </Card>
-      </div>
+          </div>
+        </CardHeader>
+        <CardContent className="pt-6">
+          <div className="text-center py-12">
+            <p className="text-destructive mb-2">Failed to load configurations</p>
+            <p className="text-sm text-muted-foreground mb-4">
+              {error instanceof Error ? error.message : 'Unknown error occurred'}
+            </p>
+            <Button
+              onClick={() => queryClient.invalidateQueries({ queryKey: ['configurations'] })}
+              size="sm"
+            >
+              Retry
+            </Button>
+          </div>
+        </CardContent>
+      </Card>
     );
   }
 
@@ -104,36 +105,31 @@ export default function ConfigurationsPage() {
   ) || [];
 
   return (
-    <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-3xl font-bold tracking-tight">Configurations</h1>
-          <p className="text-muted-foreground">
-            Manage reusable configuration templates for S3, HTTP, databases, and more
-          </p>
-        </div>
-        <Link href="/configurations/new">
-          <Button>
-            <Plus className="mr-2 h-4 w-4" />
-            Create Configuration
-          </Button>
-        </Link>
-      </div>
-
+    <>
       <Card>
-        <CardHeader>
-          <CardTitle>All Configurations</CardTitle>
-          <CardDescription>
-            {uniqueConfigs.length} configuration{uniqueConfigs.length !== 1 ? 's' : ''} total
-          </CardDescription>
+        <CardHeader className="pb-3">
+          <div className="flex items-center justify-between gap-4">
+            <div className="flex-1">
+              <CardTitle className="text-xl">Configurations</CardTitle>
+              <CardDescription className="text-xs mt-0.5">
+                {uniqueConfigs.length} configuration{uniqueConfigs.length !== 1 ? 's' : ''} total • Manage reusable configuration templates for S3, HTTP, databases, and more
+              </CardDescription>
+            </div>
+            <Link href="/configurations/new">
+              <Button size="sm" className="h-8">
+                <Plus className="mr-1.5 h-3.5 w-3.5" />
+                Create Configuration
+              </Button>
+            </Link>
+          </div>
         </CardHeader>
-        <CardContent>
+        <CardContent className="pt-0">
           {uniqueConfigs.length === 0 ? (
             <div className="text-center py-12">
-              <p className="text-muted-foreground mb-4">No configurations found</p>
+              <p className="text-muted-foreground mb-4 text-sm">No configurations found</p>
               <Link href="/configurations/new">
-                <Button>
-                  <Plus className="mr-2 h-4 w-4" />
+                <Button size="sm" className="h-8">
+                  <Plus className="mr-1.5 h-3.5 w-3.5" />
                   Create Your First Configuration
                 </Button>
               </Link>
@@ -143,48 +139,49 @@ export default function ConfigurationsPage() {
               <Table>
                 <TableHeader>
                   <TableRow>
-                    <TableHead>Name</TableHead>
-                    <TableHead>Type</TableHead>
-                    <TableHead>Description</TableHead>
-                    <TableHead>Created</TableHead>
-                    <TableHead className="text-right">Actions</TableHead>
+                    <TableHead className="h-9 text-xs font-medium">Name</TableHead>
+                    <TableHead className="h-9 text-xs font-medium">Type</TableHead>
+                    <TableHead className="h-9 text-xs font-medium">Description</TableHead>
+                    <TableHead className="h-9 text-xs font-medium">Created</TableHead>
+                    <TableHead className="h-9 text-xs font-medium text-right">Actions</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
                   {uniqueConfigs.map((config, index) => (
-                    <TableRow key={`${config.id}-${index}`}>
-                      <TableCell className="font-medium">
+                    <TableRow key={`${config.id}-${index}`} className="h-11">
+                      <TableCell className="py-2 text-sm font-medium">
                         {config.name}
                       </TableCell>
-                      <TableCell>
-                        <Badge variant="outline">{config.type}</Badge>
+                      <TableCell className="py-2">
+                        <Badge variant="outline" className="text-xs">{config.type}</Badge>
                       </TableCell>
-                      <TableCell className="text-muted-foreground">
+                      <TableCell className="py-2 text-xs text-muted-foreground">
                         {config.description || '-'}
                       </TableCell>
-                      <TableCell>
+                      <TableCell className="py-2 text-xs text-muted-foreground">
                         {format(new Date(config.created_at), 'MMM d, yyyy')}
                       </TableCell>
-                      <TableCell>
-                        <div className="flex items-center justify-end gap-2">
+                      <TableCell className="py-2">
+                        <div className="flex items-center justify-end gap-1">
                           <Button
                             variant="ghost"
                             size="sm"
+                            className="h-7 w-7 p-0"
                             asChild
                             title="Edit configuration"
                           >
                             <Link href={`/configurations/${config.id}/edit`}>
-                              <Edit className="h-4 w-4" />
+                              <Edit className="h-3.5 w-3.5" />
                             </Link>
                           </Button>
                           <Button
                             variant="ghost"
                             size="sm"
+                            className="h-7 w-7 p-0 text-destructive hover:text-destructive"
                             onClick={() => handleDelete(config)}
                             title="Delete configuration"
-                            className="text-destructive hover:text-destructive"
                           >
-                            <Trash2 className="h-4 w-4" />
+                            <Trash2 className="h-3.5 w-3.5" />
                           </Button>
                         </div>
                       </TableCell>
@@ -223,6 +220,6 @@ export default function ConfigurationsPage() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
-    </div>
+    </>
   );
 }
