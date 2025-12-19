@@ -123,3 +123,85 @@
     @apply bg-background text-foreground;
   }
 }
+
+@layer utilities {
+  /* Design System Utilities - Use these classes instead of hardcoded values */
+  
+  /* Page Layout */
+  .page-gap {
+    @apply gap-2;
+  }
+  
+  .page-header-padding {
+    @apply pb-3;
+  }
+  
+  .page-content-padding {
+    @apply pt-0;
+  }
+  
+  /* Typography */
+  .page-title {
+    @apply text-xl;
+  }
+  
+  .page-description {
+    @apply text-xs mt-0.5;
+  }
+  
+  .table-header {
+    @apply h-9 text-xs font-medium;
+  }
+  
+  .table-row {
+    @apply h-11;
+  }
+  
+  .table-cell {
+    @apply py-2 text-sm;
+  }
+  
+  .table-cell-small {
+    @apply py-2 text-xs;
+  }
+  
+  /* Buttons */
+  .btn-small {
+    @apply h-8;
+  }
+  
+  .btn-icon {
+    @apply h-7 w-7 p-0;
+  }
+  
+  .btn-icon-size {
+    @apply h-3.5 w-3.5;
+  }
+  
+  /* Inputs */
+  .input-small {
+    @apply h-8 text-sm;
+  }
+  
+  .input-search-icon {
+    @apply h-3.5 w-3.5;
+  }
+  
+  .input-search-padding {
+    @apply pl-7;
+  }
+  
+  /* Badges */
+  .badge-small {
+    @apply text-xs;
+  }
+  
+  /* Pagination */
+  .pagination-text {
+    @apply text-xs;
+  }
+  
+  .pagination-button {
+    @apply h-8;
+  }
+}

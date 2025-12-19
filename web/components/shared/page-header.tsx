@@ -9,11 +9,11 @@ interface PageHeaderProps {
 
 export function PageHeader({ title, description, action }: PageHeaderProps) {
   return (
-    <CardHeader className="pb-3">
+    <CardHeader className="page-header-padding">
       <div className="flex items-center justify-between gap-4">
         <div className="flex-1">
-          <CardTitle className="text-xl">{title}</CardTitle>
-          <CardDescription className="text-xs mt-0.5">{description}</CardDescription>
+          <CardTitle className="page-title">{title}</CardTitle>
+          <CardDescription className="page-description">{description}</CardDescription>
         </div>
         {action && <div className="flex items-center gap-2">{action}</div>}
       </div>

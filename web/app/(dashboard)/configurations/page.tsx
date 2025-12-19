@@ -18,7 +18,6 @@ import {
   DeleteDialog,
   ActionButtons,
 } from '@/components/shared';
-import { designTokens } from '@/lib/design-tokens';
 
 export default function ConfigurationsPage() {
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
@@ -89,7 +88,7 @@ export default function ConfigurationsPage() {
       key: 'type',
       header: 'Type',
       render: (config: Configuration) => (
-        <Badge variant="outline" className={designTokens.badges.small}>
+        <Badge variant="outline" className="badge-small">
           {config.type}
         </Badge>
       ),
@@ -100,7 +99,7 @@ export default function ConfigurationsPage() {
       render: (config: Configuration) => (
         <span className="text-muted-foreground">{config.description || '-'}</span>
       ),
-      className: designTokens.typography.tableCellSmall,
+      className: 'table-cell-small',
     },
     {
       key: 'created_at',
@@ -110,7 +109,7 @@ export default function ConfigurationsPage() {
           {format(new Date(config.created_at), 'MMM d, yyyy')}
         </span>
       ),
-      className: designTokens.typography.tableCellSmall,
+      className: 'table-cell-small',
     },
     {
       key: 'actions',
@@ -144,14 +143,14 @@ export default function ConfigurationsPage() {
           description={`${uniqueConfigs.length} configuration${uniqueConfigs.length !== 1 ? 's' : ''} total • Manage reusable configuration templates for S3, HTTP, databases, and more`}
           action={
             <Link href="/configurations/new">
-              <Button size="sm" className={designTokens.buttons.small}>
+              <Button size="sm" className="btn-small">
                 <Plus className="mr-1.5 h-3.5 w-3.5" />
                 Create Configuration
               </Button>
             </Link>
           }
         />
-        <CardContent className={designTokens.spacing.contentPadding}>
+        <CardContent className="page-content-padding">
           <DataTable
             data={uniqueConfigs}
             columns={columns}
@@ -159,7 +158,7 @@ export default function ConfigurationsPage() {
             emptyMessage="No configurations found"
             emptyAction={
               <Link href="/configurations/new">
-                <Button size="sm" className={designTokens.buttons.small}>
+                <Button size="sm" className="btn-small">
                   <Plus className="mr-1.5 h-3.5 w-3.5" />
                   Create Your First Configuration
                 </Button>

@@ -7,6 +7,7 @@ import {
   TableRow,
 } from '@/components/ui/table';
 import { ReactNode } from 'react';
+import { cn } from '@/lib/utils';
 
 interface Column<T> {
   key: keyof T | string;
@@ -46,7 +47,7 @@ export function DataTable<T>({
           {columns.map((column) => (
             <TableHead
               key={String(column.key)}
-              className={`h-9 text-xs font-medium ${column.className || ''}`}
+              className={cn('table-header', column.className)}
             >
               {column.header}
             </TableHead>
@@ -55,11 +56,11 @@ export function DataTable<T>({
       </TableHeader>
       <TableBody>
         {data.map((item, index) => (
-          <TableRow key={keyExtractor(item, index)} className="h-11">
+          <TableRow key={keyExtractor(item, index)} className="table-row">
             {columns.map((column) => (
               <TableCell
                 key={String(column.key)}
-                className="py-2 text-sm"
+                className={cn('table-cell', column.className)}
               >
                 {column.render
                   ? column.render(item)

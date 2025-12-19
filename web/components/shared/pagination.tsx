@@ -26,26 +26,26 @@ export function Pagination({
 
   return (
     <div className="flex items-center justify-between mt-3 pt-3 border-t">
-      <div className="text-xs text-muted-foreground">
+      <div className="pagination-text text-muted-foreground">
         Showing {start} to {end} of {total} items
       </div>
       <div className="flex gap-2">
         <Button
           variant="outline"
           size="sm"
-          className="h-8"
+          className="pagination-button"
           onClick={() => onPageChange(Math.max(1, currentPage - 1))}
           disabled={currentPage === 1 || isLoading}
         >
           Previous
         </Button>
-        <div className="text-xs text-muted-foreground flex items-center px-2">
+        <div className="pagination-text text-muted-foreground flex items-center px-2">
           Page {currentPage} of {totalPages}
         </div>
         <Button
           variant="outline"
           size="sm"
-          className="h-8"
+          className="pagination-button"
           onClick={() => onPageChange(Math.min(totalPages, currentPage + 1))}
           disabled={currentPage === totalPages || isLoading}
         >

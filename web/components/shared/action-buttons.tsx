@@ -1,7 +1,6 @@
 import { Button } from '@/components/ui/button';
 import { LucideIcon } from 'lucide-react';
 import Link from 'next/link';
-import { designTokens } from '@/lib/design-tokens';
 import { cn } from '@/lib/utils';
 
 interface ActionButton {
@@ -27,7 +26,7 @@ export function ActionButtons({ actions }: ActionButtonsProps) {
           variant: 'ghost' as const,
           size: 'sm' as const,
           className: cn(
-            designTokens.buttons.icon,
+            'btn-icon',
             isDestructive && 'text-destructive hover:text-destructive hover:bg-destructive/10'
           ),
           title: action.label,
@@ -39,7 +38,7 @@ export function ActionButtons({ actions }: ActionButtonsProps) {
           return (
             <Button key={index} {...buttonProps} asChild>
               <Link href={action.href}>
-                <Icon className={cn(designTokens.buttons.iconSize, 'shrink-0')} />
+                <Icon className="btn-icon-size shrink-0" />
               </Link>
             </Button>
           );
@@ -47,7 +46,7 @@ export function ActionButtons({ actions }: ActionButtonsProps) {
 
         return (
           <Button key={index} {...buttonProps}>
-            <Icon className={cn(designTokens.buttons.iconSize, 'shrink-0')} />
+            <Icon className="btn-icon-size shrink-0" />
           </Button>
         );
       })}

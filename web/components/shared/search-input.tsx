@@ -1,6 +1,5 @@
 import { Input } from '@/components/ui/input';
 import { Search } from 'lucide-react';
-import { designTokens } from '@/lib/design-tokens';
 
 interface SearchInputProps {
   placeholder?: string;
@@ -18,13 +17,13 @@ export function SearchInput({
   return (
     <div className={`relative ${className || 'w-56'}`}>
       <Search
-        className={`absolute left-2 top-1/2 transform -translate-y-1/2 ${designTokens.inputs.searchIcon} text-muted-foreground`}
+        className="absolute left-2 top-1/2 transform -translate-y-1/2 input-search-icon text-muted-foreground"
       />
       <Input
         placeholder={placeholder}
         value={value}
         onChange={(e) => onChange(e.target.value)}
-        className={`${designTokens.inputs.searchPadding} ${designTokens.inputs.small}`}
+        className="input-search-padding input-small"
       />
     </div>
   );
