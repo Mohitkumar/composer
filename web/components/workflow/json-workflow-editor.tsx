@@ -33,6 +33,7 @@ interface JsonWorkflowEditorProps {
   workflow?: {
     version: number;
     deployed: boolean;
+    deployedVersion?: number;
   };
   onDeploy?: () => void;
   onRollback?: () => void;
@@ -349,6 +350,18 @@ export function JsonWorkflowEditor({
             <Badge variant="secondary" className="text-xs font-mono h-7 px-2">
               ID: {workflowId}
             </Badge>
+          )}
+          {workflow && (
+            <>
+              <Badge variant="outline" className="text-xs h-7 px-2">
+                Version: v{workflow.version}
+              </Badge>
+              {workflow.deployedVersion !== undefined && workflow.deployedVersion !== workflow.version && (
+                <Badge variant="secondary" className="text-xs h-7 px-2">
+                  Deployed: v{workflow.deployedVersion}
+                </Badge>
+              )}
+            </>
           )}
         </div>
         <Button

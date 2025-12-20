@@ -1,6 +1,6 @@
 'use client';
 
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { useQuery, useQueries, useMutation, useQueryClient } from '@tanstack/react-query';
 import { workflowApi, type WorkflowDefinition, type WorkflowIssueSummary } from '@/lib/api-client';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -26,7 +26,7 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog';
 import { ScrollArea } from '@/components/ui/scroll-area';
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { ExecuteWorkflowDialog } from '@/components/workflow/execute-workflow-dialog';
 import { ExecutionDetailDialog } from '@/components/execution/execution-detail-dialog';
 import { toast } from 'sonner';
@@ -119,6 +119,61 @@ export default function WorkflowsPage() {
     },
   });
 
+  // Fetch latest versions for all workflows to show in table
+  const latestVersionsQueries = useQueries({
+    queries: workflows.map(workflow => ({
+      queryKey: ['workflow', workflow.id, 'latest'],
+      queryFn: () => workflowApi.get(workflow.id, undefined, true),
+      staleTime: 30000, // Cache for 30 seconds
+    })),
+  });
+
+  // Fetch deployed versions for all workflows
+  const deployedVersionsQueries = useQueries({
+    queries: workflows.map(workflow => ({
+      queryKey: ['workflow', workflow.id, 'deployed'],
+      queryFn: () => workflowApi.get(workflow.id), // Get deployed version (default)
+      staleTime: 30000, // Cache for 30 seconds
+    })),
+  });
+
+  // Create maps of workflow ID to version info
+  const latestVersionsMap = useMemo(() => {
+    const map = new Map<string, { version: number; deployed: boolean }>();
+    workflows.forEach((workflow, index) => {
+      const queryResult = latestVersionsQueries[index];
+      if (queryResult?.data) {
+        map.set(workflow.id, {
+          version: queryResult.data.version,
+          deployed: queryResult.data.deployed,
+        });
+      }
+    });
+    return map;
+  }, [workflows, latestVersionsQueries]);
+
+  const deployedVersionsMap = useMemo(() => {
+    const map = new Map<string, { version: number; deployed: boolean }>();
+    workflows.forEach((workflow, index) => {
+      const queryResult = deployedVersionsQueries[index];
+      if (queryResult?.data && queryResult.data.deployed) {
+        map.set(workflow.id, {
+          version: queryResult.data.version,
+          deployed: queryResult.data.deployed,
+        });
+      }
+    });
+    return map;
+  }, [workflows, deployedVersionsQueries]);
+
+  // Helper to check if latest version is already deployed
+  const isLatestVersionDeployed = (workflow: WorkflowDefinition): boolean => {
+    const latest = latestVersionsMap.get(workflow.id);
+    const deployed = deployedVersionsMap.get(workflow.id);
+    if (!latest || !deployed) return false;
+    return latest.deployed && latest.version === deployed.version;
+  };
+
   const deployMutation = useMutation({
     mutationFn: async (workflow: WorkflowDefinition) => {
       // Get the latest version to deploy (not the deployed version shown in list)
@@ -128,7 +183,11 @@ export default function WorkflowsPage() {
       }
       await workflowApi.deploy(workflow.id, latestWorkflow.version);
     },
-    onSuccess: () => {
+    onSuccess: (_, workflow) => {
+      // Invalidate all queries related to this workflow and the workflows list
+      queryClient.invalidateQueries({ queryKey: ['workflow', workflow.id] });
+      queryClient.invalidateQueries({ queryKey: ['workflow', workflow.id, 'latest'] });
+      queryClient.invalidateQueries({ queryKey: ['workflow', workflow.id, 'deployed'] });
       queryClient.invalidateQueries({ queryKey: ['workflows'] });
       toast.success('Workflow deployed successfully');
     },
@@ -270,7 +329,8 @@ export default function WorkflowsPage() {
                   <TableRow>
                     <TableHead className="h-9 text-xs font-medium">Name</TableHead>
                     <TableHead className="h-9 text-xs font-medium">ID</TableHead>
-                    <TableHead className="h-9 text-xs font-medium">Version</TableHead>
+                    <TableHead className="h-9 text-xs font-medium">Deployed Version</TableHead>
+                    <TableHead className="h-9 text-xs font-medium">Latest Version</TableHead>
                     <TableHead className="h-9 text-xs font-medium">Status</TableHead>
                     <TableHead className="h-9 text-xs font-medium">Success Rate</TableHead>
                     <TableHead className="h-9 text-xs font-medium">Created</TableHead>
@@ -286,7 +346,18 @@ export default function WorkflowsPage() {
                       <TableCell className="py-2 font-mono text-xs">
                         {workflow.id}
                       </TableCell>
-                      <TableCell className="py-2 text-sm">v{workflow.version}</TableCell>
+                      <TableCell className="py-2 text-sm">
+                        {(() => {
+                          const deployed = deployedVersionsMap.get(workflow.id);
+                          return deployed ? `v${deployed.version}` : <span className="text-muted-foreground">-</span>;
+                        })()}
+                      </TableCell>
+                      <TableCell className="py-2 text-sm">
+                        {(() => {
+                          const latest = latestVersionsMap.get(workflow.id);
+                          return latest ? `v${latest.version}` : <span className="text-muted-foreground">-</span>;
+                        })()}
+                      </TableCell>
                       <TableCell className="py-2">
                         <Badge variant={workflow.enabled ? 'default' : 'secondary'} className="text-xs">
                           {workflow.enabled ? 'Enabled' : 'Disabled'}
@@ -342,7 +413,7 @@ export default function WorkflowsPage() {
                             className="h-7 w-7 p-0"
                             onClick={() => deployMutation.mutate(workflow)}
                             title="Deploy latest version"
-                            disabled={deployMutation.isPending}
+                            disabled={deployMutation.isPending || isLatestVersionDeployed(workflow)}
                           >
                             <Rocket className="h-3.5 w-3.5" />
                           </Button>

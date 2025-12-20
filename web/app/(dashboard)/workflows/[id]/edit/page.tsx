@@ -32,6 +32,13 @@ export default function EditWorkflowPage() {
     queryFn: () => workflowApi.get(workflowId, undefined, true), // latest=true to get latest version
   });
 
+  // Fetch deployed version to show what's currently deployed
+  const { data: deployedWorkflow } = useQuery({
+    queryKey: ['workflow', workflowId, 'deployed'],
+    queryFn: () => workflowApi.get(workflowId), // Get deployed version (default)
+    enabled: !!workflowId,
+  });
+
   const updateMutation = useMutation({
     mutationFn: async (data: {
       spec: string; // YAML string
@@ -78,8 +85,14 @@ export default function EditWorkflowPage() {
   const deployMutation = useMutation({
     mutationFn: () => workflowApi.deploy(workflowId, workflow?.version || 1),
     onSuccess: () => {
+      // Invalidate all workflow-related queries to refresh the data
       queryClient.invalidateQueries({ queryKey: ['workflow', workflowId] });
+      queryClient.invalidateQueries({ queryKey: ['workflow', workflowId, 'latest'] });
+      queryClient.invalidateQueries({ queryKey: ['workflow', workflowId, 'deployed'] });
+      // Invalidate workflows list to refresh the row
       queryClient.invalidateQueries({ queryKey: ['workflows'] });
+      // Also invalidate any latest version queries that might be cached
+      queryClient.invalidateQueries({ queryKey: ['workflow'], exact: false });
       toast.success('Workflow deployed successfully');
     },
     onError: (error) => {
@@ -146,6 +159,7 @@ export default function EditWorkflowPage() {
           workflow={{
             version: workflow.version,
             deployed: workflow.deployed,
+            deployedVersion: deployedWorkflow?.deployed ? deployedWorkflow.version : undefined,
           }}
           onDeploy={() => deployMutation.mutate()}
           onRollback={() => setRollbackDialogOpen(true)}
