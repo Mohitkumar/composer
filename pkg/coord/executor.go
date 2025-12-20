@@ -189,12 +189,13 @@ func (c *Coordinator) HandleNodeCompleted(ctx context.Context, taskID string, ru
 		})
 		if err != nil {
 			logger.Error().Err(err).Msg("failed to finalize workflow completion check")
-			// Don't return error here - the node is already marked as completed
 		}
 	} else {
 		// Start next nodes in a separate transaction
 		err = c.startNextNodes(ctx, span, logger, runID, workflowID, nextNodes, runContext)
 		if err != nil {
+			// Only fail workflow if there's a database/system error
+			// CEL resolution errors are now handled by creating FAILED task instances
 			failedNodeID := "unknown"
 			if len(nextNodes) > 0 {
 				failedNodeID = nextNodes[0].NodeID
@@ -204,15 +205,45 @@ func (c *Coordinator) HandleNodeCompleted(ctx context.Context, taskID string, ru
 				Str("failed_node_id", failedNodeID).
 				Int("next_nodes_count", len(nextNodes)).
 				Str("error_type", "TASK_INSTANCE_CREATION_ERROR").
-				Msg("failed to start next nodes: could not create task instance (likely CEL resolution error or database issue)")
+				Msg("failed to start next nodes: database or system error (not CEL resolution)")
 
-			// Mark workflow as FAILED since we cannot proceed
+			// Mark workflow as FAILED only for non-CEL errors (database issues, etc.)
 			markErr := c.markWorkflowFailedWithReason(ctx, runID, workflowID, fmt.Sprintf("failed to create task instance for node %s: %v", failedNodeID, err), logger, span)
 			if markErr != nil {
 				logger.Error().Err(markErr).Msg("failed to mark workflow as failed after task instance creation error")
 			}
-			// Don't return error here - the node is already marked as completed
-			// The workflow is now marked as failed, so execution will stop
+		} else {
+			// Check if all next nodes failed CEL resolution - if so, mark workflow as failed
+			// This check happens after successful transaction, so we can query the database
+			if len(nextNodes) > 0 {
+				nodeIDs := make([]string, len(nextNodes))
+				for i, node := range nextNodes {
+					nodeIDs[i] = node.NodeID
+				}
+
+				var failedCount int
+				var totalCount int
+				// Use pgx.Array to properly pass array to PostgreSQL
+				err = c.DB.QueryRow(ctx,
+					`SELECT 
+						COUNT(*) FILTER (WHERE state = 'FAILED') as failed_count,
+						COUNT(*) as total_count
+					FROM task_instances 
+					WHERE run_id = $1 AND node_id = ANY($2)`,
+					runID, nodeIDs).Scan(&failedCount, &totalCount)
+
+				if err == nil && failedCount > 0 && failedCount == totalCount {
+					// All next nodes failed CEL resolution - mark workflow as failed
+					logger.Warn().
+						Int("failed_nodes", failedCount).
+						Msg("all next nodes failed CEL resolution, marking workflow as failed")
+					markErr := c.markWorkflowFailedWithReason(ctx, runID, workflowID,
+						fmt.Sprintf("all next nodes (%d) failed CEL resolution", failedCount), logger, span)
+					if markErr != nil {
+						logger.Error().Err(markErr).Msg("failed to mark workflow as failed after all nodes failed CEL resolution")
+					}
+				}
+			}
 		}
 	}
 
@@ -321,6 +352,36 @@ func (c *Coordinator) insertTaskInstance(ctx context.Context, tx pgx.Tx, taskID,
 		logger.Error().Err(err).Msg("failed to create task instance")
 		util.RecordError(span, err)
 		return fmt.Errorf("failed to create task instance: %w", err)
+	}
+
+	return nil
+}
+
+// insertTaskInstanceWithState inserts a task instance with a specific state and optional error
+func (c *Coordinator) insertTaskInstanceWithState(ctx context.Context, tx pgx.Tx, taskID, runID string, node *model.Node, taskInput json.RawMessage, scheduledAt time.Time, state string, errorMsg string, logger zerolog.Logger, span trace.Span) error {
+	var errorJSON json.RawMessage
+	if errorMsg != "" {
+		errorMap := map[string]string{"error": errorMsg}
+		var err error
+		errorJSON, err = json.Marshal(errorMap)
+		if err != nil {
+			logger.Error().Err(err).Msg("failed to marshal error message")
+			errorJSON = json.RawMessage(fmt.Sprintf(`{"error": %q}`, errorMsg))
+		}
+	}
+
+	finishedAt := sql.NullTime{}
+	if state == "FAILED" || state == "COMPLETED" {
+		finishedAt = sql.NullTime{Time: time.Now(), Valid: true}
+	}
+
+	_, err := tx.Exec(ctx, `INSERT INTO task_instances (id, run_id, node_id, node_type, state, attempt, input_json, last_error, scheduled_at, finished_at, created_at, updated_at)
+        VALUES ($1,$2,$3,$4,$5,0,$6::jsonb,$7::jsonb,$8,$9,NOW(),NOW()) ON CONFLICT (id) DO NOTHING`,
+		taskID, runID, node.NodeID, node.Runtime, state, taskInput, errorJSON, scheduledAt, finishedAt)
+	if err != nil {
+		logger.Error().Err(err).Msg("failed to create task instance with state")
+		util.RecordError(span, err)
+		return fmt.Errorf("failed to create task instance with state: %w", err)
 	}
 
 	return nil
@@ -527,23 +588,24 @@ func (c *Coordinator) finalizeWorkflowIfComplete(ctx context.Context, tx pgx.Tx,
 	return false, pending, nil
 }
 
-func (c *Coordinator) taskInstanceExists(ctx context.Context, tx pgx.Tx, runID, nodeID string) (bool, string, error) {
+func (c *Coordinator) taskInstanceExists(ctx context.Context, tx pgx.Tx, runID, nodeID string) (bool, string, string, error) {
 	var existingTaskID string
+	var existingState string
 	err := tx.QueryRow(ctx,
-		`SELECT id FROM task_instances WHERE run_id=$1 AND node_id=$2`,
-		runID, nodeID).Scan(&existingTaskID)
+		`SELECT id, state FROM task_instances WHERE run_id=$1 AND node_id=$2`,
+		runID, nodeID).Scan(&existingTaskID, &existingState)
 
 	if err != nil {
 		if err == pgx.ErrNoRows {
-			return false, "", nil
+			return false, "", "", nil
 		}
-		return false, "", fmt.Errorf("failed to check existing task instance: %w", err)
+		return false, "", "", fmt.Errorf("failed to check existing task instance: %w", err)
 	}
 
 	if existingTaskID != "" {
-		return true, existingTaskID, nil
+		return true, existingTaskID, existingState, nil
 	}
-	return false, "", nil
+	return false, "", "", nil
 }
 
 // startNextNodes starts the next nodes in a separate transaction
@@ -551,22 +613,33 @@ func (c *Coordinator) taskInstanceExists(ctx context.Context, tx pgx.Tx, runID, 
 func (c *Coordinator) startNextNodes(ctx context.Context, span trace.Span, logger zerolog.Logger, runID, workflowID string, nextNodes []*model.Node, runContext *model.RunContext) error {
 	return c.ExecuteWithTransaction(ctx, span, logger, func(ctx context.Context, tx pgx.Tx) error {
 		// Create task instances and outbox entries for next nodes
+		var celResolutionErrors []string
 		for _, nextNode := range nextNodes {
 			// Check if task instance already exists (idempotency)
-			exists, existingTaskID, err := c.taskInstanceExists(ctx, tx, runID, nextNode.NodeID)
+			// Allow recreating if the existing task is in FAILED state (for retry scenarios)
+			exists, existingTaskID, existingState, err := c.taskInstanceExists(ctx, tx, runID, nextNode.NodeID)
 			if err != nil {
 				return err
 			}
-			if exists {
+			if exists && existingState != "FAILED" {
 				logger.Debug().
 					Str("next_node_id", nextNode.NodeID).
 					Str("existing_task_id", existingTaskID).
-					Msg("next task already exists, skipping")
+					Str("existing_state", existingState).
+					Msg("next task already exists and is not failed, skipping")
 				continue
 			}
 
-			// Create new task instance
+			// If task exists but is FAILED, we'll recreate it with a new ID
+			// This allows retrying failed nodes within the same workflow run
 			nextTaskID := uuid.New().String()
+			if exists && existingState == "FAILED" {
+				logger.Debug().
+					Str("next_node_id", nextNode.NodeID).
+					Str("existing_task_id", existingTaskID).
+					Msg("recreating task instance for failed node")
+			}
+
 			nextTaskLogger := logger.With().
 				Str("next_task_id", nextTaskID).
 				Str("next_node_id", nextNode.NodeID).
@@ -575,12 +648,28 @@ func (c *Coordinator) startNextNodes(ctx context.Context, span trace.Span, logge
 
 			taskInput, err := c.resolveNodeInputFromSpecRaw(nextNode.Spec, runContext, nextTaskLogger)
 			if err != nil {
+				// CEL resolution failed - create task instance as FAILED instead of failing the workflow
+				celError := fmt.Sprintf("failed to resolve CEL expressions: %v", err)
 				nextTaskLogger.Error().
 					Err(err).
 					Str("error_type", "CEL_RESOLUTION_ERROR").
-					Msg("failed to resolve CEL expressions for next node - cannot create task instance")
-				return fmt.Errorf("failed to resolve CEL expressions for node %s: %w", nextNode.NodeID, err)
+					Msg("failed to resolve CEL expressions for next node - creating task instance as FAILED")
+
+				// Create task instance with FAILED state
+				if insertErr := c.insertTaskInstanceWithState(ctx, tx, nextTaskID, runID, nextNode, json.RawMessage("{}"), time.Now(), "FAILED", celError, nextTaskLogger, span); insertErr != nil {
+					nextTaskLogger.Error().
+						Err(insertErr).
+						Str("error_type", "TASK_INSTANCE_CREATION_ERROR").
+						Msg("failed to insert failed task instance into database")
+					return fmt.Errorf("failed to create failed task instance for node %s: %w", nextNode.NodeID, insertErr)
+				}
+
+				celResolutionErrors = append(celResolutionErrors, fmt.Sprintf("node %s: %v", nextNode.NodeID, err))
+				c.recordTaskCreated(ctx, nextTaskLogger, span, nextTaskID, runID, nextNode)
+				// Don't create outbox entry for failed tasks - they can't be executed
+				continue
 			}
+
 			if err := c.insertTaskInstance(ctx, tx, nextTaskID, runID, nextNode, taskInput, time.Now(), nextTaskLogger, span); err != nil {
 				nextTaskLogger.Error().
 					Err(err).
@@ -599,9 +688,19 @@ func (c *Coordinator) startNextNodes(ctx context.Context, span trace.Span, logge
 			}
 		}
 
+		// Log CEL resolution errors but don't fail the transaction
+		// The workflow can continue with other nodes that succeeded
+		if len(celResolutionErrors) > 0 {
+			logger.Warn().
+				Strs("cel_resolution_errors", celResolutionErrors).
+				Int("failed_nodes_count", len(celResolutionErrors)).
+				Msg("some nodes failed CEL resolution and were marked as FAILED")
+		}
+
 		logger.Info().
-			Int("next_tasks_created", len(nextNodes)).
-			Msg("next nodes started successfully")
+			Int("next_tasks_created", len(nextNodes)-len(celResolutionErrors)).
+			Int("failed_tasks_created", len(celResolutionErrors)).
+			Msg("next nodes processing completed")
 
 		return nil
 	})
