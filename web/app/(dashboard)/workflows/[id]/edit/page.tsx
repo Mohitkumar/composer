@@ -159,7 +159,7 @@ export default function EditWorkflowPage() {
           workflow={{
             version: workflow.version,
             deployed: workflow.deployed,
-            deployedVersion: deployedWorkflow?.deployed ? deployedWorkflow.version : undefined,
+            deployedVersion: deployedWorkflow?.version,
           }}
           onDeploy={() => deployMutation.mutate()}
           onRollback={() => setRollbackDialogOpen(true)}

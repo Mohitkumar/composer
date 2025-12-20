@@ -354,9 +354,9 @@ export function JsonWorkflowEditor({
           {workflow && (
             <>
               <Badge variant="outline" className="text-xs h-7 px-2">
-                Version: v{workflow.version}
+                Current: v{workflow.version}
               </Badge>
-              {workflow.deployedVersion !== undefined && workflow.deployedVersion !== workflow.version && (
+              {workflow.deployedVersion !== undefined && (
                 <Badge variant="secondary" className="text-xs h-7 px-2">
                   Deployed: v{workflow.deployedVersion}
                 </Badge>

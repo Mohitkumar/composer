@@ -247,7 +247,7 @@ export default function NewWorkflowPage() {
           workflow={workflow ? {
             version: workflow.version,
             deployed: workflow.deployed,
-            deployedVersion: deployedWorkflow?.deployed ? deployedWorkflow.version : undefined,
+            deployedVersion: deployedWorkflow?.version,
           } : undefined}
           onDeploy={workflowId && workflow ? () => deployMutation.mutate() : undefined}
           onRollback={workflowId && workflow ? () => setRollbackDialogOpen(true) : undefined}
