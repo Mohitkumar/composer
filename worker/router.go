@@ -71,7 +71,31 @@ func (r *Router) executeLanguageTask(ctx context.Context, runtime string, input 
 
 	code, _ := payload["code"].(string)
 	filename, _ := payload["filename"].(string)
-	inputJSON, _ := payload["input"].(string)
+
+	// Extract input - it can be a string (JSON) or an object (after template resolution)
+	var inputJSON string
+	if inputVal, ok := payload["input"]; ok {
+		if inputStr, ok := inputVal.(string); ok {
+			// Already a string (JSON)
+			inputJSON = inputStr
+		} else {
+			// It's an object/map after template resolution, marshal it to JSON
+			inputBytes, err := json.Marshal(inputVal)
+			if err != nil {
+				logger.Error().Err(err).Msg("failed to marshal resolved input to JSON")
+				return nil, fmt.Errorf("failed to marshal input to JSON: %w", err)
+			}
+			inputJSON = string(inputBytes)
+		}
+	} else {
+		// No input field, use empty object
+		inputJSON = "{}"
+	}
+
+	logger.Debug().
+		Str("input_json", inputJSON).
+		Int("input_length", len(inputJSON)).
+		Msg("extracted input for language executor")
 
 	timeout := 30
 	if v, ok := payload["timeout"].(float64); ok {

@@ -14,13 +14,23 @@ function wrapCode(code) {
   return `
     ${code}
     
+    // Log input for debugging
+    console.log('Input received in handler:', JSON.stringify(input, null, 2));
+    console.log('Input type:', typeof input);
+    
     // Ensure handler function exists
     if (typeof handler !== 'function') {
       throw new Error('handler function is not defined or is not a function');
     }
     
+    console.log('Handler function found, calling handler(input)...');
+    
     // Execute handler with input
     const result = handler(input);
+    
+    console.log('Handler returned result:', typeof result);
+    console.log('Result preview:', JSON.stringify(result, null, 2).substring(0, 200));
+    
     result;
   `;
 }
@@ -75,14 +85,24 @@ function executeCode(code, input, timeoutSeconds) {
   // Calculate timeout
   const timeoutMs = calculateTimeout(timeoutSeconds);
   
+  // Log input being passed to sandbox
+  console.log(`[JS Executor] Creating sandbox with input:`, JSON.stringify(input, null, 2));
+  console.log(`[JS Executor] Input will be available as 'input' variable in sandbox`);
+  
   // Create secure sandbox
   const vm = createSandbox(timeoutMs, input);
   
   // Wrap code with handler validation
   const wrappedCode = wrapCode(code);
   
+  console.log(`[JS Executor] Executing wrapped code...`);
+  console.log(`[JS Executor] Wrapped code preview (first 200 chars):`, wrappedCode.substring(0, 200));
+  
   // Execute in sandbox
   const output = vm.run(wrappedCode);
+  
+  console.log(`[JS Executor] Execution completed. Output type:`, typeof output);
+  console.log(`[JS Executor] Output preview:`, JSON.stringify(output, null, 2).substring(0, 500));
   
   return output;
 }

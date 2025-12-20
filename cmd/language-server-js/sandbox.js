@@ -19,11 +19,18 @@ function createSandbox(timeoutMs, input) {
       // Only provide safe built-ins
       console: {
         log: (...args) => {
-          // Logs are captured but not returned to user code
-          // This prevents information leakage
+          // Log to stdout so it can be captured
+          console.log('[JS Code]', ...args);
         },
         error: (...args) => {
-          // Same for errors
+          // Log to stderr so it can be captured
+          console.error('[JS Code]', ...args);
+        },
+        warn: (...args) => {
+          console.warn('[JS Code]', ...args);
+        },
+        info: (...args) => {
+          console.info('[JS Code]', ...args);
         }
       },
       // JSON utilities are safe

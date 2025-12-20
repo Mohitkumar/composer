@@ -75,11 +75,17 @@ function Execute(call, callback) {
     const inputJson = req.input_json || '{}';
     const timeoutSeconds = req.timeout_seconds;
     
+    // Log received input for debugging
+    console.log(`[JS Executor] Received execution request for file: ${filename}`);
+    console.log(`[JS Executor] Input JSON length:`, inputJson.length);
+    console.log(`[JS Executor] Timeout: ${timeoutSeconds || 'default'} seconds`);
+    
     // Parse input
     let input;
     try {
       input = parseInput(inputJson);
     } catch (e) {
+      console.error(`[JS Executor] Failed to parse input:`, e.message);
       callback(null, {
         success: false,
         error: e.message,
