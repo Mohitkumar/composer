@@ -6,7 +6,7 @@ import { workflowApi } from '@/lib/api-client';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
-import { ArrowLeft, Edit, Play, Trash2 } from 'lucide-react';
+import { ArrowLeft, Edit, Play, Trash2, Rocket, RotateCcw } from 'lucide-react';
 import Link from 'next/link';
 import { format } from 'date-fns';
 import {
@@ -26,11 +26,20 @@ export default function WorkflowDetailPage() {
   const router = useRouter();
   const workflowId = params.id as string;
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
+  const [rollbackDialogOpen, setRollbackDialogOpen] = useState(false);
+  const [selectedRollbackVersion, setSelectedRollbackVersion] = useState<number | null>(null);
   const queryClient = useQueryClient();
 
   const { data: workflow, isLoading } = useQuery({
     queryKey: ['workflow', workflowId],
     queryFn: () => workflowApi.get(workflowId),
+  });
+
+  // Get previous deployed versions for rollback
+  const { data: previousDeployedVersions = [] } = useQuery({
+    queryKey: ['previous-deployed-versions', workflowId, workflow?.version],
+    queryFn: () => workflowApi.getPreviousDeployedVersions(workflowId, workflow?.version || 0),
+    enabled: !!workflow && workflow.deployed && workflow.version > 1,
   });
 
   const deleteMutation = useMutation({
@@ -50,11 +59,41 @@ export default function WorkflowDetailPage() {
   const executeMutation = useMutation({
     mutationFn: () =>
       workflowApi.execute(workflowId, {
-        workflow_version: workflow?.version || 1,
+        workflow_version: 0, // 0 means use deployed version
         input: {},
       }),
     onSuccess: (data) => {
       router.push(`/executions/${data.run_id}`);
+    },
+  });
+
+  const deployMutation = useMutation({
+    mutationFn: () => workflowApi.deploy(workflowId, workflow?.version || 1),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['workflow', workflowId] });
+      queryClient.invalidateQueries({ queryKey: ['workflows'] });
+      toast.success('Workflow deployed successfully');
+    },
+    onError: (error) => {
+      toast.error('Failed to deploy workflow', {
+        description: error instanceof Error ? error.message : 'Unknown error occurred',
+      });
+    },
+  });
+
+  const rollbackMutation = useMutation({
+    mutationFn: (version: number) => workflowApi.rollback(workflowId, version),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['workflow', workflowId] });
+      queryClient.invalidateQueries({ queryKey: ['workflows'] });
+      toast.success('Workflow rolled back successfully');
+      setRollbackDialogOpen(false);
+      setSelectedRollbackVersion(null);
+    },
+    onError: (error) => {
+      toast.error('Failed to rollback workflow', {
+        description: error instanceof Error ? error.message : 'Unknown error occurred',
+      });
     },
   });
 
@@ -110,6 +149,24 @@ export default function WorkflowDetailPage() {
             <Play className="mr-2 h-4 w-4" />
             {executeMutation.isPending ? 'Executing...' : 'Execute'}
           </Button>
+          {!workflow.deployed && (
+            <Button
+              onClick={() => deployMutation.mutate()}
+              disabled={deployMutation.isPending}
+              variant="default"
+            >
+              <Rocket className="mr-2 h-4 w-4" />
+              {deployMutation.isPending ? 'Deploying...' : 'Deploy'}
+            </Button>
+          )}
+          <Button
+            onClick={() => setRollbackDialogOpen(true)}
+            variant="outline"
+            disabled={!workflow.deployed || (previousDeployedVersions?.length || 0) === 0}
+          >
+            <RotateCcw className="mr-2 h-4 w-4" />
+            Rollback
+          </Button>
           <Link href={`/workflows/${workflowId}/edit`}>
             <Button variant="outline">
               <Edit className="mr-2 h-4 w-4" />
@@ -143,6 +200,17 @@ export default function WorkflowDetailPage() {
             <div>
               <p className="text-sm text-muted-foreground">Version</p>
               <p>v{workflow.version}</p>
+            </div>
+            <div>
+              <p className="text-sm text-muted-foreground">Deployment Status</p>
+              <Badge variant={workflow.deployed ? 'default' : 'secondary'}>
+                {workflow.deployed ? 'Deployed' : 'Draft'}
+              </Badge>
+              {workflow.deployed && workflow.deployed_at && (
+                <p className="text-xs text-muted-foreground mt-1">
+                  Deployed: {format(new Date(workflow.deployed_at), 'PPpp')}
+                </p>
+              )}
             </div>
             <div>
               <p className="text-sm text-muted-foreground">Status</p>
@@ -215,6 +283,65 @@ export default function WorkflowDetailPage() {
               disabled={deleteMutation.isPending}
             >
               {deleteMutation.isPending ? 'Deleting...' : 'Delete'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={rollbackDialogOpen} onOpenChange={setRollbackDialogOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Rollback Workflow</DialogTitle>
+            <DialogDescription>
+              Select a previous deployed version to rollback to. This will create a new version
+              with the selected version&apos;s specification.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="py-4">
+            <p className="text-sm text-muted-foreground mb-2">
+              Current version: v{workflow.version}
+            </p>
+            <p className="text-sm text-muted-foreground mb-4">
+              Select a previous deployed version to rollback to:
+            </p>
+            <div className="space-y-2 max-h-60 overflow-y-auto">
+              {previousDeployedVersions && previousDeployedVersions.length > 0 ? (
+                previousDeployedVersions.map((v) => (
+                  <Button
+                    key={v}
+                    variant={selectedRollbackVersion === v ? 'default' : 'outline'}
+                    className="w-full justify-start"
+                    onClick={() => setSelectedRollbackVersion(v)}
+                  >
+                    Version {v}
+                  </Button>
+                ))
+              ) : (
+                <p className="text-sm text-muted-foreground text-center py-4">
+                  No previous deployed versions available
+                </p>
+              )}
+            </div>
+          </div>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => {
+                setRollbackDialogOpen(false);
+                setSelectedRollbackVersion(null);
+              }}
+            >
+              Cancel
+            </Button>
+            <Button
+              onClick={() => {
+                if (selectedRollbackVersion !== null) {
+                  rollbackMutation.mutate(selectedRollbackVersion);
+                }
+              }}
+              disabled={rollbackMutation.isPending || selectedRollbackVersion === null}
+            >
+              {rollbackMutation.isPending ? 'Rolling back...' : 'Rollback'}
             </Button>
           </DialogFooter>
         </DialogContent>

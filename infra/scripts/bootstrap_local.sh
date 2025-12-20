@@ -224,18 +224,8 @@ for i in {1..30}; do
 done
 echo ""
 
-# Start Go Worker
-echo -e "${BLUE}Starting Go Worker...${NC}"
-REDIS_ADDR="$REDIS_ADDR" \
-COORDINATOR_ADDR="$COORDINATOR_ADDR" \
-STREAM_NAME=workflow.tasks \
-CONSUMER_GROUP=workflow-workers \
-WORKER_ID="worker-$(hostname)-$$" \
-./bin/worker > "$PROJECT_ROOT/logs/worker.log" 2>&1 &
-WORKER_PID=$!
-echo -e "${GREEN}✓ Go Worker started (PID: $WORKER_PID)${NC}"
-
-# Start JavaScript Worker (if available)
+# Start JavaScript Worker first (if available) - needed for Go Worker to connect
+LANG_WORKER_ADDR=""
 if [ "$SKIP_JS_WORKER" = false ]; then
     echo -e "${BLUE}Starting JavaScript Worker...${NC}"
     # Check if port is already in use
@@ -250,13 +240,31 @@ if [ "$SKIP_JS_WORKER" = false ]; then
     cd "$PROJECT_ROOT/cmd/language-server-js" || exit 1
     (PORT="$WORKER_JS_PORT" npm start > "$PROJECT_ROOT/logs/language-server-js.log" 2>&1) &
     WORKER_JS_PID=$!
-    sleep 1  # Give it a moment to start
+    sleep 2  # Give it a moment to start
     if ! kill -0 "$WORKER_JS_PID" 2>/dev/null; then
         echo -e "${YELLOW}⚠ JavaScript Worker may have failed to start, check logs${NC}"
     else
         echo -e "${GREEN}✓ JavaScript Worker started (PID: $WORKER_JS_PID)${NC}"
+        LANG_WORKER_ADDR="localhost:$WORKER_JS_PORT"
     fi
     cd "$PROJECT_ROOT" || exit 1
+fi
+
+# Start Go Worker
+echo -e "${BLUE}Starting Go Worker...${NC}"
+REDIS_ADDR="$REDIS_ADDR" \
+COORDINATOR_ADDR="$COORDINATOR_ADDR" \
+LANG_WORKER_ADDR="$LANG_WORKER_ADDR" \
+STREAM_NAME=workflow.tasks \
+CONSUMER_GROUP=workflow-workers \
+WORKER_ID="worker-$(hostname)-$$" \
+./bin/worker > "$PROJECT_ROOT/logs/worker.log" 2>&1 &
+WORKER_PID=$!
+echo -e "${GREEN}✓ Go Worker started (PID: $WORKER_PID)${NC}"
+if [ -n "$LANG_WORKER_ADDR" ]; then
+    echo -e "${GREEN}  Language worker address: $LANG_WORKER_ADDR${NC}"
+else
+    echo -e "${YELLOW}  Warning: No language worker configured. JavaScript/Python nodes will fail.${NC}"
 fi
 
 # Start Python Worker (if available)

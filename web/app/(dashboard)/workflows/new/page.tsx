@@ -2,25 +2,32 @@
 
 import { useState, useEffect } from 'react';
 import { JsonWorkflowEditor } from '@/components/workflow/json-workflow-editor';
-import { workflowApi, templateApi } from '@/lib/api-client';
+import { workflowApi, templateApi, type WorkflowDefinitionSpec } from '@/lib/api-client';
 import { useMutation, useQueryClient, useQuery } from '@tanstack/react-query';
 import * as yaml from 'yaml';
 import {
   Dialog,
   DialogContent,
   DialogDescription,
+  DialogFooter,
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
+import { Rocket, RotateCcw } from 'lucide-react';
+import { toast } from 'sonner';
+import { useRouter } from 'next/navigation';
 
 export default function NewWorkflowPage() {
   const queryClient = useQueryClient();
+  const router = useRouter();
   const [isFirstSave, setIsFirstSave] = useState(true);
   const [workflowId, setWorkflowId] = useState<string | null>(null);
   const [templateDialogOpen, setTemplateDialogOpen] = useState(true);
   const [selectedTemplate, setSelectedTemplate] = useState<string | null>(null);
   const [initialSpec, setInitialSpec] = useState<WorkflowDefinitionSpec | undefined>(undefined);
+  const [rollbackDialogOpen, setRollbackDialogOpen] = useState(false);
+  const [selectedRollbackVersion, setSelectedRollbackVersion] = useState<number | null>(null);
 
   // Fetch workflow templates
   const { data: workflowTemplates = [], isLoading: loadingTemplates } = useQuery({
@@ -50,39 +57,96 @@ export default function NewWorkflowPage() {
     },
   });
 
+  // Fetch workflow after it's created to get deployment status
+  const { data: workflow } = useQuery({
+    queryKey: ['workflow', workflowId, 'latest'],
+    queryFn: () => workflowApi.get(workflowId!, undefined, true),
+    enabled: !!workflowId && !isFirstSave,
+  });
+
   const updateMutation = useMutation({
     mutationFn: async (data: {
       spec: string; // YAML string
       name: string;
       id: string;
     }) => {
-      // Get current workflow to determine next version
-      const currentWorkflow = await workflowApi.get(data.id);
-      const nextVersion = (currentWorkflow.version || 1) + 1;
-
-      // Create new version with updated spec (YAML string)
+      // Get current workflow (latest version) to check if deployed
+      const currentWorkflow = await workflowApi.get(data.id, undefined, true);
+      
+      // Pass the current version - backend will handle versioning:
+      // - If not deployed, it will update in place
+      // - If deployed, it will create a new version automatically
       await workflowApi.create({
         workflow_id: data.id,
         name: data.name,
-        version: nextVersion,
+        version: currentWorkflow.version,
         spec: data.spec, // YAML string
-        created_by: 'user',
+        created_by: currentWorkflow.created_by || 'user',
       });
 
-      // Update name if changed
-      if (data.name !== currentWorkflow.name) {
+      // Update name if changed (only if not creating new version)
+      if (data.name !== currentWorkflow.name && !currentWorkflow.deployed) {
         await workflowApi.update(
           data.id,
           {
             name: data.name,
           },
-          nextVersion
+          currentWorkflow.version
         );
       }
     },
     onSuccess: (_, variables) => {
       queryClient.invalidateQueries({ queryKey: ['workflows'] });
       queryClient.invalidateQueries({ queryKey: ['workflow', variables.id] });
+      queryClient.invalidateQueries({ queryKey: ['workflow', variables.id, 'latest'] });
+      toast.success('Workflow saved successfully');
+    },
+    onError: (error) => {
+      toast.error('Failed to save workflow', {
+        description: error instanceof Error ? error.message : 'Unknown error occurred',
+      });
+    },
+  });
+
+  const deployMutation = useMutation({
+    mutationFn: () => workflowApi.deploy(workflowId!, workflow?.version || 1),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['workflow', workflowId] });
+      queryClient.invalidateQueries({ queryKey: ['workflow', workflowId, 'latest'] });
+      queryClient.invalidateQueries({ queryKey: ['workflows'] });
+      queryClient.invalidateQueries({ queryKey: ['previous-deployed-versions', workflowId] });
+      toast.success('Workflow deployed successfully');
+    },
+    onError: (error) => {
+      toast.error('Failed to deploy workflow', {
+        description: error instanceof Error ? error.message : 'Unknown error occurred',
+      });
+    },
+  });
+
+  // Get previous deployed versions for rollback
+  const { data: previousDeployedVersions = [] } = useQuery({
+    queryKey: ['previous-deployed-versions', workflowId, workflow?.version],
+    queryFn: () => workflowApi.getPreviousDeployedVersions(workflowId!, workflow?.version || 0),
+    enabled: !!workflowId && !!workflow && workflow.deployed && workflow.version > 1,
+  });
+
+  const rollbackMutation = useMutation({
+    mutationFn: (version: number) => workflowApi.rollback(workflowId!, version),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['workflow', workflowId] });
+      queryClient.invalidateQueries({ queryKey: ['workflow', workflowId, 'latest'] });
+      queryClient.invalidateQueries({ queryKey: ['workflows'] });
+      queryClient.invalidateQueries({ queryKey: ['previous-deployed-versions', workflowId] });
+      toast.success('Workflow rolled back successfully');
+      setRollbackDialogOpen(false);
+      setSelectedRollbackVersion(null);
+      router.refresh();
+    },
+    onError: (error) => {
+      toast.error('Failed to rollback workflow', {
+        description: error instanceof Error ? error.message : 'Unknown error occurred',
+      });
     },
   });
 
@@ -180,8 +244,77 @@ export default function NewWorkflowPage() {
           initialId={workflowId ?? undefined}
           initialSpec={initialSpec}
           isNew={true}
+          workflow={workflow ? {
+            version: workflow.version,
+            deployed: workflow.deployed,
+          } : undefined}
+          onDeploy={workflowId && workflow ? () => deployMutation.mutate() : undefined}
+          onRollback={workflowId && workflow ? () => setRollbackDialogOpen(true) : undefined}
+          isDeploying={deployMutation.isPending}
+          isRollbackDisabled={!workflow || !workflow.deployed || (previousDeployedVersions?.length || 0) === 0}
         />
       </div>
+
+      {workflowId && workflow && (
+        <Dialog open={rollbackDialogOpen} onOpenChange={setRollbackDialogOpen}>
+          <DialogContent>
+            <DialogHeader>
+              <DialogTitle>Rollback Workflow</DialogTitle>
+              <DialogDescription>
+                Select a previous deployed version to rollback to. This will deploy the selected version
+                and make it the active deployed version.
+              </DialogDescription>
+            </DialogHeader>
+            <div className="py-4">
+              <p className="text-sm text-muted-foreground mb-2">
+                Current version: v{workflow.version}
+              </p>
+              <p className="text-sm text-muted-foreground mb-4">
+                Select a previous deployed version to rollback to:
+              </p>
+              <div className="space-y-2 max-h-60 overflow-y-auto">
+                {previousDeployedVersions && previousDeployedVersions.length > 0 ? (
+                  previousDeployedVersions.map((v) => (
+                    <Button
+                      key={v}
+                      variant={selectedRollbackVersion === v ? 'default' : 'outline'}
+                      className="w-full justify-start"
+                      onClick={() => setSelectedRollbackVersion(v)}
+                    >
+                      Version {v}
+                    </Button>
+                  ))
+                ) : (
+                  <p className="text-sm text-muted-foreground text-center py-4">
+                    No previous deployed versions available
+                  </p>
+                )}
+              </div>
+            </div>
+            <DialogFooter>
+              <Button
+                variant="outline"
+                onClick={() => {
+                  setRollbackDialogOpen(false);
+                  setSelectedRollbackVersion(null);
+                }}
+              >
+                Cancel
+              </Button>
+              <Button
+                onClick={() => {
+                  if (selectedRollbackVersion !== null) {
+                    rollbackMutation.mutate(selectedRollbackVersion);
+                  }
+                }}
+                disabled={rollbackMutation.isPending || selectedRollbackVersion === null}
+              >
+                {rollbackMutation.isPending ? 'Rolling back...' : 'Rollback'}
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+      )}
     </>
   );
 }

@@ -6,10 +6,16 @@ import { templateApi, configurationApi } from "@/lib/api-client";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { Input } from "@/components/ui/input";
+import { Badge } from "@/components/ui/badge";
 import Editor from "@monaco-editor/react";
 import type { Monaco } from "@monaco-editor/react";
 import { useQuery } from "@tanstack/react-query";
-import { Plus, CheckCircle2, XCircle, AlertCircle } from "lucide-react";
+import { Plus, CheckCircle2, XCircle, AlertCircle, Rocket, RotateCcw } from "lucide-react";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 import { validateWorkflowSpec, type ValidationResult } from "@/lib/workflow-validation";
 import { SAMPLE_TEMPLATE, DEFAULT_TEMPLATE } from "@/lib/workflow-constants";
 import { createCompletionProvider } from "@/components/workflow/monaco-completion-provider";
@@ -23,6 +29,15 @@ interface JsonWorkflowEditorProps {
   isSaving?: boolean;
   isNew?: boolean;
   onSave: (args: { spec: string; name: string; id: string }) => Promise<void>; // spec is YAML string
+  // Optional props for deploy/rollback (only for existing workflows)
+  workflow?: {
+    version: number;
+    deployed: boolean;
+  };
+  onDeploy?: () => void;
+  onRollback?: () => void;
+  isDeploying?: boolean;
+  isRollbackDisabled?: boolean;
 }
 
 export function JsonWorkflowEditor({
@@ -32,8 +47,20 @@ export function JsonWorkflowEditor({
   isSaving = false,
   isNew = false,
   onSave,
+  workflow,
+  onDeploy,
+  onRollback,
+  isDeploying = false,
+  isRollbackDisabled = false,
 }: JsonWorkflowEditorProps) {
-  const [workflowId, setWorkflowId] = useState(initialId ?? "");
+  const [workflowId, setWorkflowId] = useState(() => {
+    if (initialId) return initialId;
+    if (isNew) {
+      // Generate ID as workflow_<timestamp>
+      return `workflow_${Date.now()}`;
+    }
+    return "";
+  });
   const [name, setName] = useState(initialName ?? "");
   const [yamlText, setYamlText] = useState(() => {
     if (initialSpec) {
@@ -233,13 +260,8 @@ export function JsonWorkflowEditor({
     return id;
   };
 
-  // Auto-generate ID when name changes (only for new workflows)
-  useEffect(() => {
-    if (isNew && name && !workflowId) {
-      const generatedId = generateWorkflowId(name);
-      setWorkflowId(generatedId);
-    }
-  }, [name, isNew, workflowId]);
+  // For new workflows, ID is already generated as workflow_<timestamp>
+  // No need to auto-generate from name anymore
 
   // Calculate editor height based on container
   useEffect(() => {
@@ -310,52 +332,34 @@ export function JsonWorkflowEditor({
 
   return (
     <div className="flex flex-col h-full overflow-hidden">
-      {/* Header: ID/Name on left, buttons on right - compact layout */}
+      {/* Header: Name field with label on left, ID badge, Save button */}
       <div className="flex items-center gap-3 py-1 flex-shrink-0">
-        <div className="flex-1 grid grid-cols-1 md:grid-cols-2 gap-3">
-          <div className="space-y-1">
-            <Label htmlFor="workflow-id" className="text-xs text-muted-foreground">Workflow ID</Label>
-            <Input
-              id="workflow-id"
-              value={workflowId}
-              onChange={(e) => setWorkflowId(e.target.value)}
-              placeholder={isNew ? "Auto-generated from name" : "Workflow ID"}
-              disabled={!isNew && !!initialId}
-              className="h-8 text-sm"
-            />
-          </div>
-          <div className="space-y-1">
-            <Label htmlFor="workflow-name" className="text-xs text-muted-foreground">Workflow Name</Label>
-            <Input
-              id="workflow-name"
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              placeholder="My workflow"
-              className="h-8 text-sm"
-            />
-          </div>
+        <div className="flex items-center gap-2 flex-1">
+          <Label htmlFor="workflow-name" className="text-xs text-muted-foreground whitespace-nowrap">
+            Name:
+          </Label>
+          <Input
+            id="workflow-name"
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            placeholder="My workflow"
+            className="h-7 text-xs flex-1 max-w-md"
+          />
+          {workflowId && (
+            <Badge variant="secondary" className="text-xs font-mono h-7 px-2">
+              ID: {workflowId}
+            </Badge>
+          )}
         </div>
-        <div className="flex items-center gap-2">
-          <Button
-            type="button"
-            variant="outline"
-            onClick={() => setNodeTemplateDialogOpen(true)}
-            size="sm"
-            className="h-8"
-          >
-            <Plus className="mr-1.5 h-3.5 w-3.5" />
-            Insert Node Template
-          </Button>
-          <Button
-            type="button"
-            onClick={handleSaveClick}
-            disabled={isSaving}
-            size="sm"
-            className="h-8"
-          >
-            {isSaving ? "Saving..." : "Save Workflow"}
-          </Button>
-        </div>
+        <Button
+          type="button"
+          onClick={handleSaveClick}
+          disabled={isSaving || !name.trim() || !workflowId.trim()}
+          size="sm"
+          className="h-7 text-xs"
+        >
+          {isSaving ? "Saving..." : "Save"}
+        </Button>
       </div>
 
       <div className="flex-1 min-h-0 flex flex-col mt-2 overflow-hidden">
@@ -363,26 +367,100 @@ export function JsonWorkflowEditor({
           <Label htmlFor="workflow-yaml" className="text-xs text-muted-foreground">
             Workflow YAML
           </Label>
-          {validationResult && (
-            <div className="flex items-center gap-1.5">
-              {validationResult.errors.length > 0 ? (
-                <div className="flex items-center gap-1 text-destructive text-xs">
-                  <XCircle className="h-3.5 w-3.5" />
-                  <span>{validationResult.errors.length} error{validationResult.errors.length !== 1 ? 's' : ''}</span>
-                </div>
-              ) : validationResult.warnings.length > 0 ? (
-                <div className="flex items-center gap-1 text-yellow-600 dark:text-yellow-400 text-xs">
-                  <AlertCircle className="h-3.5 w-3.5" />
-                  <span>{validationResult.warnings.length} warning{validationResult.warnings.length !== 1 ? 's' : ''}</span>
-                </div>
-              ) : validationResult.isValid ? (
-                <div className="flex items-center gap-1 text-emerald-600 dark:text-emerald-400 text-xs">
-                  <CheckCircle2 className="h-3.5 w-3.5" />
-                  <span>Valid</span>
-                </div>
-              ) : null}
-            </div>
-          )}
+          <div className="flex items-center gap-1.5">
+            {workflow && onDeploy && !workflow.deployed && (
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    onClick={onDeploy}
+                    disabled={isDeploying}
+                    className="h-6 w-6 p-0"
+                  >
+                    <Rocket className="h-3.5 w-3.5" />
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent>{isDeploying ? 'Deploying...' : 'Deploy'}</TooltipContent>
+              </Tooltip>
+            )}
+            {workflow && onRollback && (
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    onClick={onRollback}
+                    disabled={isRollbackDisabled}
+                    className="h-6 w-6 p-0"
+                  >
+                    <RotateCcw className="h-3.5 w-3.5" />
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent>Rollback</TooltipContent>
+              </Tooltip>
+            )}
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => setNodeTemplateDialogOpen(true)}
+                  className="h-6 w-6 p-0"
+                >
+                  <Plus className="h-3.5 w-3.5" />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>Insert Node Template</TooltipContent>
+            </Tooltip>
+            {validationResult && (
+              <>
+                {validationResult.errors.length > 0 ? (
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <div className="flex items-center gap-1 text-destructive text-xs cursor-help">
+                        <XCircle className="h-3.5 w-3.5" />
+                        <span>{validationResult.errors.length} error{validationResult.errors.length !== 1 ? 's' : ''}</span>
+                      </div>
+                    </TooltipTrigger>
+                    <TooltipContent side="left" className="max-w-md">
+                      <div className="space-y-1">
+                        <div className="font-semibold">Validation Errors:</div>
+                        {validationResult.errors.map((error, idx) => (
+                          <div key={idx} className="text-xs">• {error}</div>
+                        ))}
+                      </div>
+                    </TooltipContent>
+                  </Tooltip>
+                ) : validationResult.warnings.length > 0 ? (
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <div className="flex items-center gap-1 text-yellow-600 dark:text-yellow-400 text-xs cursor-help">
+                        <AlertCircle className="h-3.5 w-3.5" />
+                        <span>{validationResult.warnings.length} warning{validationResult.warnings.length !== 1 ? 's' : ''}</span>
+                      </div>
+                    </TooltipTrigger>
+                    <TooltipContent side="left" className="max-w-md">
+                      <div className="space-y-1">
+                        <div className="font-semibold">Validation Warnings:</div>
+                        {validationResult.warnings.map((warning, idx) => (
+                          <div key={idx} className="text-xs">• {warning}</div>
+                        ))}
+                      </div>
+                    </TooltipContent>
+                  </Tooltip>
+                ) : validationResult.isValid ? (
+                  <div className="flex items-center gap-1 text-emerald-600 dark:text-emerald-400 text-xs">
+                    <CheckCircle2 className="h-3.5 w-3.5" />
+                    <span>Valid</span>
+                  </div>
+                ) : null}
+              </>
+            )}
+          </div>
         </div>
         <div ref={editorContainerRef} className="flex-1 border rounded-md overflow-hidden min-h-0 w-full">
           <Editor

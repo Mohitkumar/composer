@@ -67,7 +67,36 @@ func (c *Coordinator) StartWorkflow(ctx context.Context, p *model.StartWorkflowR
 			scheduledAt = time.UnixMilli(p.StartedAtUnixMs)
 		}
 
+		// If retrying from a specific node, use context from previous execution if provided
 		runContext := c.newRunContext(p.Input, p.ExecutionOptions)
+		if p.StartNodeID != "" && len(p.ExecutionOptions) > 0 {
+			// Check if execution_options contains retry context
+			var execOpts map[string]interface{}
+			if err := json.Unmarshal(p.ExecutionOptions, &execOpts); err == nil {
+				if retryContext, ok := execOpts["_retry_context"].(map[string]interface{}); ok {
+					if tasks, ok := retryContext["tasks"].(map[string]interface{}); ok {
+						// Merge completed tasks from previous execution into context
+						runContext.Tasks = make(map[string]*model.StepResult)
+						for nodeID, taskData := range tasks {
+							if taskMap, ok := taskData.(map[string]interface{}); ok {
+								if status, ok := taskMap["status"].(string); ok && status == "COMPLETED" {
+									if output, ok := taskMap["output"]; ok {
+										outputJSON, _ := json.Marshal(output)
+										runContext.Tasks[nodeID] = &model.StepResult{
+											Status: model.TaskInstanceStatus(status),
+											Output: outputJSON,
+										}
+									}
+								}
+							}
+						}
+						logger.Info().
+							Int("tasks_count", len(runContext.Tasks)).
+							Msg("using context from previous execution for retry")
+					}
+				}
+			}
+		}
 		taskInput, err := c.resolveNodeInputFromSpecRaw(startNode.Spec, runContext, logger)
 		if err != nil {
 			return err

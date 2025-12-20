@@ -14,7 +14,6 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog';
 import Editor from '@monaco-editor/react';
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { toast } from 'sonner';
 import { useRouter } from 'next/navigation';
 
@@ -39,14 +38,8 @@ export function RetryExecutionDialog({
     .filter((task) => task.state === 'FAILED')
     .map((task) => task.node_id);
 
-  // Get all unique node IDs from task instances
-  const allNodeIds = [
-    ...new Set(executionDetail.task_instances.map((task) => task.node_id)),
-  ].sort();
-
   const [inputJson, setInputJson] = useState('{}');
   const [configJson, setConfigJson] = useState('{}');
-  const [selectedStartNode, setSelectedStartNode] = useState<string>('');
   const [inputError, setInputError] = useState<string | null>(null);
   const [configError, setConfigError] = useState<string | null>(null);
 
@@ -90,12 +83,10 @@ export function RetryExecutionDialog({
         setConfigJson('{}');
       }
 
-      // Set default start node to first failed node, or empty (start from beginning)
-      setSelectedStartNode(failedNodes.length > 0 ? failedNodes[0] : '');
       setInputError(null);
       setConfigError(null);
     }
-  }, [open, execution, context, failedNodes]);
+  }, [open, execution, context]);
 
   const retryMutation = useMutation({
     mutationFn: async () => {
@@ -120,12 +111,64 @@ export function RetryExecutionDialog({
       // Build execution options with config
       const execution_options = Object.keys(config).length > 0 ? config : undefined;
 
+      // Always retry from the first failed node
+      // If no failed nodes, retry from beginning
+      const startNodeId = failedNodes.length > 0 ? failedNodes[0] : undefined;
+      
+      // If retrying from a specific node, we need to pass context
+      // The backend should use context from the previous execution
+      if (startNodeId) {
+        
+        // Build context from previous execution for nodes before the start node
+        // Use task instances to get completed tasks with outputs
+        const contextTasks: Record<string, any> = {};
+        
+        // First, try to get tasks from context if available
+        if (context && context.tasks) {
+          for (const [nodeId, taskResult] of Object.entries(context.tasks)) {
+            if (taskResult && (taskResult.status === 'COMPLETED' || taskResult.status === 'completed') && taskResult.output) {
+              contextTasks[nodeId] = {
+                status: 'COMPLETED',
+                output: taskResult.output,
+              };
+            }
+          }
+        }
+        
+        // Also check task instances for completed tasks
+        for (const task of executionDetail.task_instances) {
+          if (task.state === 'COMPLETED' && task.output && !contextTasks[task.node_id]) {
+            contextTasks[task.node_id] = {
+              status: 'COMPLETED',
+              output: task.output,
+            };
+          }
+        }
+        
+        // Add context to execution_options so backend can use it
+        if (Object.keys(contextTasks).length > 0) {
+          const optionsWithContext = {
+            ...(execution_options || {}),
+            _retry_context: {
+              from_run_id: execution.id,
+              tasks: contextTasks,
+            },
+          };
+          return workflowApi.execute(execution.workflow_definition_id, {
+            workflow_version: execution.workflow_version,
+            input,
+            execution_options: optionsWithContext,
+            start_node_id: startNodeId,
+          });
+        }
+      }
+
       // Call execute workflow API with same workflow ID and version
       return workflowApi.execute(execution.workflow_definition_id, {
         workflow_version: execution.workflow_version,
         input,
         execution_options,
-        start_node_id: selectedStartNode || undefined,
+        start_node_id: startNodeId,
       });
     },
     onSuccess: (data) => {
@@ -198,43 +241,16 @@ export function RetryExecutionDialog({
         </DialogHeader>
 
         <div className="flex-1 overflow-auto flex flex-col gap-4">
-          {/* Start Node Selection */}
-          <div className="space-y-2">
-            <Label>Start From Node (optional)</Label>
-            <Select value={selectedStartNode || "__beginning__"} onValueChange={(value) => setSelectedStartNode(value === "__beginning__" ? "" : value)}>
-              <SelectTrigger>
-                <SelectValue placeholder="Start from beginning" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="__beginning__">Start from beginning</SelectItem>
-                {failedNodes.length > 0 && (
-                  <>
-                    {failedNodes.map((nodeId) => (
-                      <SelectItem key={`failed-${nodeId}`} value={nodeId}>
-                        {nodeId} (Failed)
-                      </SelectItem>
-                    ))}
-                  </>
-                )}
-                {allNodeIds.length > 0 && (
-                  <>
-                    {allNodeIds
-                      .filter((nodeId) => !failedNodes.includes(nodeId))
-                      .map((nodeId) => (
-                        <SelectItem key={nodeId} value={nodeId}>
-                          {nodeId}
-                        </SelectItem>
-                      ))}
-                  </>
-                )}
-              </SelectContent>
-            </Select>
-            <p className="text-xs text-muted-foreground">
-              {selectedStartNode
-                ? `Workflow will start from node: ${selectedStartNode}`
-                : 'Workflow will start from the beginning'}
-            </p>
-          </div>
+          {/* Retry Info */}
+          {failedNodes.length > 0 && (
+            <div className="space-y-1">
+              <p className="text-sm font-medium">Retry from failed node</p>
+              <p className="text-xs text-muted-foreground">
+                Workflow will retry from node: <span className="font-mono">{failedNodes[0]}</span>. 
+                Context from previous execution will be used.
+              </p>
+            </div>
+          )}
 
           {/* Input JSON Section */}
           <div className="space-y-2">

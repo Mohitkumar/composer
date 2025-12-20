@@ -80,6 +80,8 @@ export interface WorkflowDefinition {
   created_by?: string;
   enabled: boolean;
   webhook_url?: string;
+  deployed: boolean;
+  deployed_at?: string;
   created_at: string;
   success_rate?: number; // Success rate percentage (0-100)
 }
@@ -164,10 +166,15 @@ export const workflowApi = {
     return response.data;
   },
 
-  get: async (id: string, version?: number): Promise<WorkflowDefinition> => {
-    const response = await apiClient.get(`/workflows/${id}`, {
-      params: version ? { version } : {},
-    });
+  get: async (id: string, version?: number, latest?: boolean): Promise<WorkflowDefinition> => {
+    const params: Record<string, string> = {};
+    if (version !== undefined && version > 0) {
+      params.version = version.toString();
+    }
+    if (latest) {
+      params.latest = 'true';
+    }
+    const response = await apiClient.get(`/workflows/${id}`, { params });
     return response.data;
   },
 
@@ -208,6 +215,25 @@ export const workflowApi = {
       workflow_id: id,
     });
     return response.data;
+  },
+
+  deploy: async (id: string, version: number): Promise<void> => {
+    await apiClient.post(`/workflows/${id}/deploy`, null, {
+      params: { version: version.toString() },
+    });
+  },
+
+  rollback: async (id: string, version: number): Promise<void> => {
+    await apiClient.post(`/workflows/${id}/rollback`, null, {
+      params: { version: version.toString() },
+    });
+  },
+
+  getPreviousDeployedVersions: async (id: string, currentVersion: number): Promise<number[]> => {
+    const response = await apiClient.get(`/workflows/${id}/previous-deployed-versions`, {
+      params: { version: currentVersion.toString() },
+    });
+    return response.data.versions || [];
   },
 
   getStatus: async (id: string, runId?: string): Promise<WorkflowInstanceStatus> => {

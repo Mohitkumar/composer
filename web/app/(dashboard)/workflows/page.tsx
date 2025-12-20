@@ -5,7 +5,7 @@ import { workflowApi, type WorkflowDefinition, type WorkflowIssueSummary } from 
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { Plus, Edit, Trash2, Play, Search, MoreVertical, AlertTriangle } from 'lucide-react';
+import { Plus, Edit, Trash2, Play, Search, MoreVertical, AlertTriangle, Rocket } from 'lucide-react';
 import Link from 'next/link';
 import { format } from 'date-fns';
 import { Badge } from '@/components/ui/badge';
@@ -76,12 +76,12 @@ export default function WorkflowsPage() {
   const total = workflowResponse?.total || workflows.length;
 
   const deleteMutation = useMutation({
-    mutationFn: (workflow: WorkflowDefinition) => workflowApi.delete(workflow.id, workflow.version),
+    mutationFn: (workflow: WorkflowDefinition) => workflowApi.delete(workflow.id, 0), // 0 means delete all versions
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['workflows'] });
       setDeleteDialogOpen(false);
       setWorkflowToDelete(null);
-      toast.success('Workflow deleted successfully');
+      toast.success('Workflow and all versions deleted successfully');
     },
     onError: (error) => {
       toast.error('Failed to delete workflow', {
@@ -98,7 +98,7 @@ export default function WorkflowsPage() {
       execution_options?: Record<string, any>;
     }) => {
       return workflowApi.execute(data.id, {
-        workflow_version: data.version,
+        workflow_version: data.version || 0, // 0 means use deployed version
         input: data.input,
         execution_options: data.execution_options,
       });
@@ -111,6 +111,26 @@ export default function WorkflowsPage() {
     },
     onError: (error) => {
       toast.error('Failed to execute workflow', {
+        description: error instanceof Error ? error.message : 'Unknown error occurred',
+      });
+    },
+  });
+
+  const deployMutation = useMutation({
+    mutationFn: async (workflow: WorkflowDefinition) => {
+      // Get the latest version to deploy (not the deployed version shown in list)
+      const latestWorkflow = await workflowApi.get(workflow.id, undefined, true);
+      if (latestWorkflow.deployed) {
+        throw new Error('Latest version is already deployed');
+      }
+      await workflowApi.deploy(workflow.id, latestWorkflow.version);
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['workflows'] });
+      toast.success('Workflow deployed successfully');
+    },
+    onError: (error) => {
+      toast.error('Failed to deploy workflow', {
         description: error instanceof Error ? error.message : 'Unknown error occurred',
       });
     },
@@ -188,7 +208,7 @@ export default function WorkflowsPage() {
     if (!workflowToExecute) return;
     await executeMutation.mutateAsync({
       id: workflowToExecute.id,
-      version: workflowToExecute.version || 1,
+      version: 0, // 0 means use deployed version
       input: data.input,
       execution_options: data.execution_options,
     });
@@ -313,6 +333,16 @@ export default function WorkflowsPage() {
                           >
                             <Play className="h-3.5 w-3.5" />
                           </Button>
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            className="h-7 w-7 p-0"
+                            onClick={() => deployMutation.mutate(workflow)}
+                            title="Deploy latest version"
+                            disabled={deployMutation.isPending}
+                          >
+                            <Rocket className="h-3.5 w-3.5" />
+                          </Button>
                           {workflow.success_rate !== undefined && workflow.success_rate >= 0 && workflow.success_rate < 95 && (
                             <Button
                               variant="ghost"
@@ -381,7 +411,7 @@ export default function WorkflowsPage() {
           <DialogHeader>
             <DialogTitle>Delete Workflow</DialogTitle>
             <DialogDescription>
-              Are you sure you want to delete &quot;{workflowToDelete?.name}&quot;? This action
+              Are you sure you want to delete &quot;{workflowToDelete?.name}&quot;? This will delete all versions of this workflow. This action
               cannot be undone.
             </DialogDescription>
           </DialogHeader>
@@ -413,7 +443,7 @@ export default function WorkflowsPage() {
             }
           }}
           workflowId={workflowToExecute.id}
-          workflowVersion={workflowToExecute.version || 1}
+          workflowVersion={0}
           onExecute={handleExecuteConfirm}
           isExecuting={executeMutation.isPending}
         />

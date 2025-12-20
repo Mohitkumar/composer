@@ -47,8 +47,21 @@ function Execute(call, callback) {
   try {
     const req = call.request;
     
-    // Validate payload type
-    if (!req.payload || !req.payload.inline_code) {
+    // With protoLoader and oneofs: true, oneof fields can be accessed directly
+    // Try both possible structures: req.inline_code or req.payload.inline_code
+    let inlineCode = req.inline_code;
+    if (!inlineCode && req.payload) {
+      inlineCode = req.payload.inline_code;
+    }
+    
+    if (!inlineCode) {
+      // Log for debugging
+      console.error('Request structure:', JSON.stringify({
+        hasInlineCode: !!req.inline_code,
+        hasPayload: !!req.payload,
+        hasPayloadInlineCode: !!(req.payload && req.payload.inline_code),
+        requestKeys: Object.keys(req)
+      }));
       callback(null, {
         success: false,
         error: 'Only inline_code payload is supported',
@@ -57,8 +70,8 @@ function Execute(call, callback) {
       return;
     }
     
-    const code = req.payload.inline_code.code;
-    const filename = req.payload.inline_code.filename || 'handler.js';
+    const code = inlineCode.code;
+    const filename = inlineCode.filename || 'handler.js';
     const inputJson = req.input_json || '{}';
     const timeoutSeconds = req.timeout_seconds;
     

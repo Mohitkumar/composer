@@ -41,6 +41,8 @@ type WorkflowDefinitionRecord struct {
 	CreatedBy  string          `json:"created_by,omitempty"`
 	Enabled    bool            `json:"enabled"`
 	WebhookURL sql.NullString  `json:"webhook_url,omitempty"`
+	Deployed   bool            `json:"deployed"`
+	DeployedAt sql.NullTime    `json:"deployed_at,omitempty"`
 	CreatedAt  time.Time       `json:"created_at"`
 }
 

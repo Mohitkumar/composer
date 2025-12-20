@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/mohitkumar/composer/pkg/coord"
@@ -134,11 +135,15 @@ func (h *handlers) listWorkflows(w http.ResponseWriter, r *http.Request) {
 			"spec":         specYAML,
 			"created_by":   wf.CreatedBy,
 			"enabled":      wf.Enabled,
+			"deployed":     wf.Deployed,
 			"created_at":   wf.CreatedAt,
 			"success_rate": wf.SuccessRate,
 		}
 		if wf.WebhookURL.Valid {
 			workflowMap["webhook_url"] = wf.WebhookURL.String
+		}
+		if wf.DeployedAt.Valid {
+			workflowMap["deployed_at"] = wf.DeployedAt.Time.Format(time.RFC3339)
 		}
 		workflowsWithYAML[i] = workflowMap
 	}
@@ -158,17 +163,26 @@ func (h *handlers) listWorkflows(w http.ResponseWriter, r *http.Request) {
 func (h *handlers) getWorkflow(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	versionStr := r.URL.Query().Get("version")
-	version := 0
-	if versionStr != "" {
-		var err error
-		version, err = strconv.Atoi(versionStr)
-		if err != nil {
-			http.Error(w, "invalid version", http.StatusBadRequest)
-			return
+	latest := r.URL.Query().Get("latest") == "true"
+
+	var wf *model.WorkflowDefinitionRecord
+	var err error
+
+	if latest {
+		// Get latest version (for editing)
+		wf, err = h.coordinator.GetLatestWorkflow(r.Context(), id)
+	} else {
+		version := 0
+		if versionStr != "" {
+			version, err = strconv.Atoi(versionStr)
+			if err != nil {
+				http.Error(w, "invalid version", http.StatusBadRequest)
+				return
+			}
 		}
+		wf, err = h.coordinator.GetWorkflow(r.Context(), id, version)
 	}
 
-	wf, err := h.coordinator.GetWorkflow(r.Context(), id, version)
 	if err != nil {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusNotFound)
@@ -194,10 +208,14 @@ func (h *handlers) getWorkflow(w http.ResponseWriter, r *http.Request) {
 		"spec":       specObj,
 		"created_by": wf.CreatedBy,
 		"enabled":    wf.Enabled,
+		"deployed":   wf.Deployed,
 		"created_at": wf.CreatedAt,
 	}
 	if wf.WebhookURL.Valid {
 		response["webhook_url"] = wf.WebhookURL.String
+	}
+	if wf.DeployedAt.Valid {
+		response["deployed_at"] = wf.DeployedAt.Time.Format(time.RFC3339)
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -263,6 +281,96 @@ func (h *handlers) deleteWorkflow(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]string{"message": "Workflow deleted successfully"})
 }
 
+func (h *handlers) deployWorkflow(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	versionStr := r.URL.Query().Get("version")
+	if versionStr == "" {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "version parameter is required"})
+		return
+	}
+
+	version, err := strconv.Atoi(versionStr)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "invalid version"})
+		return
+	}
+
+	if err := h.coordinator.DeployWorkflow(r.Context(), id, version); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]string{"message": "Workflow deployed successfully"})
+}
+
+func (h *handlers) rollbackWorkflow(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	versionStr := r.URL.Query().Get("version")
+	if versionStr == "" {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "version parameter is required"})
+		return
+	}
+
+	version, err := strconv.Atoi(versionStr)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "invalid version"})
+		return
+	}
+
+	if err := h.coordinator.RollbackWorkflow(r.Context(), id, version); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]string{"message": "Workflow rolled back successfully"})
+}
+
+func (h *handlers) getPreviousDeployedVersions(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	versionStr := r.URL.Query().Get("version")
+	if versionStr == "" {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "version parameter is required"})
+		return
+	}
+
+	version, err := strconv.Atoi(versionStr)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "invalid version"})
+		return
+	}
+
+	versions, err := h.coordinator.GetPreviousDeployedVersions(r.Context(), id, version)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{"versions": versions})
+}
+
 func (h *handlers) executeWorkflow(w http.ResponseWriter, r *http.Request) {
 	// Get workflow ID from path parameter
 	workflowID := chi.URLParam(r, "id")
@@ -282,6 +390,24 @@ func (h *handlers) executeWorkflow(w http.ResponseWriter, r *http.Request) {
 	}
 	// Use workflow ID from path parameter (ignore if provided in body)
 	p.WorkflowID = workflowID
+
+	// If workflow_version is 0 or not specified, use the deployed version
+	if p.WorkflowVersion == 0 {
+		deployedWorkflow, err := h.coordinator.GetWorkflow(r.Context(), workflowID, 0)
+		if err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusNotFound)
+			json.NewEncoder(w).Encode(map[string]string{"error": "workflow not found or no deployed version"})
+			return
+		}
+		if !deployedWorkflow.Deployed {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{"error": "workflow has no deployed version"})
+			return
+		}
+		p.WorkflowVersion = deployedWorkflow.Version
+	}
 
 	if err := h.coordinator.StartWorkflow(r.Context(), &p); err != nil {
 		w.Header().Set("Content-Type", "application/json")
