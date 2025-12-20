@@ -85,24 +85,16 @@ function executeCode(code, input, timeoutSeconds) {
   // Calculate timeout
   const timeoutMs = calculateTimeout(timeoutSeconds);
   
-  // Log input being passed to sandbox
-  console.log(`[JS Executor] Creating sandbox with input:`, JSON.stringify(input, null, 2));
-  console.log(`[JS Executor] Input will be available as 'input' variable in sandbox`);
-  
   // Create secure sandbox
   const vm = createSandbox(timeoutMs, input);
   
   // Wrap code with handler validation
   const wrappedCode = wrapCode(code);
   
-  console.log(`[JS Executor] Executing wrapped code...`);
-  console.log(`[JS Executor] Wrapped code preview (first 200 chars):`, wrappedCode.substring(0, 200));
   
   // Execute in sandbox
   const output = vm.run(wrappedCode);
   
-  console.log(`[JS Executor] Execution completed. Output type:`, typeof output);
-  console.log(`[JS Executor] Output preview:`, JSON.stringify(output, null, 2).substring(0, 500));
   
   return output;
 }

@@ -73,12 +73,31 @@ func (r *Resolver) ResolveTemplates(node interface{}, rc *model.RunContext) (int
 
 // resolveStringTemplates resolves template expressions in a string.
 // It finds all {{ expression }} patterns and replaces them with evaluated CEL expressions.
+// If the entire string is just a template expression (with optional whitespace), it returns
+// the evaluated value directly (as an object/array/etc) instead of stringifying it.
 func (r *Resolver) resolveStringTemplates(s string, rc *model.RunContext) (interface{}, error) {
 	matches := r.templateRe.FindAllStringSubmatch(s, -1)
 	if len(matches) == 0 {
 		return s, nil
 	}
 
+	// Check if the entire string is just a single template expression (with optional whitespace)
+	trimmed := strings.TrimSpace(s)
+	if len(matches) == 1 {
+		// Check if the string is exactly the template expression (with optional whitespace)
+		fullMatch := strings.TrimSpace(matches[0][0])
+		if trimmed == fullMatch {
+			// Entire string is just the template - return the evaluated value directly
+			rawExpr := strings.TrimSpace(matches[0][1])
+			val, err := r.evalCELExpression(rawExpr, rc)
+			if err != nil {
+				return nil, err
+			}
+			return val, nil
+		}
+	}
+
+	// Multiple templates or template is part of a larger string - do string replacement
 	out := s
 	for _, m := range matches {
 		rawExpr := strings.TrimSpace(m[1])
@@ -172,4 +191,3 @@ func (r *Resolver) evalCELExpression(exprStr string, rc *model.RunContext) (inte
 	}
 	return out.Value(), nil
 }
-
