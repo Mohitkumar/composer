@@ -168,52 +168,54 @@ export function ExecutionDetailDialog({
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-w-7xl max-h-[95vh] flex flex-col">
-        <DialogHeader>
-          <div className="flex items-center justify-between">
+        <DialogHeader className="pb-2">
+          <div className="flex items-center justify-between pr-8">
             <div>
-              <DialogTitle>Execution Details</DialogTitle>
-              <DialogDescription>
+              <DialogTitle className="text-lg">Execution Details</DialogTitle>
+              <DialogDescription className="text-xs mt-1">
                 {execution?.id ? `Execution ID: ${execution.id}` : 'Loading...'}
               </DialogDescription>
             </div>
-            <div className="flex items-center gap-2">
-              {canRetry && (
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => retryMutation.mutate()}
-                  disabled={retryMutation.isPending}
-                >
-                  <RotateCw className={`mr-2 h-4 w-4 ${retryMutation.isPending ? 'animate-spin' : ''}`} />
-                  {retryMutation.isPending ? 'Retrying...' : 'Retry'}
-                </Button>
-              )}
-              {canCancel && (
-                <Button
-                  variant="destructive"
-                  size="sm"
-                  onClick={() => cancelMutation.mutate()}
-                  disabled={cancelMutation.isPending}
-                >
-                  <X className="mr-2 h-4 w-4" />
-                  {cancelMutation.isPending ? 'Cancelling...' : 'Cancel'}
-                </Button>
-              )}
-            </div>
+            {canCancel && (
+              <Button
+                variant="destructive"
+                size="sm"
+                onClick={() => cancelMutation.mutate()}
+                disabled={cancelMutation.isPending}
+                className="h-7 text-xs"
+              >
+                <X className="mr-1.5 h-3.5 w-3.5" />
+                {cancelMutation.isPending ? 'Cancelling...' : 'Cancel'}
+              </Button>
+            )}
           </div>
         </DialogHeader>
+        
+        {/* Retry button overlapping with close button */}
+        {canRetry && (
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => retryMutation.mutate()}
+            disabled={retryMutation.isPending}
+            className="absolute top-3 right-3 h-7 w-7 p-0 z-10"
+            title={retryMutation.isPending ? 'Retrying...' : 'Retry'}
+          >
+            <RotateCw className={`h-3.5 w-3.5 ${retryMutation.isPending ? 'animate-spin' : ''}`} />
+          </Button>
+        )}
 
         {isLoading ? (
-          <div className="flex items-center justify-center min-h-[400px]">
+          <div className="flex items-center justify-center min-h-[300px]">
             <div className="text-center">
               <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary mx-auto mb-4"></div>
               <p className="text-muted-foreground">Loading execution details...</p>
             </div>
           </div>
         ) : execution ? (
-          <div className="flex-1 overflow-hidden flex flex-col gap-4">
+          <div className="flex-1 overflow-hidden flex flex-col gap-2 min-h-0">
             {/* Compact Overview Info */}
-            <div className="flex flex-wrap items-center gap-4 text-sm border-b pb-3">
+            <div className="flex flex-wrap items-center gap-3 text-xs border-b pb-2">
               <div className="flex items-center gap-2">
                 <span className="text-muted-foreground">Status:</span>
                 <Badge variant={getStatusBadgeVariant(execution.status)} className="text-sm">
@@ -248,138 +250,126 @@ export function ExecutionDetailDialog({
               </div>
             </div>
 
-            <Tabs defaultValue="tasks" className="flex-1 overflow-hidden flex flex-col">
-              <TabsList>
-                <TabsTrigger value="tasks">Task Execution</TabsTrigger>
-                <TabsTrigger value="context">Context</TabsTrigger>
+            <Tabs defaultValue="tasks" className="flex-1 overflow-hidden flex flex-col min-h-0">
+              <TabsList className="h-8 flex-shrink-0">
+                <TabsTrigger value="tasks" className="text-xs px-3 py-1">Task Execution</TabsTrigger>
+                <TabsTrigger value="context" className="text-xs px-3 py-1">Context</TabsTrigger>
               </TabsList>
 
               {/* Task Execution Tab */}
-              <TabsContent value="tasks" className="flex-1 overflow-auto">
+              <TabsContent value="tasks" className="flex-1 overflow-auto min-h-0">
                 {taskInstances.length === 0 ? (
                   <Card>
-                    <CardContent className="pt-6">
-                      <p className="text-center text-muted-foreground">No task instances found</p>
+                    <CardContent className="pt-4">
+                      <p className="text-center text-muted-foreground text-sm">No task instances found</p>
                     </CardContent>
                   </Card>
                 ) : (
-                  <div className="space-y-4">
+                  <div className="space-y-2">
                     {taskInstances.map((task) => (
-                      <Card key={task.id}>
-                        <CardHeader>
-                          <div className="flex items-center justify-between">
-                            <div className="flex items-center gap-3">
-                              {getTaskStatusIcon(task.state)}
-                              <div>
-                                <CardTitle className="text-base">{task.node_id}</CardTitle>
-                                <CardDescription>
-                                  {task.node_type} • Attempt {task.attempt}
-                                </CardDescription>
-                              </div>
+                      <Card key={task.id} className="border">
+                        <CardHeader className="pb-2 pt-2 px-3">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            {getTaskStatusIcon(task.state)}
+                            <span className="text-sm font-medium">{task.node_id}</span>
+                            <span className="text-xs text-muted-foreground">•</span>
+                            <span className="text-xs text-muted-foreground">{task.node_type}</span>
+                            <span className="text-xs text-muted-foreground">•</span>
+                            <span className="text-xs text-muted-foreground">Attempt {task.attempt}</span>
+                            {task.completed_at && (
+                              <>
+                                <span className="text-xs text-muted-foreground">•</span>
+                                <span className="text-xs text-muted-foreground">
+                                  {format(new Date(task.completed_at), 'MMM d, HH:mm')}
+                                </span>
+                              </>
+                            )}
+                            {!task.completed_at && task.started_at && (
+                              <>
+                                <span className="text-xs text-muted-foreground">•</span>
+                                <span className="text-xs text-muted-foreground">
+                                  Started: {format(new Date(task.started_at), 'MMM d, HH:mm')}
+                                </span>
+                              </>
+                            )}
+                            <div className="ml-auto">
+                              <Badge variant={getTaskStatusBadgeVariant(task.state)} className="text-xs">
+                                {task.state}
+                              </Badge>
                             </div>
-                            <Badge variant={getTaskStatusBadgeVariant(task.state)}>
-                              {task.state}
-                            </Badge>
                           </div>
                         </CardHeader>
-                        <CardContent className="space-y-4">
-                          {/* Timestamps */}
-                          <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
-                            {task.scheduled_at && (
-                              <div>
-                                <p className="text-muted-foreground">Scheduled</p>
-                                <p>{format(new Date(task.scheduled_at), 'PPpp')}</p>
-                              </div>
-                            )}
-                            {task.started_at && (
-                              <div>
-                                <p className="text-muted-foreground">Started</p>
-                                <p>{format(new Date(task.started_at), 'PPpp')}</p>
-                              </div>
-                            )}
-                            {task.finished_at && (
-                              <div>
-                                <p className="text-muted-foreground">Finished</p>
-                                <p>{format(new Date(task.finished_at), 'PPpp')}</p>
-                              </div>
-                            )}
-                            {task.completed_at && (
-                              <div>
-                                <p className="text-muted-foreground">Completed</p>
-                                <p>{format(new Date(task.completed_at), 'PPpp')}</p>
-                              </div>
-                            )}
-                          </div>
-
+                        <CardContent className="space-y-1 px-3 pb-2 pt-0">
                           {/* Error Display */}
                           {task.state === 'FAILED' && task.last_error && (
-                            <div className="border border-destructive rounded-md p-4 bg-destructive/10">
-                              <div className="flex items-center gap-2 mb-2">
-                                <XCircle className="h-4 w-4 text-destructive" />
-                                <h4 className="font-semibold text-destructive">Error</h4>
+                            <div className="border border-destructive rounded-md p-2 bg-destructive/10">
+                              <div className="flex items-center gap-1.5 mb-1.5">
+                                <XCircle className="h-3.5 w-3.5 text-destructive" />
+                                <h4 className="font-semibold text-destructive text-xs">Error</h4>
                               </div>
-                              <pre className="text-sm overflow-auto whitespace-pre-wrap">
+                              <pre className="text-xs overflow-auto whitespace-pre-wrap max-h-32">
                                 {formatError(task.last_error)}
                               </pre>
                             </div>
                           )}
 
-                          {/* Input/Output */}
-                          <div className="grid gap-4 md:grid-cols-2">
-                            {task.input && (
-                              <Collapsible>
-                                <CollapsibleTrigger className="flex items-center justify-between w-full text-left">
-                                  <span className="font-medium text-sm">Input</span>
-                                  <ChevronDown className="h-4 w-4" />
-                                </CollapsibleTrigger>
-                                <CollapsibleContent className="mt-2">
-                                  <div className="border rounded-md overflow-hidden" style={{ height: '200px' }}>
-                                    <Editor
-                                      height="200px"
-                                      defaultLanguage="json"
-                                      value={JSON.stringify(task.input, null, 2)}
-                                      options={{
-                                        readOnly: true,
-                                        minimap: { enabled: false },
-                                        fontSize: 12,
-                                        lineNumbers: "on",
-                                        wordWrap: "on",
-                                        scrollBeyondLastLine: false,
-                                      }}
-                                      theme="vs-dark"
-                                    />
-                                  </div>
-                                </CollapsibleContent>
-                              </Collapsible>
-                            )}
-
-                            {task.output && (
-                              <Collapsible>
-                                <CollapsibleTrigger className="flex items-center justify-between w-full text-left">
-                                  <span className="font-medium text-sm">Output</span>
-                                  <ChevronDown className="h-4 w-4" />
-                                </CollapsibleTrigger>
-                                <CollapsibleContent className="mt-2">
-                                  <div className="border rounded-md overflow-hidden" style={{ height: '200px' }}>
-                                    <Editor
-                                      height="200px"
-                                      defaultLanguage="json"
-                                      value={JSON.stringify(task.output, null, 2)}
-                                      options={{
-                                        readOnly: true,
-                                        minimap: { enabled: false },
-                                        fontSize: 12,
-                                        lineNumbers: "on",
-                                        wordWrap: "on",
-                                        scrollBeyondLastLine: false,
-                                      }}
-                                      theme="vs-dark"
-                                    />
-                                  </div>
-                                </CollapsibleContent>
-                              </Collapsible>
-                            )}
-                          </div>
+                          {/* Input/Output - Combined Collapsible */}
+                          {(task.input || task.output) && (
+                            <Collapsible>
+                              <CollapsibleTrigger className="flex items-center justify-between w-full text-left py-0.5">
+                                <span className="font-medium text-xs">
+                                  {task.input && task.output ? 'Input / Output' : task.input ? 'Input' : 'Output'}
+                                </span>
+                                <ChevronDown className="h-3.5 w-3.5" />
+                              </CollapsibleTrigger>
+                              <CollapsibleContent className="mt-1">
+                                <div className="grid gap-2 md:grid-cols-2">
+                                  {task.input && (
+                                    <div>
+                                      <div className="text-xs font-medium mb-1 text-muted-foreground">Input</div>
+                                      <div className="border rounded-md overflow-hidden" style={{ height: '150px' }}>
+                                        <Editor
+                                          height="150px"
+                                          defaultLanguage="json"
+                                          value={JSON.stringify(task.input, null, 2)}
+                                          options={{
+                                            readOnly: true,
+                                            minimap: { enabled: false },
+                                            fontSize: 11,
+                                            lineNumbers: "off",
+                                            wordWrap: "on",
+                                            scrollBeyondLastLine: false,
+                                          }}
+                                          theme="vs-dark"
+                                        />
+                                      </div>
+                                    </div>
+                                  )}
+                                  {task.output && (
+                                    <div>
+                                      <div className="text-xs font-medium mb-1 text-muted-foreground">Output</div>
+                                      <div className="border rounded-md overflow-hidden" style={{ height: '150px' }}>
+                                        <Editor
+                                          height="150px"
+                                          defaultLanguage="json"
+                                          value={JSON.stringify(task.output, null, 2)}
+                                          options={{
+                                            readOnly: true,
+                                            minimap: { enabled: false },
+                                            fontSize: 11,
+                                            lineNumbers: "off",
+                                            wordWrap: "on",
+                                            scrollBeyondLastLine: false,
+                                          }}
+                                          theme="vs-dark"
+                                        />
+                                      </div>
+                                    </div>
+                                  )}
+                                </div>
+                              </CollapsibleContent>
+                            </Collapsible>
+                          )}
                         </CardContent>
                       </Card>
                     ))}
@@ -388,30 +378,30 @@ export function ExecutionDetailDialog({
               </TabsContent>
 
               {/* Context Tab */}
-              <TabsContent value="context" className="flex-1 overflow-auto">
+              <TabsContent value="context" className="flex-1 overflow-auto min-h-0">
                 <Card>
-                  <CardHeader>
-                    <CardTitle>Workflow Context</CardTitle>
-                    <CardDescription>
+                  <CardHeader className="pb-2 pt-3">
+                    <CardTitle className="text-base">Workflow Context</CardTitle>
+                    <CardDescription className="text-xs">
                       Runtime context including input, config, and task results
                     </CardDescription>
                   </CardHeader>
-                  <CardContent>
+                  <CardContent className="pt-2">
                     {context ? (
-                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                         {context.input && (
                           <div>
-                            <h4 className="font-medium mb-2">Input</h4>
-                            <div className="border rounded-md overflow-hidden" style={{ height: '300px' }}>
+                            <h4 className="font-medium mb-1.5 text-sm">Input</h4>
+                            <div className="border rounded-md overflow-hidden" style={{ height: '250px' }}>
                               <Editor
-                                height="300px"
+                                height="250px"
                                 defaultLanguage="json"
                                 value={JSON.stringify(context.input, null, 2)}
                                 options={{
                                   readOnly: true,
                                   minimap: { enabled: false },
-                                  fontSize: 12,
-                                  lineNumbers: "on",
+                                  fontSize: 11,
+                                  lineNumbers: "off",
                                   wordWrap: "on",
                                   scrollBeyondLastLine: false,
                                 }}
@@ -422,17 +412,17 @@ export function ExecutionDetailDialog({
                         )}
                         {context.config && (
                           <div>
-                            <h4 className="font-medium mb-2">Config</h4>
-                            <div className="border rounded-md overflow-hidden" style={{ height: '300px' }}>
+                            <h4 className="font-medium mb-1.5 text-sm">Config</h4>
+                            <div className="border rounded-md overflow-hidden" style={{ height: '250px' }}>
                               <Editor
-                                height="300px"
+                                height="250px"
                                 defaultLanguage="json"
                                 value={JSON.stringify(context.config, null, 2)}
                                 options={{
                                   readOnly: true,
                                   minimap: { enabled: false },
-                                  fontSize: 12,
-                                  lineNumbers: "on",
+                                  fontSize: 11,
+                                  lineNumbers: "off",
                                   wordWrap: "on",
                                   scrollBeyondLastLine: false,
                                 }}
@@ -443,7 +433,7 @@ export function ExecutionDetailDialog({
                         )}
                       </div>
                     ) : (
-                      <p className="text-muted-foreground">No context data available</p>
+                      <p className="text-muted-foreground text-sm">No context data available</p>
                     )}
                   </CardContent>
                 </Card>
