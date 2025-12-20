@@ -9,6 +9,7 @@ import { Badge } from '@/components/ui/badge';
 import { ArrowLeft, Edit, Play, Trash2, Rocket, RotateCcw } from 'lucide-react';
 import Link from 'next/link';
 import { format } from 'date-fns';
+import { ExecutionDetailDialog } from '@/components/execution/execution-detail-dialog';
 import {
   Dialog,
   DialogContent,
@@ -28,6 +29,8 @@ export default function WorkflowDetailPage() {
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [rollbackDialogOpen, setRollbackDialogOpen] = useState(false);
   const [selectedRollbackVersion, setSelectedRollbackVersion] = useState<number | null>(null);
+  const [executionDetailDialogOpen, setExecutionDetailDialogOpen] = useState(false);
+  const [executionId, setExecutionId] = useState<string | null>(null);
   const queryClient = useQueryClient();
 
   const { data: workflow, isLoading } = useQuery({
@@ -63,7 +66,15 @@ export default function WorkflowDetailPage() {
         input: {},
       }),
     onSuccess: (data) => {
-      router.push(`/executions/${data.run_id}`);
+      setExecutionId(data.run_id);
+      setExecutionDetailDialogOpen(true);
+      queryClient.invalidateQueries({ queryKey: ['executions'] });
+      toast.success('Workflow execution started');
+    },
+    onError: (error) => {
+      toast.error('Failed to execute workflow', {
+        description: error instanceof Error ? error.message : 'Unknown error occurred',
+      });
     },
   });
 
@@ -346,6 +357,19 @@ export default function WorkflowDetailPage() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {executionId && (
+        <ExecutionDetailDialog
+          executionId={executionId}
+          open={executionDetailDialogOpen}
+          onOpenChange={(open) => {
+            setExecutionDetailDialogOpen(open);
+            if (!open) {
+              setExecutionId(null);
+            }
+          }}
+        />
+      )}
     </div>
   );
 }

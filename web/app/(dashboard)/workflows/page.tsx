@@ -27,8 +27,8 @@ import {
 } from '@/components/ui/dialog';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { useState, useEffect } from 'react';
-import { useRouter } from 'next/navigation';
 import { ExecuteWorkflowDialog } from '@/components/workflow/execute-workflow-dialog';
+import { ExecutionDetailDialog } from '@/components/execution/execution-detail-dialog';
 import { toast } from 'sonner';
 
 export default function WorkflowsPage() {
@@ -38,11 +38,12 @@ export default function WorkflowsPage() {
   const [workflowToExecute, setWorkflowToExecute] = useState<WorkflowDefinition | null>(null);
   const [issueSummaryDialogOpen, setIssueSummaryDialogOpen] = useState(false);
   const [workflowForIssueSummary, setWorkflowForIssueSummary] = useState<WorkflowDefinition | null>(null);
+  const [executionDetailDialogOpen, setExecutionDetailDialogOpen] = useState(false);
+  const [executionId, setExecutionId] = useState<string | null>(null);
   const [page, setPage] = useState(1);
   const [searchQuery, setSearchQuery] = useState('');
   const [debouncedSearch, setDebouncedSearch] = useState('');
   const pageSize = 10;
-  const router = useRouter();
   const queryClient = useQueryClient();
 
   // Debounce search query
@@ -107,7 +108,9 @@ export default function WorkflowsPage() {
       toast.success('Workflow execution started');
       setExecuteDialogOpen(false);
       setWorkflowToExecute(null);
-      router.push(`/executions/${data.run_id}`);
+      setExecutionId(data.run_id);
+      setExecutionDetailDialogOpen(true);
+      queryClient.invalidateQueries({ queryKey: ['executions'] });
     },
     onError: (error) => {
       toast.error('Failed to execute workflow', {
@@ -502,6 +505,19 @@ export default function WorkflowsPage() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {executionId && (
+        <ExecutionDetailDialog
+          executionId={executionId}
+          open={executionDetailDialogOpen}
+          onOpenChange={(open) => {
+            setExecutionDetailDialogOpen(open);
+            if (!open) {
+              setExecutionId(null);
+            }
+          }}
+        />
+      )}
     </>
   );
 }

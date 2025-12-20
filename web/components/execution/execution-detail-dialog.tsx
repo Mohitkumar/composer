@@ -6,7 +6,8 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { format, formatDistance } from 'date-fns';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
-import { X, CheckCircle2, XCircle, Clock, PlayCircle, AlertCircle, ChevronDown } from 'lucide-react';
+import { X, CheckCircle2, XCircle, Clock, PlayCircle, AlertCircle, ChevronDown, RotateCw } from 'lucide-react';
+import { toast } from 'sonner';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
@@ -56,6 +57,44 @@ export function ExecutionDetailDialog({
       queryClient.invalidateQueries({ queryKey: ['execution', executionId] });
       queryClient.invalidateQueries({ queryKey: ['executions'] });
       onOpenChange(false);
+    },
+  });
+
+  // Get execution info early for retry mutation
+  const execution = executionDetail?.execution;
+  
+  // Get failed nodes
+  const failedNodes = executionDetail?.task_instances
+    .filter((task) => task.state === 'FAILED')
+    .map((task) => task.node_id) || [];
+  const failedNodeId = failedNodes.length > 0 ? failedNodes[0] : null;
+  const canRetry = (execution?.status === 'FAILED' || execution?.status === 'COMPLETED') && failedNodeId;
+
+  const retryMutation = useMutation({
+    mutationFn: () => {
+      if (!failedNodeId) {
+        throw new Error('No failed node found to retry from');
+      }
+      const currentExecution = executionDetail?.execution;
+      if (!currentExecution) {
+        throw new Error('Execution data not available');
+      }
+      return executionApi.retry(executionId, {
+        node_id: failedNodeId,
+        workflow_version: currentExecution.workflow_version,
+      });
+    },
+    onSuccess: (data) => {
+      toast.success('Workflow retry started');
+      queryClient.invalidateQueries({ queryKey: ['executions'] });
+      // Close current dialog and open the retried execution
+      // The parent component should handle opening the new execution dialog
+      onOpenChange(false);
+    },
+    onError: (error) => {
+      toast.error('Failed to retry workflow', {
+        description: error instanceof Error ? error.message : 'Unknown error occurred',
+      });
     },
   });
 
@@ -115,7 +154,6 @@ export function ExecutionDetailDialog({
     return null;
   }
 
-  const execution = executionDetail?.execution;
   const context = executionDetail?.context;
   const taskInstances = executionDetail?.task_instances || [];
 
@@ -138,17 +176,30 @@ export function ExecutionDetailDialog({
                 {execution?.id ? `Execution ID: ${execution.id}` : 'Loading...'}
               </DialogDescription>
             </div>
-            {canCancel && (
-              <Button
-                variant="destructive"
-                size="sm"
-                onClick={() => cancelMutation.mutate()}
-                disabled={cancelMutation.isPending}
-              >
-                <X className="mr-2 h-4 w-4" />
-                {cancelMutation.isPending ? 'Cancelling...' : 'Cancel'}
-              </Button>
-            )}
+            <div className="flex items-center gap-2">
+              {canRetry && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => retryMutation.mutate()}
+                  disabled={retryMutation.isPending}
+                >
+                  <RotateCw className={`mr-2 h-4 w-4 ${retryMutation.isPending ? 'animate-spin' : ''}`} />
+                  {retryMutation.isPending ? 'Retrying...' : 'Retry'}
+                </Button>
+              )}
+              {canCancel && (
+                <Button
+                  variant="destructive"
+                  size="sm"
+                  onClick={() => cancelMutation.mutate()}
+                  disabled={cancelMutation.isPending}
+                >
+                  <X className="mr-2 h-4 w-4" />
+                  {cancelMutation.isPending ? 'Cancelling...' : 'Cancel'}
+                </Button>
+              )}
+            </div>
           </div>
         </DialogHeader>
 
