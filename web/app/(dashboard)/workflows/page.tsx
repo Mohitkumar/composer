@@ -5,7 +5,7 @@ import { workflowApi, type WorkflowDefinition, type WorkflowIssueSummary } from 
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { Plus, Edit, Trash2, Play, Search, MoreVertical, AlertTriangle, Rocket } from 'lucide-react';
+import { Plus, Edit, Trash2, Play, Search, MoreVertical, AlertTriangle, Rocket, BarChart3 } from 'lucide-react';
 import Link from 'next/link';
 import { format } from 'date-fns';
 import { Badge } from '@/components/ui/badge';
@@ -416,6 +416,17 @@ export default function WorkflowsPage() {
                             disabled={deployMutation.isPending || isLatestVersionDeployed(workflow)}
                           >
                             <Rocket className="h-3.5 w-3.5" />
+                          </Button>
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            className="h-7 w-7 p-0"
+                            asChild
+                            title="View report"
+                          >
+                            <Link href={`/?workflow_id=${workflow.id}`}>
+                              <BarChart3 className="h-3.5 w-3.5" />
+                            </Link>
                           </Button>
                           {workflow.success_rate !== undefined && workflow.success_rate >= 0 && workflow.success_rate < 95 && (
                             <Button
