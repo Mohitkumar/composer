@@ -325,6 +325,16 @@ export const executionApi = {
   cancel: async (id: string, reason?: string): Promise<void> => {
     await apiClient.post(`/executions/${id}/cancel`, { reason });
   },
+
+  retry: async (id: string, data: {
+    node_id: string;
+    input?: Record<string, any>;
+    execution_options?: Record<string, any>;
+    workflow_version?: number;
+  }): Promise<{ message: string; run_id: string }> => {
+    const response = await apiClient.post(`/executions/${id}/retry`, data);
+    return response.data;
+  },
 };
 
 export interface NodeTemplate {

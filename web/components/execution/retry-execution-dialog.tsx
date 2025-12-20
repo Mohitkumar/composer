@@ -1,8 +1,8 @@
 'use client';
 
-import { useState, useEffect } from 'react';
-import { useMutation, useQueryClient } from '@tanstack/react-query';
-import { executionApi, workflowApi, type ExecutionDetail } from '@/lib/api-client';
+import React, { useState, useEffect, useMemo } from 'react';
+import { useMutation, useQueryClient, useQuery } from '@tanstack/react-query';
+import { executionApi, configurationApi, type ExecutionDetail, type Configuration } from '@/lib/api-client';
 import { Button } from '@/components/ui/button';
 import { Label } from '@/components/ui/label';
 import {
@@ -13,9 +13,19 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog';
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from '@/components/ui/popover';
+import { Input } from '@/components/ui/input';
+import { Checkbox } from '@/components/ui/checkbox';
 import Editor from '@monaco-editor/react';
 import { toast } from 'sonner';
 import { useRouter } from 'next/navigation';
+import { ScrollArea } from '@/components/ui/scroll-area';
+import { Badge } from '@/components/ui/badge';
+import { X, ChevronDown, Search } from 'lucide-react';
 
 interface RetryExecutionDialogProps {
   executionDetail: ExecutionDetail;
@@ -33,142 +43,153 @@ export function RetryExecutionDialog({
   const execution = executionDetail.execution;
   const context = executionDetail.context;
 
-  // Get failed nodes
+  // Get failed nodes - use the first failed node for retry
   const failedNodes = executionDetail.task_instances
     .filter((task) => task.state === 'FAILED')
     .map((task) => task.node_id);
 
+  const failedNodeId = failedNodes.length > 0 ? failedNodes[0] : null;
+
+  // Fetch configurations
+  const { data: configurations = [] } = useQuery({
+    queryKey: ['configurations'],
+    queryFn: () => configurationApi.list(),
+  });
+
   const [inputJson, setInputJson] = useState('{}');
-  const [configJson, setConfigJson] = useState('{}');
+  const [selectedConfigIds, setSelectedConfigIds] = useState<Set<string>>(new Set());
   const [inputError, setInputError] = useState<string | null>(null);
-  const [configError, setConfigError] = useState<string | null>(null);
+  const [configSearchQuery, setConfigSearchQuery] = useState('');
+  const [configPopoverOpen, setConfigPopoverOpen] = useState(false);
 
   // Initialize with execution data when dialog opens
   useEffect(() => {
-    if (open && execution) {
-      // Set input from execution or context
-      if (execution.input) {
-        try {
-          const input = typeof execution.input === 'string' 
-            ? JSON.parse(execution.input) 
-            : execution.input;
-          setInputJson(JSON.stringify(input, null, 2));
-        } catch {
-          setInputJson('{}');
-        }
-      } else if (context?.input) {
-        try {
-          const input = typeof context.input === 'string'
-            ? JSON.parse(context.input)
-            : context.input;
-          setInputJson(JSON.stringify(input, null, 2));
-        } catch {
-          setInputJson('{}');
-        }
-      } else {
+    if (!open) {
+      // Reset state when dialog closes
+      setInputJson('{}');
+      setSelectedConfigIds(new Set());
+      setInputError(null);
+      setConfigSearchQuery('');
+      setConfigPopoverOpen(false);
+      return;
+    }
+
+    if (!execution) return;
+
+    // Set input from execution or context (read-only display)
+    if (execution.input) {
+      try {
+        const input = typeof execution.input === 'string' 
+          ? JSON.parse(execution.input) 
+          : execution.input;
+        setInputJson(JSON.stringify(input, null, 2));
+      } catch {
         setInputJson('{}');
       }
-
-      // Set config from context
-      if (context?.config) {
-        try {
-          const config = typeof context.config === 'string'
-            ? JSON.parse(context.config)
-            : context.config;
-          setConfigJson(JSON.stringify(config, null, 2));
-        } catch {
-          setConfigJson('{}');
-        }
-      } else {
-        setConfigJson('{}');
+    } else if (context?.input) {
+      try {
+        const input = typeof context.input === 'string'
+          ? JSON.parse(context.input)
+          : context.input;
+        setInputJson(JSON.stringify(input, null, 2));
+      } catch {
+        setInputJson('{}');
       }
-
-      setInputError(null);
-      setConfigError(null);
+    } else {
+      setInputJson('{}');
     }
-  }, [open, execution, context]);
+
+    setInputError(null);
+    setConfigSearchQuery('');
+    setConfigPopoverOpen(false);
+  }, [open, execution?.id, context?.input]);
+
+  // Initialize selected configs from context when configurations are loaded
+  // Use a ref to track if we've already initialized to prevent re-initialization
+  const configInitializedRef = React.useRef<string | null>(null);
+  
+  useEffect(() => {
+    if (!open) {
+      configInitializedRef.current = null;
+      return;
+    }
+
+    // Create a stable key from execution ID and context config
+    const initKey = `${execution?.id}-${context?.config ? JSON.stringify(context.config) : 'no-config'}`;
+    
+    // Skip if already initialized for this execution/context
+    if (configInitializedRef.current === initKey || !context?.config || configurations.length === 0) {
+      return;
+    }
+
+    // If config is a string, try to parse it
+    let configObj: Record<string, any> = {};
+    try {
+      configObj = typeof context.config === 'string'
+        ? JSON.parse(context.config)
+        : context.config;
+    } catch {
+      // If parsing fails, mark as initialized
+      configInitializedRef.current = initKey;
+      return;
+    }
+
+    // Try to match configs by name or ID
+    const configIds = new Set<string>();
+    for (const config of configurations) {
+      // Check if config name matches any key in configObj or if config_json matches
+      if (configObj[config.name] || JSON.stringify(config.config_json) === JSON.stringify(configObj)) {
+        configIds.add(config.id);
+      }
+    }
+    
+    // Only update if we found matching configs
+    if (configIds.size > 0) {
+      setSelectedConfigIds(configIds);
+    }
+    
+    configInitializedRef.current = initKey;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, execution?.id, context?.config]); // Only depend on stable values
+
+  // Filter configurations based on search query
+  const filteredConfigurations = useMemo(() => {
+    if (!configSearchQuery.trim()) {
+      return configurations;
+    }
+    const query = configSearchQuery.toLowerCase();
+    return configurations.filter(
+      (config) =>
+        config.name.toLowerCase().includes(query) ||
+        config.description?.toLowerCase().includes(query) ||
+        config.type.toLowerCase().includes(query)
+    );
+  }, [configurations, configSearchQuery]);
 
   const retryMutation = useMutation({
     mutationFn: async () => {
-      // Parse and validate input
-      let input: Record<string, any>;
-      try {
-        input = JSON.parse(inputJson);
-      } catch (err: any) {
-        throw new Error(`Invalid input JSON: ${err?.message ?? "Unknown error"}`);
+      if (!failedNodeId) {
+        throw new Error('No failed node found to retry from');
       }
 
-      // Parse and validate config
-      let config: Record<string, any> = {};
-      if (configJson.trim() && configJson !== '{}') {
-        try {
-          config = JSON.parse(configJson);
-        } catch (err: any) {
-          throw new Error(`Invalid config JSON: ${err?.message ?? "Unknown error"}`);
-        }
-      }
-
-      // Build execution options with config
-      const execution_options = Object.keys(config).length > 0 ? config : undefined;
-
-      // Always retry from the first failed node
-      // If no failed nodes, retry from beginning
-      const startNodeId = failedNodes.length > 0 ? failedNodes[0] : undefined;
+      // Build execution options from selected configurations
+      const executionOptions: Record<string, any> = {};
       
-      // If retrying from a specific node, we need to pass context
-      // The backend should use context from the previous execution
-      if (startNodeId) {
-        
-        // Build context from previous execution for nodes before the start node
-        // Use task instances to get completed tasks with outputs
-        const contextTasks: Record<string, any> = {};
-        
-        // First, try to get tasks from context if available
-        if (context && context.tasks) {
-          for (const [nodeId, taskResult] of Object.entries(context.tasks)) {
-            if (taskResult && (taskResult.status === 'COMPLETED' || taskResult.status === 'completed') && taskResult.output) {
-              contextTasks[nodeId] = {
-                status: 'COMPLETED',
-                output: taskResult.output,
-              };
-            }
-          }
-        }
-        
-        // Also check task instances for completed tasks
-        for (const task of executionDetail.task_instances) {
-          if (task.state === 'COMPLETED' && task.output && !contextTasks[task.node_id]) {
-            contextTasks[task.node_id] = {
-              status: 'COMPLETED',
-              output: task.output,
-            };
-          }
-        }
-        
-        // Add context to execution_options so backend can use it
-        if (Object.keys(contextTasks).length > 0) {
-          const optionsWithContext = {
-            ...(execution_options || {}),
-            _retry_context: {
-              from_run_id: execution.id,
-              tasks: contextTasks,
-            },
-          };
-          return workflowApi.execute(execution.workflow_definition_id, {
-            workflow_version: execution.workflow_version,
-            input,
-            execution_options: optionsWithContext,
-            start_node_id: startNodeId,
-          });
+      // Merge selected configurations
+      for (const configId of selectedConfigIds) {
+        const config = configurations.find((c) => c.id === configId);
+        if (config) {
+          // Use config name as key and config_json as value
+          executionOptions[config.name] = config.config_json;
         }
       }
 
-      // Call execute workflow API with same workflow ID and version
-      return workflowApi.execute(execution.workflow_definition_id, {
+      // Call retry API
+      return executionApi.retry(execution.id, {
+        node_id: failedNodeId,
+        input: inputJson !== '{}' ? JSON.parse(inputJson) : undefined,
+        execution_options: Object.keys(executionOptions).length > 0 ? executionOptions : undefined,
         workflow_version: execution.workflow_version,
-        input,
-        execution_options,
-        start_node_id: startNodeId,
       });
     },
     onSuccess: (data) => {
@@ -186,22 +207,13 @@ export function RetryExecutionDialog({
 
   const handleRetry = () => {
     setInputError(null);
-    setConfigError(null);
 
-    // Validate input
-    try {
-      JSON.parse(inputJson);
-    } catch (err: any) {
-      setInputError(`Invalid JSON: ${err?.message ?? "Unknown error"}`);
-      return;
-    }
-
-    // Validate config if not empty
-    if (configJson.trim() && configJson !== '{}') {
+    // Validate input JSON format
+    if (inputJson.trim() && inputJson !== '{}') {
       try {
-        JSON.parse(configJson);
+        JSON.parse(inputJson);
       } catch (err: any) {
-        setConfigError(`Invalid JSON: ${err?.message ?? "Unknown error"}`);
+        setInputError(`Invalid JSON: ${err?.message ?? "Unknown error"}`);
         return;
       }
     }
@@ -209,79 +221,72 @@ export function RetryExecutionDialog({
     retryMutation.mutate();
   };
 
-  const handleFormat = (type: 'input' | 'config') => {
-    try {
-      const json = type === 'input' ? inputJson : configJson;
-      const parsed = JSON.parse(json);
-      const formatted = JSON.stringify(parsed, null, 2);
-      if (type === 'input') {
-        setInputJson(formatted);
-        setInputError(null);
-      } else {
-        setConfigJson(formatted);
-        setConfigError(null);
-      }
-    } catch (err: any) {
-      if (type === 'input') {
-        setInputError(`Invalid JSON: ${err?.message ?? "Unknown error"}`);
-      } else {
-        setConfigError(`Invalid JSON: ${err?.message ?? "Unknown error"}`);
-      }
+  const handleConfigToggle = (configId: string) => {
+    const newSelected = new Set(selectedConfigIds);
+    if (newSelected.has(configId)) {
+      newSelected.delete(configId);
+    } else {
+      newSelected.add(configId);
     }
+    setSelectedConfigIds(newSelected);
   };
+
+  const handleRemoveConfig = (configId: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    const newSelected = new Set(selectedConfigIds);
+    newSelected.delete(configId);
+    setSelectedConfigIds(newSelected);
+  };
+
+  if (!failedNodeId) {
+    return (
+      <Dialog open={open} onOpenChange={onOpenChange}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Cannot Retry</DialogTitle>
+            <DialogDescription>
+              No failed nodes found in this execution. Cannot retry.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button onClick={() => onOpenChange(false)}>Close</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    );
+  }
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-w-4xl max-h-[90vh] flex flex-col">
         <DialogHeader>
           <DialogTitle>Retry Workflow Execution</DialogTitle>
-          <DialogDescription>
-            Edit input and configuration, then retry from a specific node
-          </DialogDescription>
         </DialogHeader>
 
         <div className="flex-1 overflow-auto flex flex-col gap-4">
           {/* Retry Info */}
-          {failedNodes.length > 0 && (
-            <div className="space-y-1">
-              <p className="text-sm font-medium">Retry from failed node</p>
-              <p className="text-xs text-muted-foreground">
-                Workflow will retry from node: <span className="font-mono">{failedNodes[0]}</span>. 
-                Context from previous execution will be used.
-              </p>
-            </div>
-          )}
+          <div className="space-y-1 p-3 bg-muted rounded-md">
+            <p className="text-sm font-medium">Retry : {failedNodeId}</p>
+          </div>
 
-          {/* Input JSON Section */}
+          {/* Input JSON Section (Read-only display) */}
           <div className="space-y-2">
             <div className="flex items-center justify-between">
-              <Label htmlFor="retry-input-json">Input JSON</Label>
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                onClick={() => handleFormat('input')}
-              >
-                Format JSON
-              </Button>
+              <Label htmlFor="retry-input-json">Input (from original execution)</Label>
             </div>
-            <div className="border rounded-md overflow-hidden" style={{ height: '250px' }}>
+            <div className="border rounded-md overflow-hidden" style={{ height: '200px' }}>
               <Editor
-                height="250px"
+                height="200px"
                 defaultLanguage="json"
                 value={inputJson}
-                onChange={(value) => {
-                  setInputJson(value || '{}');
-                  setInputError(null);
-                }}
+                onChange={() => {}} // Read-only
                 options={{
                   minimap: { enabled: false },
                   fontSize: 14,
                   lineNumbers: "on",
                   tabSize: 2,
                   wordWrap: "on",
-                  formatOnPaste: true,
-                  formatOnType: true,
+                  readOnly: true,
                   automaticLayout: true,
                   scrollBeyondLastLine: false,
                 }}
@@ -293,45 +298,114 @@ export function RetryExecutionDialog({
             )}
           </div>
 
-          {/* Config JSON Section */}
+          {/* Configuration Selector Section */}
           <div className="space-y-2">
-            <div className="flex items-center justify-between">
-              <Label htmlFor="retry-config-json">Config JSON (optional)</Label>
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                onClick={() => handleFormat('config')}
-              >
-                Format JSON
-              </Button>
-            </div>
-            <div className="border rounded-md overflow-hidden" style={{ height: '250px' }}>
-              <Editor
-                height="250px"
-                defaultLanguage="json"
-                value={configJson}
-                onChange={(value) => {
-                  setConfigJson(value || '{}');
-                  setConfigError(null);
-                }}
-                options={{
-                  minimap: { enabled: false },
-                  fontSize: 14,
-                  lineNumbers: "on",
-                  tabSize: 2,
-                  wordWrap: "on",
-                  formatOnPaste: true,
-                  formatOnType: true,
-                  automaticLayout: true,
-                  scrollBeyondLastLine: false,
-                }}
-                theme="vs-dark"
-              />
-            </div>
-            {configError && (
-              <p className="text-sm text-destructive">{configError}</p>
+            <Label>Configuration (optional)</Label>
+            <p className="text-xs text-muted-foreground">
+              Select configurations to use for this retry. If not selected, the saved context will be used.
+            </p>
+            
+            {/* Selected Configurations as Tags */}
+            {selectedConfigIds.size > 0 && (
+              <div className="flex flex-wrap gap-2 p-2 border rounded-md min-h-[2.5rem]">
+                {Array.from(selectedConfigIds).map((configId) => {
+                  const config = configurations.find((c) => c.id === configId);
+                  if (!config) return null;
+                  return (
+                    <Badge
+                      key={configId}
+                      variant="secondary"
+                      className="flex items-center gap-1 pr-1"
+                    >
+                      <span>{config.name}</span>
+                      <button
+                        type="button"
+                        onClick={(e) => handleRemoveConfig(configId, e)}
+                        className="ml-1 rounded-full hover:bg-secondary-foreground/20 p-0.5"
+                      >
+                        <X className="h-3 w-3" />
+                      </button>
+                    </Badge>
+                  );
+                })}
+              </div>
             )}
+
+            {/* Configuration Selector Popover */}
+            <Popover open={configPopoverOpen} onOpenChange={setConfigPopoverOpen}>
+              <PopoverTrigger asChild>
+                <Button
+                  variant="outline"
+                  role="combobox"
+                  className="w-full justify-between"
+                >
+                  <span className="text-muted-foreground">
+                    {selectedConfigIds.size > 0
+                      ? `${selectedConfigIds.size} configuration${selectedConfigIds.size > 1 ? "s" : ""} selected`
+                      : "Select configurations..."}
+                  </span>
+                  <ChevronDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
+                </Button>
+              </PopoverTrigger>
+              <PopoverContent className="w-[400px] p-0" align="start">
+                <div className="flex flex-col">
+                  {/* Search Input */}
+                  <div className="flex items-center border-b px-3">
+                    <Search className="mr-2 h-4 w-4 shrink-0 opacity-50" />
+                    <Input
+                      placeholder="Search configurations..."
+                      value={configSearchQuery}
+                      onChange={(e) => setConfigSearchQuery(e.target.value)}
+                      className="border-0 focus-visible:ring-0 focus-visible:ring-offset-0"
+                    />
+                  </div>
+
+                  {/* Configuration List */}
+                  <ScrollArea className="max-h-[300px]">
+                    {filteredConfigurations.length === 0 ? (
+                      <div className="p-4 text-center text-sm text-muted-foreground">
+                        {configSearchQuery
+                          ? "No configurations found"
+                          : "No configurations available"}
+                      </div>
+                    ) : (
+                      <div className="p-2">
+                        {filteredConfigurations.map((config) => (
+                          <div
+                            key={config.id}
+                            className="flex items-start space-x-3 p-2 rounded-md hover:bg-accent cursor-pointer"
+                            onClick={() => handleConfigToggle(config.id)}
+                          >
+                            <Checkbox
+                              id={`config-${config.id}`}
+                              checked={selectedConfigIds.has(config.id)}
+                              onCheckedChange={() => handleConfigToggle(config.id)}
+                              className="mt-0.5"
+                            />
+                            <div className="flex-1">
+                              <label
+                                htmlFor={`config-${config.id}`}
+                                className="text-sm font-medium leading-none cursor-pointer"
+                              >
+                                {config.name}
+                              </label>
+                              {config.description && (
+                                <p className="text-xs text-muted-foreground mt-1">
+                                  {config.description}
+                                </p>
+                              )}
+                              <p className="text-xs text-muted-foreground mt-1">
+                                Type: {config.type}
+                              </p>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </ScrollArea>
+                </div>
+              </PopoverContent>
+            </Popover>
           </div>
         </div>
 
@@ -345,7 +419,7 @@ export function RetryExecutionDialog({
           </Button>
           <Button
             onClick={handleRetry}
-            disabled={retryMutation.isPending || !!inputError || !!configError}
+            disabled={retryMutation.isPending || !!inputError}
           >
             {retryMutation.isPending ? 'Retrying...' : 'Retry Workflow'}
           </Button>
@@ -354,4 +428,3 @@ export function RetryExecutionDialog({
     </Dialog>
   );
 }
-

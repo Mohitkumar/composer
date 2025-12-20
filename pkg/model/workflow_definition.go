@@ -147,3 +147,37 @@ func (wf *WorkflowDefinitionSpec) HasOutgoingEdges(nodeID string) bool {
 	}
 	return false
 }
+
+// FindAllDescendantNodes returns all nodes that are reachable from the given nodeID (transitive descendants only, not including the starting node).
+// Uses BFS to traverse the DAG and collect all descendant node IDs.
+func (wf *WorkflowDefinitionSpec) FindAllDescendantNodes(nodeID string) []string {
+	visited := make(map[string]bool)
+	queue := []string{nodeID}
+	descendants := make([]string, 0)
+
+	// Build adjacency list for efficient traversal
+	adjacencyList := make(map[string][]string)
+	for _, edge := range wf.Edges {
+		adjacencyList[edge.From] = append(adjacencyList[edge.From], edge.To)
+	}
+
+	// Mark starting node as visited (but don't add it to descendants)
+	visited[nodeID] = true
+
+	// BFS traversal starting from children of the starting node
+	for len(queue) > 0 {
+		current := queue[0]
+		queue = queue[1:]
+
+		// Add all children to queue and descendants list
+		for _, child := range adjacencyList[current] {
+			if !visited[child] {
+				visited[child] = true
+				queue = append(queue, child)
+				descendants = append(descendants, child)
+			}
+		}
+	}
+
+	return descendants
+}

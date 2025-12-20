@@ -67,36 +67,7 @@ func (c *Coordinator) StartWorkflow(ctx context.Context, p *model.StartWorkflowR
 			scheduledAt = time.UnixMilli(p.StartedAtUnixMs)
 		}
 
-		// If retrying from a specific node, use context from previous execution if provided
 		runContext := c.newRunContext(p.Input, p.ExecutionOptions)
-		if p.StartNodeID != "" && len(p.ExecutionOptions) > 0 {
-			// Check if execution_options contains retry context
-			var execOpts map[string]interface{}
-			if err := json.Unmarshal(p.ExecutionOptions, &execOpts); err == nil {
-				if retryContext, ok := execOpts["_retry_context"].(map[string]interface{}); ok {
-					if tasks, ok := retryContext["tasks"].(map[string]interface{}); ok {
-						// Merge completed tasks from previous execution into context
-						runContext.Tasks = make(map[string]*model.StepResult)
-						for nodeID, taskData := range tasks {
-							if taskMap, ok := taskData.(map[string]interface{}); ok {
-								if status, ok := taskMap["status"].(string); ok && status == "COMPLETED" {
-									if output, ok := taskMap["output"]; ok {
-										outputJSON, _ := json.Marshal(output)
-										runContext.Tasks[nodeID] = &model.StepResult{
-											Status: model.TaskInstanceStatus(status),
-											Output: outputJSON,
-										}
-									}
-								}
-							}
-						}
-						logger.Info().
-							Int("tasks_count", len(runContext.Tasks)).
-							Msg("using context from previous execution for retry")
-					}
-				}
-			}
-		}
 		taskInput, err := c.resolveNodeInputFromSpecRaw(startNode.Spec, runContext, logger)
 		if err != nil {
 			return err
@@ -910,6 +881,196 @@ func (c *Coordinator) markWorkflowFailedWithReason(ctx context.Context, runID, w
 
 		return nil
 	})
+}
+
+// RetryWorkflowInstance retries a workflow instance from a specific node
+// It accepts optional config and input to replace the saved context, or uses the saved context if not provided
+// If workflowVersion is 0, it uses the deployed version
+func (c *Coordinator) RetryWorkflowInstance(ctx context.Context, p *model.RetryWorkflowRequest) error {
+	// Start tracing span
+	ctx, span := util.StartWorkflowSpan(ctx, "retry", "", p.RunID)
+	defer util.EndSpan(span, nil)
+
+	logger := c.Logger.With().
+		Str("run_id", p.RunID).
+		Str("node_id", p.NodeID).
+		Int("workflow_version", p.WorkflowVersion).
+		Logger()
+
+	logger.Info().Msg("retrying workflow instance")
+
+	startTime := time.Now()
+
+	// Get workflow instance to retrieve workflow ID and current version
+	var workflowID string
+	var currentWorkflowVersion int
+	var currentStatus string
+	err := c.DB.QueryRow(ctx,
+		`SELECT workflow_definition_id, workflow_version, status FROM workflow_runs WHERE id=$1 AND deleted_at IS NULL`,
+		p.RunID).Scan(&workflowID, &currentWorkflowVersion, &currentStatus)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("workflow instance not found: %s", p.RunID)
+		}
+		logger.Error().Err(err).Msg("failed to get workflow instance")
+		util.RecordError(span, err)
+		return fmt.Errorf("failed to get workflow instance: %w", err)
+	}
+
+	logger = logger.With().Str("workflow_id", workflowID).Logger()
+
+	// Determine workflow version to use
+	workflowVersion := p.WorkflowVersion
+	if workflowVersion == 0 {
+		// Get deployed version
+		deployedWorkflow, err := c.GetWorkflow(ctx, workflowID, 0)
+		if err != nil {
+			logger.Error().Err(err).Msg("failed to get deployed workflow version")
+			util.RecordError(span, err)
+			return fmt.Errorf("failed to get deployed workflow version: %w", err)
+		}
+		if !deployedWorkflow.Deployed {
+			return fmt.Errorf("workflow has no deployed version")
+		}
+		workflowVersion = deployedWorkflow.Version
+		logger = logger.With().Int("workflow_version", workflowVersion).Logger()
+	}
+
+	// Load workflow definition to get nodes and edges (before transaction)
+	wfSpec, err := c.loadAndParseWorkflowSpec(ctx, workflowID, workflowVersion)
+	if err != nil {
+		logger.Error().Err(err).Msg("failed to load workflow definition")
+		util.RecordError(span, err)
+		return err
+	}
+
+	// Find the restart node
+	restartNode := wfSpec.GetNodeByID(p.NodeID)
+	if restartNode == nil {
+		return fmt.Errorf("node %s not found in workflow definition", p.NodeID)
+	}
+
+	// Find all descendant nodes to clean up
+	descendantNodeIDs := wfSpec.FindAllDescendantNodes(p.NodeID)
+
+	err = c.ExecuteWithTransaction(ctx, span, logger, func(ctx context.Context, tx pgx.Tx) error {
+		// Load current run context
+		var workflowInput json.RawMessage
+		var runContextJSON json.RawMessage
+		err := tx.QueryRow(ctx, `SELECT input_json, context_json FROM workflow_runs WHERE id=$1 FOR UPDATE`, p.RunID).
+			Scan(&workflowInput, &runContextJSON)
+		if err != nil {
+			logger.Error().Err(err).Msg("failed to load workflow run context")
+			util.RecordError(span, err)
+			return fmt.Errorf("failed to load workflow run context: %w", err)
+		}
+
+		// Merge and update run context
+		runContext, err := c.mergeRunContext(workflowInput, runContextJSON)
+		if err != nil {
+			logger.Error().Err(err).Msg("failed to merge run context")
+			util.RecordError(span, err)
+			return err
+		}
+
+		// Update input and config if provided
+		if len(p.Input) > 0 {
+			runContext.Input = p.Input
+			workflowInput = p.Input
+		}
+		if len(p.ExecutionOptions) > 0 {
+			runContext.Config = p.ExecutionOptions
+		}
+
+		// Remove task results for descendant nodes (they will be re-executed)
+		for _, nodeID := range descendantNodeIDs {
+			delete(runContext.Tasks, nodeID)
+		}
+		// Also remove the restart node itself if it has results
+		delete(runContext.Tasks, p.NodeID)
+
+		// Marshal updated context
+		runContextBytes, err := json.Marshal(runContext)
+		if err != nil {
+			logger.Error().Err(err).Msg("failed to marshal run context")
+			util.RecordError(span, err)
+			return fmt.Errorf("failed to marshal run context: %w", err)
+		}
+
+		// Update workflow run: reset status to RUNNING, update context and input, update version if changed
+		_, err = tx.Exec(ctx,
+			`UPDATE workflow_runs 
+			 SET status='RUNNING', 
+			     context_json=$1::jsonb, 
+			     input_json=$2::jsonb,
+			     workflow_version=$3,
+			     completed_at=NULL,
+			     updated_at=now() 
+			 WHERE id=$4`,
+			runContextBytes, workflowInput, workflowVersion, p.RunID)
+		if err != nil {
+			logger.Error().Err(err).Msg("failed to update workflow run")
+			util.RecordError(span, err)
+			return fmt.Errorf("failed to update workflow run: %w", err)
+		}
+
+		// Delete task instances for restart node and all descendant nodes
+		nodeIDsToDelete := append(descendantNodeIDs, p.NodeID)
+		if len(nodeIDsToDelete) > 0 {
+			_, err = tx.Exec(ctx,
+				`DELETE FROM task_instances WHERE run_id=$1 AND node_id = ANY($2)`,
+				p.RunID, nodeIDsToDelete)
+			if err != nil {
+				logger.Error().Err(err).Msg("failed to delete task instances")
+				util.RecordError(span, err)
+				return fmt.Errorf("failed to delete task instances: %w", err)
+			}
+		}
+
+		// Create new task instance for restart node
+		taskID := uuid.New().String()
+		scheduledAt := time.Now()
+
+		taskInput, err := c.resolveNodeInputFromSpecRaw(restartNode.Spec, runContext, logger)
+		if err != nil {
+			return err
+		}
+
+		taskLogger := logger.With().
+			Str("task_id", taskID).
+			Str("node_id", restartNode.NodeID).
+			Str("node_type", restartNode.Runtime).
+			Logger()
+
+		if err := c.insertTaskInstance(ctx, tx, taskID, p.RunID, restartNode, taskInput, scheduledAt, taskLogger, span); err != nil {
+			return err
+		}
+		c.recordTaskCreated(ctx, taskLogger, span, taskID, p.RunID, restartNode)
+
+		if err := c.insertTaskOutbox(ctx, tx, taskID, p.RunID, restartNode, taskInput, taskLogger, span); err != nil {
+			return err
+		}
+
+		logger.Debug().Msg("workflow retry initialized successfully")
+		return nil
+	})
+
+	if err != nil {
+		return err
+	}
+
+	duration := time.Since(startTime)
+	logger.Info().
+		Dur("duration_ms", duration).
+		Msg("workflow retry started successfully")
+
+	util.RecordWorkflowStarted(ctx, workflowID, p.RunID)
+	util.SetSpanAttributes(span,
+		util.AttributeInt("workflow.duration_ms", duration.Milliseconds()),
+		util.Attribute("workflow.retry_node_id", p.NodeID),
+	)
+
+	return nil
 }
 
 // ExecuteWithTransaction executes a function within a transaction

@@ -535,6 +535,46 @@ func (h *handlers) cancelExecution(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]string{"message": "Execution cancelled successfully"})
 }
 
+func (h *handlers) retryExecution(w http.ResponseWriter, r *http.Request) {
+	runID := chi.URLParam(r, "id")
+	if runID == "" {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "run_id is required in path"})
+		return
+	}
+
+	var p model.RetryWorkflowRequest
+	if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+
+	// Use run_id from path parameter (ignore if provided in body)
+	p.RunID = runID
+
+	// Validate that node_id is provided
+	if p.NodeID == "" {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "node_id is required"})
+		return
+	}
+
+	if err := h.coordinator.RetryWorkflowInstance(r.Context(), &p); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusAccepted)
+	json.NewEncoder(w).Encode(map[string]string{"message": "Workflow retry started successfully", "run_id": runID})
+}
+
 // Template handlers
 
 func (h *handlers) listNodeTemplates(w http.ResponseWriter, r *http.Request) {

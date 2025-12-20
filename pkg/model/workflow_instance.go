@@ -64,6 +64,15 @@ type TaskInstanceRecord struct {
 	LeaseExpiresAt *time.Time         `json:"lease_expires_at,omitempty"`
 }
 
+// RetryWorkflowRequest represents a request to retry a workflow instance
+type RetryWorkflowRequest struct {
+	RunID            string          `json:"run_id"`
+	Input            json.RawMessage `json:"input,omitempty"`             // Optional: new input to replace saved context
+	ExecutionOptions json.RawMessage `json:"execution_options,omitempty"` // Optional: new config to replace saved context
+	NodeID           string          `json:"node_id"`                     // Required: node from which to restart
+	WorkflowVersion  int             `json:"workflow_version,omitempty"`  // Optional: if 0, use deployed version
+}
+
 // ExecutionDetailResponse represents comprehensive execution details
 type ExecutionDetailResponse struct {
 	Execution     *WorkflowInstanceRecord `json:"execution"`
