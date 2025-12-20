@@ -72,7 +72,7 @@ export default function EditWorkflowPage() {
   };
 
   return (
-    <div className="h-[calc(100vh-8rem)]">
+    <div className="h-[calc(100vh-8rem)] flex flex-col">
       <JsonWorkflowEditor
         initialSpec={spec}
         initialName={workflow.name}

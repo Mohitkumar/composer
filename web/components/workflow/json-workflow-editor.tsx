@@ -9,12 +9,11 @@ import { Input } from "@/components/ui/input";
 import Editor from "@monaco-editor/react";
 import type { Monaco } from "@monaco-editor/react";
 import { useQuery } from "@tanstack/react-query";
-import { Plus } from "lucide-react";
+import { Plus, CheckCircle2, XCircle, AlertCircle } from "lucide-react";
 import { validateWorkflowSpec, type ValidationResult } from "@/lib/workflow-validation";
 import { SAMPLE_TEMPLATE, DEFAULT_TEMPLATE } from "@/lib/workflow-constants";
 import { createCompletionProvider } from "@/components/workflow/monaco-completion-provider";
 import { NodeTemplateDialog } from "@/components/workflow/node-template-dialog";
-import { ValidationResults } from "@/components/workflow/validation-results";
 import * as yaml from "yaml";
 
 interface JsonWorkflowEditorProps {
@@ -49,12 +48,13 @@ export function JsonWorkflowEditor({
     return isNew ? SAMPLE_TEMPLATE : DEFAULT_TEMPLATE;
   });
   const [validationResult, setValidationResult] = useState<ValidationResult | null>(null);
-  const [showWarnings, setShowWarnings] = useState(true);
   const [nodeTemplateDialogOpen, setNodeTemplateDialogOpen] = useState(false);
   const [selectedRuntime, setSelectedRuntime] = useState<string>("");
   const editorRef = useRef<any>(null);
   const monacoRef = useRef<Monaco | null>(null);
   const completionProviderRef = useRef<any>(null);
+  const editorContainerRef = useRef<HTMLDivElement>(null);
+  const [editorHeight, setEditorHeight] = useState<number>(600);
   // Store configurations in refs so completion provider can always access latest values
   const configurationsRef = useRef<any[]>([]);
   const configMapByNameRef = useRef<Map<string, any>>(new Map());
@@ -241,6 +241,53 @@ export function JsonWorkflowEditor({
     }
   }, [name, isNew, workflowId]);
 
+  // Calculate editor height based on container
+  useEffect(() => {
+    const updateEditorHeight = () => {
+      if (editorContainerRef.current) {
+        const height = editorContainerRef.current.clientHeight;
+        if (height > 0) {
+          setEditorHeight(height);
+          // Update editor layout if editor is mounted
+          if (editorRef.current) {
+            setTimeout(() => {
+              editorRef.current?.layout();
+            }, 0);
+          }
+        }
+      }
+    };
+
+    // Initial calculation with a small delay to ensure DOM is ready
+    const timer = setTimeout(updateEditorHeight, 100);
+
+    // Update on resize
+    const resizeObserver = new ResizeObserver(() => {
+      updateEditorHeight();
+    });
+    if (editorContainerRef.current) {
+      resizeObserver.observe(editorContainerRef.current);
+    }
+
+    // Also listen to window resize
+    window.addEventListener('resize', updateEditorHeight);
+
+    return () => {
+      clearTimeout(timer);
+      resizeObserver.disconnect();
+      window.removeEventListener('resize', updateEditorHeight);
+    };
+  }, []);
+
+  // Update editor layout when height changes
+  useEffect(() => {
+    if (editorRef.current && editorHeight > 0) {
+      setTimeout(() => {
+        editorRef.current?.layout();
+      }, 0);
+    }
+  }, [editorHeight]);
+
   const insertNodeTemplate = async (template: NodeTemplate) => {
     try {
       const currentSpec = yaml.parse(yamlText) as WorkflowDefinitionSpec;
@@ -262,9 +309,9 @@ export function JsonWorkflowEditor({
   };
 
   return (
-    <div className="flex flex-col gap-2 h-[calc(100vh-8rem)]">
+    <div className="flex flex-col h-full overflow-hidden">
       {/* Header: ID/Name on left, buttons on right - compact layout */}
-      <div className="flex items-center gap-3 py-1">
+      <div className="flex items-center gap-3 py-1 flex-shrink-0">
         <div className="flex-1 grid grid-cols-1 md:grid-cols-2 gap-3">
           <div className="space-y-1">
             <Label htmlFor="workflow-id" className="text-xs text-muted-foreground">Workflow ID</Label>
@@ -311,13 +358,35 @@ export function JsonWorkflowEditor({
         </div>
       </div>
 
-      <div className="flex-1 min-h-0 flex flex-col">
-        <Label htmlFor="workflow-yaml" className="mb-0.5 block text-xs text-muted-foreground">
-          Workflow YAML
-        </Label>
-        <div className="flex-1 border rounded-md overflow-hidden">
+      <div className="flex-1 min-h-0 flex flex-col mt-2 overflow-hidden">
+        <div className="flex items-center justify-between mb-0.5 flex-shrink-0">
+          <Label htmlFor="workflow-yaml" className="text-xs text-muted-foreground">
+            Workflow YAML
+          </Label>
+          {validationResult && (
+            <div className="flex items-center gap-1.5">
+              {validationResult.errors.length > 0 ? (
+                <div className="flex items-center gap-1 text-destructive text-xs">
+                  <XCircle className="h-3.5 w-3.5" />
+                  <span>{validationResult.errors.length} error{validationResult.errors.length !== 1 ? 's' : ''}</span>
+                </div>
+              ) : validationResult.warnings.length > 0 ? (
+                <div className="flex items-center gap-1 text-yellow-600 dark:text-yellow-400 text-xs">
+                  <AlertCircle className="h-3.5 w-3.5" />
+                  <span>{validationResult.warnings.length} warning{validationResult.warnings.length !== 1 ? 's' : ''}</span>
+                </div>
+              ) : validationResult.isValid ? (
+                <div className="flex items-center gap-1 text-emerald-600 dark:text-emerald-400 text-xs">
+                  <CheckCircle2 className="h-3.5 w-3.5" />
+                  <span>Valid</span>
+                </div>
+              ) : null}
+            </div>
+          )}
+        </div>
+        <div ref={editorContainerRef} className="flex-1 border rounded-md overflow-hidden min-h-0 w-full">
           <Editor
-            height="100%"
+            height={editorHeight}
             defaultLanguage="yaml"
             value={yamlText}
             onChange={(value) => setYamlText(value || "")}
@@ -337,13 +406,6 @@ export function JsonWorkflowEditor({
           />
         </div>
       </div>
-
-      {/* Validation results at the bottom */}
-      <ValidationResults
-        validationResult={validationResult}
-        showWarnings={showWarnings}
-        onToggleWarnings={() => setShowWarnings(!showWarnings)}
-      />
 
       <NodeTemplateDialog
         open={nodeTemplateDialogOpen}

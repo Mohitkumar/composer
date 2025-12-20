@@ -173,7 +173,7 @@ export default function NewWorkflowPage() {
         </DialogContent>
       </Dialog>
 
-      <div className="h-[calc(100vh-8rem)]">
+      <div className="h-[calc(100vh-8rem)] flex flex-col">
         <JsonWorkflowEditor
           onSave={handleSave}
           isSaving={isSaving}

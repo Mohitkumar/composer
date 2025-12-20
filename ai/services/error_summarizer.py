@@ -1,12 +1,11 @@
 """
-Error summarization service using LangChain Agent with Google Gemini 2.5.
-Uses the create_agent interface with structured output.
+Error summarization service using LangChain with Google Gemini 2.5.
+Uses structured output for reliable responses.
 """
 import os
 from typing import List
 from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain.agents import create_agent
-from langchain.agents.structured_output import ProviderStrategy
+from langchain_core.prompts import ChatPromptTemplate
 from pydantic import BaseModel, Field
 
 # Example workflow structure for context
@@ -80,29 +79,29 @@ class ErrorSummaryOutput(BaseModel):
 
 
 class ErrorSummarizer:
-    """Service for summarizing workflow execution errors using AI Agent."""
+    """Service for summarizing workflow execution errors using AI."""
 
     def __init__(self):
-        """Initialize the error summarizer with LangChain Agent and Google Gemini 2.5."""
+        """Initialize the error summarizer with LangChain and Google Gemini 2.5."""
         api_key = os.getenv("GOOGLE_API_KEY")
         if not api_key:
             raise ValueError("GOOGLE_API_KEY environment variable is required")
 
         # Use Google Gemini 2.5 Flash directly
-        model = ChatGoogleGenerativeAI(
+        self.llm = ChatGoogleGenerativeAI(
             model="gemini-2.0-flash-exp",
             google_api_key=api_key,
             temperature=0.3,  # Lower temperature for more focused summaries
         )
 
-        # Create agent with structured output using ProviderStrategy
-        # Gemini supports native structured output via JSON Schema
-        self.agent = create_agent(
-            model=model,
-            tools=[],  # No tools needed for summarization
-            system_prompt="You are an expert workflow debugging assistant. Analyze error messages from workflow executions and provide concise, actionable summaries.",
-            response_format=ProviderStrategy(ErrorSummaryOutput),
+        # Create prompt template
+        self.prompt = ChatPromptTemplate.from_template(ERROR_SUMMARY_PROMPT)
+        
+        # Create structured output chain
+        self.structured_llm = self.llm.with_structured_output(
+            ErrorSummaryOutput, method="json_schema"
         )
+        self.chain = self.prompt | self.structured_llm
 
     async def summarize(self, workflow_id: str, errors: List[str]) -> str:
         """
@@ -121,36 +120,18 @@ class ErrorSummarizer:
         # Format errors for the prompt
         errors_text = "\n".join([f"- {error}" for error in errors])
 
-        # Build the user message with all context
-        user_message = f"""Workflow ID: {workflow_id}
-
-Workflow Structure Context:
-{WORKFLOW_EXAMPLE}
-
-Error Messages from Failed Executions:
-{errors_text}
-
-Please provide:
-1. A brief summary of the main issue(s) (2-3 sentences)
-2. Common patterns or root causes identified
-3. Suggested fixes or areas to investigate
-
-Format your response as a clear, concise summary that helps developers quickly understand and fix the issues. Focus on actionable insights rather than just listing errors."""
-
         try:
-            # Use agent with structured output
-            result = await self.agent.ainvoke(
+            # Invoke the chain with structured output
+            result = await self.chain.ainvoke(
                 {
-                    "messages": [{"role": "user", "content": user_message}]
+                    "workflow_id": workflow_id,
+                    "workflow_example": WORKFLOW_EXAMPLE,
+                    "errors": errors_text,
                 }
             )
             
-            # Extract structured response
-            if "structured_response" in result:
-                return result["structured_response"].summary.strip()
-            else:
-                # Fallback if structured_response not available
-                return str(result.get("output", result)).strip()
+            # Extract summary from structured response
+            return result.summary.strip()
         except Exception as e:
             # Fallback: return a simple summary if AI call fails
             error_count = len(errors)
