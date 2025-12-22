@@ -1,0 +1,44 @@
+# AWS Configuration
+aws_region   = "us-east-1"
+environment  = "production"
+project_name = "composer"
+
+# Domain Configuration
+domain_name   = "fleetconnect.ai"
+api_subdomain = "api"
+app_subdomain = "app"
+
+# VPC Configuration
+vpc_cidr            = "10.0.0.0/16"
+public_subnet_cidrs = ["10.0.1.0/24", "10.0.2.0/24"]
+private_subnet_cidrs = ["10.0.10.0/24", "10.0.20.0/24"]
+
+# RDS Configuration
+db_name              = "composer"
+db_username          = "composer"
+db_password          = "CHANGE_ME_SECURE_PASSWORD" # Use AWS Secrets Manager in production
+rds_instance_class   = "db.t3.medium"
+rds_allocated_storage = 100
+rds_multi_az         = false
+
+# ElastiCache Configuration
+redis_node_type            = "cache.t3.medium"
+redis_num_cache_nodes      = 1
+redis_parameter_group_name = "default.redis7"
+
+# ECS Configuration
+coordinator_replicas = 2
+worker_replicas      = 1
+ecr_repository_url   = "YOUR_ACCOUNT_ID.dkr.ecr.us-east-1.amazonaws.com/composer"
+image_tag            = "latest"
+otel_collector_image = "public.ecr.aws/aws-observability/aws-otel-collector:latest"
+
+# Terraform Backend (uncomment and configure)
+# terraform {
+#   backend "s3" {
+#     bucket = "your-terraform-state-bucket"
+#     key    = "composer/terraform.tfstate"
+#     region = "us-east-1"
+#   }
+# }
+
