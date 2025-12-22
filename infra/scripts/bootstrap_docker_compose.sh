@@ -1,6 +1,10 @@
 #!/bin/bash
 # Bootstrap script for local development environment
 # This script sets up the local development environment using Docker Compose
+#
+# Usage:
+#   ./bootstrap_docker_compose.sh          # Build images and start services
+#   ./bootstrap_docker_compose.sh --no-build  # Skip building images, use existing ones
 
 set -euo pipefail
 
@@ -9,6 +13,30 @@ RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
+
+# Parse command line arguments
+SKIP_BUILD=false
+for arg in "$@"; do
+    case $arg in
+        --no-build|--skip-build|-n)
+            SKIP_BUILD=true
+            shift
+            ;;
+        -h|--help)
+            echo "Usage: $0 [OPTIONS]"
+            echo ""
+            echo "Options:"
+            echo "  --no-build, --skip-build, -n    Skip building Docker images"
+            echo "  -h, --help                       Show this help message"
+            exit 0
+            ;;
+        *)
+            echo -e "${RED}Unknown option: $arg${NC}"
+            echo "Use -h or --help for usage information"
+            exit 1
+            ;;
+    esac
+done
 
 # Get the directory where this script is located
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -62,13 +90,21 @@ if $DOCKER_COMPOSE_CMD ps 2>/dev/null | grep -q "Up"; then
     fi
 fi
 
-# Build images
-echo -e "${YELLOW}Rebuilding Docker images...${NC}"
-$DOCKER_COMPOSE_CMD build --pull
+# Build images (if not skipped)
+if [ "$SKIP_BUILD" = false ]; then
+    echo -e "${YELLOW}Rebuilding Docker images...${NC}"
+    $DOCKER_COMPOSE_CMD build --pull
+else
+    echo -e "${YELLOW}Skipping image build (using existing images)...${NC}"
+fi
 
 # Start services
 echo -e "${YELLOW}Starting services...${NC}"
-$DOCKER_COMPOSE_CMD up --build -d
+if [ "$SKIP_BUILD" = false ]; then
+    $DOCKER_COMPOSE_CMD up --build -d
+else
+    $DOCKER_COMPOSE_CMD up -d
+fi
 
 # Wait for services to be healthy
 echo -e "${YELLOW}Waiting for services to be ready...${NC}"
@@ -98,6 +134,22 @@ for i in {1..30}; do
     echo -n "."
     sleep 1
 done
+
+# Check and run database migrations if needed
+echo -e "\n${YELLOW}Checking database migrations...${NC}"
+MIGRATIONS_SCRIPT="$DOCKER_DIR/run-migrations.sh"
+if [ -f "$MIGRATIONS_SCRIPT" ]; then
+    # Check if workflow_definitions table exists
+    if ! $DOCKER_COMPOSE_CMD exec -T postgres psql -U postgres -d composer -tAc "SELECT 1 FROM information_schema.tables WHERE table_name='workflow_definitions'" | grep -q 1; then
+        echo -e "${YELLOW}Database tables not found. Running migrations...${NC}"
+        bash "$MIGRATIONS_SCRIPT"
+        echo -e "${GREEN}✓ Migrations completed${NC}"
+    else
+        echo -e "${GREEN}✓ Database tables already exist${NC}"
+    fi
+else
+    echo -e "${YELLOW}Warning: Migration script not found at $MIGRATIONS_SCRIPT${NC}"
+fi
 
 # Display service status
 echo -e "\n${GREEN}=== Service Status ===${NC}"

@@ -96,11 +96,11 @@ WHERE status IN ('PENDING', 'RETRY') AND next_attempt_at IS NOT NULL;
 
 -- Create dead letter table for outbox failures
 CREATE TABLE IF NOT EXISTS outbox_dlq (
-    id TEXT PRIMARY KEY,
-    stream TEXT NOT NULL,
-    payload JSONB NULL,
-    last_error TEXT,
-    attempts INT NOT NULL,
+  id TEXT PRIMARY KEY,
+  stream TEXT NOT NULL,
+  payload JSONB NULL,
+  last_error TEXT,
+  attempts INT NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     moved_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
