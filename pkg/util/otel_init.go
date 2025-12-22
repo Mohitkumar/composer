@@ -7,11 +7,9 @@ import (
 	"time"
 
 	"go.opentelemetry.io/otel"
-	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
 	"go.opentelemetry.io/otel/propagation"
-	"go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/resource"
 	"go.opentelemetry.io/otel/sdk/trace"
 	semconv "go.opentelemetry.io/otel/semconv/v1.24.0"
@@ -67,23 +65,7 @@ func InitOpenTelemetry(ctx context.Context, serviceName, serviceVersion string, 
 	)
 	otel.SetTracerProvider(tracerProvider)
 
-	// Initialize metrics exporter
-	metricsExporter, err := otlpmetricgrpc.New(ctx,
-		otlpmetricgrpc.WithEndpoint(otlpEndpoint),
-		otlpmetricgrpc.WithInsecure(), // For local development
-	)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create metrics exporter: %w", err)
-	}
-
-	// Initialize metrics provider
-	meterProvider := metric.NewMeterProvider(
-		metric.WithReader(metric.NewPeriodicReader(metricsExporter,
-			metric.WithInterval(10*time.Second),
-		)),
-		metric.WithResource(res),
-	)
-	otel.SetMeterProvider(meterProvider)
+	// Metrics initialization disabled - only traces are collected
 
 	// Set global propagator
 	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(
@@ -96,16 +78,8 @@ func InitOpenTelemetry(ctx context.Context, serviceName, serviceVersion string, 
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 
-		var errs []error
 		if err := tracerProvider.Shutdown(ctx); err != nil {
-			errs = append(errs, fmt.Errorf("failed to shutdown tracer provider: %w", err))
-		}
-		if err := meterProvider.Shutdown(ctx); err != nil {
-			errs = append(errs, fmt.Errorf("failed to shutdown meter provider: %w", err))
-		}
-
-		if len(errs) > 0 {
-			return fmt.Errorf("errors during shutdown: %v", errs)
+			return fmt.Errorf("failed to shutdown tracer provider: %w", err)
 		}
 		return nil
 	}, nil

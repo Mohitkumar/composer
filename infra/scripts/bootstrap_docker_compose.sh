@@ -105,11 +105,11 @@ $DOCKER_COMPOSE_CMD ps
 
 # Display access information
 echo -e "\n${GREEN}=== Access Information ===${NC}"
+echo -e "Web UI:              ${GREEN}http://localhost:3000${NC}"
 echo -e "Coordinator API:     ${GREEN}http://localhost:8080${NC}"
 echo -e "Coordinator gRPC:    ${GREEN}localhost:50051${NC}"
-echo -e "Jaeger UI:           ${GREEN}http://localhost:16686${NC}"
-echo -e "Prometheus UI:       ${GREEN}http://localhost:9090${NC}"
-echo -e "Grafana UI:          ${GREEN}http://localhost:3000${NC} (admin/admin)"
+echo -e "Jaeger UI:           ${GREEN}http://localhost:16686${NC} (distributed tracing)"
+echo -e "OTEL Collector:      ${GREEN}localhost:4317${NC} (gRPC) / ${GREEN}localhost:4318${NC} (HTTP)"
 echo -e "PostgreSQL:          ${GREEN}localhost:5432${NC} (postgres/password)"
 echo -e "Redis:               ${GREEN}localhost:6379${NC}"
 

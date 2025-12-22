@@ -35,16 +35,10 @@ func NewBootstrap(config *coord.Config) (*Bootstrap, error) {
 	}
 
 	if config.DisableObservability {
-		logger.Info().Msg("observability (metrics and traces) is disabled")
+		logger.Info().Msg("observability (traces) is disabled")
 	} else {
-		logger.Info().Msg("initialized OpenTelemetry SDK")
-
-		// Initialize OpenTelemetry metrics
-		if err := util.InitMetrics(); err != nil {
-			logger.Error().Err(err).Msg("failed to initialize metrics")
-			return nil, fmt.Errorf("failed to initialize metrics: %w", err)
-		}
-		logger.Info().Msg("initialized OpenTelemetry metrics")
+		logger.Info().Msg("initialized OpenTelemetry SDK for traces")
+		// Metrics initialization is disabled - only traces are collected
 	}
 
 	// Create coordinator

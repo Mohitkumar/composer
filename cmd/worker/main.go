@@ -11,6 +11,7 @@ import (
 	"strconv"
 
 	"github.com/mohitkumar/composer/pkg/redisq"
+	"github.com/mohitkumar/composer/pkg/util"
 	"github.com/mohitkumar/composer/worker"
 	"github.com/rs/zerolog"
 )
@@ -54,6 +55,22 @@ func main() {
 	}
 
 	ctx := context.Background()
+
+	// Initialize OpenTelemetry SDK for traces
+	shutdownOTel, err := util.InitOpenTelemetry(ctx, "composer-worker", "1.0.0", false)
+	if err != nil {
+		logger.Error().Err(err).Msg("failed to initialize OpenTelemetry")
+		// Continue without observability if initialization fails
+	} else {
+		logger.Info().Msg("initialized OpenTelemetry SDK for traces")
+		defer func() {
+			if shutdownOTel != nil {
+				if err := shutdownOTel(); err != nil {
+					logger.Error().Err(err).Msg("failed to shutdown OpenTelemetry")
+				}
+			}
+		}()
+	}
 
 	// Create Redis stream
 	redisConfig := &redisq.RedisConfig{

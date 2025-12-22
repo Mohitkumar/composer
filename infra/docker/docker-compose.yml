@@ -130,6 +130,21 @@ services:
       - "8000:8000"
     restart: unless-stopped
 
+  web:
+    build:
+      context: ../..
+      dockerfile: infra/docker/Dockerfile.web
+    container_name: composer-web
+    depends_on:
+      - coordinator
+    environment:
+      - NEXT_PUBLIC_API_URL=http://coordinator:8080
+      - NEXT_PUBLIC_USE_PROXY=false
+      - NODE_ENV=production
+    ports:
+      - "3000:3000"
+    restart: unless-stopped
+
   # OpenTelemetry Collector
   otel-collector:
     image: otel/opentelemetry-collector:latest
@@ -140,7 +155,6 @@ services:
     ports:
       - "4317:4317"   # OTLP gRPC receiver
       - "4318:4318"   # OTLP HTTP receiver
-      - "8889:8889"   # Prometheus metrics endpoint
     depends_on:
       - jaeger
     restart: unless-stopped
@@ -157,45 +171,7 @@ services:
       - "14268:14268"  # Jaeger HTTP
     restart: unless-stopped
 
-  # Prometheus for metrics
-  prometheus:
-    image: prom/prometheus:latest
-    container_name: composer-prometheus
-    command:
-      - '--config.file=/etc/prometheus/prometheus.yml'
-      - '--storage.tsdb.path=/prometheus'
-      - '--web.console.libraries=/usr/share/prometheus/console_libraries'
-      - '--web.console.templates=/usr/share/prometheus/consoles'
-      - '--web.enable-lifecycle'
-    volumes:
-      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
-      - prometheus_data:/prometheus
-    ports:
-      - "9090:9090"  # Prometheus UI
-    depends_on:
-      - otel-collector
-    restart: unless-stopped
-
-  # Grafana for visualization (optional but recommended)
-  grafana:
-    image: grafana/grafana:latest
-    container_name: composer-grafana
-    environment:
-      - GF_SECURITY_ADMIN_USER=admin
-      - GF_SECURITY_ADMIN_PASSWORD=admin
-      - GF_USERS_ALLOW_SIGN_UP=false
-    volumes:
-      - grafana_data:/var/lib/grafana
-      - ./grafana/provisioning:/etc/grafana/provisioning:ro
-    ports:
-      - "3000:3000"  # Grafana UI
-    depends_on:
-      - prometheus
-      - jaeger
-    restart: unless-stopped
 
 volumes:
   postgres_data:
   redis_data:
-  prometheus_data:
-  grafana_data:

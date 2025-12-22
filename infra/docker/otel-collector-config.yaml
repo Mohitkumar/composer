@@ -20,12 +20,6 @@ exporters:
     tls:
       insecure: true
 
-  # Export metrics to Prometheus
-  prometheus:
-    endpoint: "0.0.0.0:8889"
-    const_labels:
-      service: composer
-
   # Debug exporter (logs to stdout)
   debug:
     verbosity: detailed
@@ -36,9 +30,5 @@ service:
       receivers: [otlp]
       processors: [memory_limiter, batch]
       exporters: [jaeger, debug]
-    metrics:
-      receivers: [otlp]
-      processors: [memory_limiter, batch]
-      exporters: [prometheus, debug]
   extensions: []
 
