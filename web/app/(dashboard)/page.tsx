@@ -4,7 +4,7 @@ import { useQuery } from '@tanstack/react-query';
 import { workflowApi, executionApi } from '@/lib/api-client';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
-import { CheckCircle2, XCircle, Clock, TrendingUp, BarChart3, Activity, Zap } from 'lucide-react';
+import { CheckCircle2, XCircle, Clock, TrendingUp, BarChart3, Activity, Zap, AlertCircle } from 'lucide-react';
 import { format, subDays, startOfDay, endOfDay, eachDayOfInterval } from 'date-fns';
 import { Badge } from '@/components/ui/badge';
 import { useSearchParams, useRouter } from 'next/navigation';
@@ -27,12 +27,7 @@ import {
   Tooltip,
   Legend,
   ResponsiveContainer,
-  PieChart,
-  Pie,
-  Cell,
 } from 'recharts';
-
-const COLORS = ['#10b981', '#ef4444', '#3b82f6', '#f59e0b'];
 
 export default function DashboardPage() {
   const searchParams = useSearchParams();
@@ -87,39 +82,47 @@ export default function DashboardPage() {
   // Calculate metrics
   const metrics = useMemo(() => {
     const total = filteredExecutions.length;
-    const completed = filteredExecutions.filter(
+    const executed = filteredExecutions.filter(
       (e) => e.status === 'COMPLETED' || e.status === 'SUCCEEDED'
     ).length;
     const failed = filteredExecutions.filter((e) => e.status === 'FAILED').length;
     const running = filteredExecutions.filter((e) => e.status === 'RUNNING').length;
     const pending = filteredExecutions.filter((e) => e.status === 'PENDING').length;
-    const successRate = total > 0 ? Math.round((completed / total) * 100) : 0;
 
-    // Calculate average duration
+    // Calculate average time taken for completed executions
     const completedWithDuration = filteredExecutions.filter((e) => {
       return (e.status === 'COMPLETED' || e.status === 'SUCCEEDED') && e.completed_at && e.created_at;
     });
-    const avgDuration = completedWithDuration.length > 0
-      ? completedWithDuration.reduce((sum, e) => {
-          const start = new Date(e.created_at).getTime();
-          const end = new Date(e.completed_at!).getTime();
-          return sum + (end - start);
-        }, 0) / completedWithDuration.length / 1000 / 60 // Convert to minutes
+    
+    const durations = completedWithDuration.map((e) => {
+      const start = new Date(e.created_at).getTime();
+      const end = new Date(e.completed_at!).getTime();
+      return (end - start) / 1000; // Convert to seconds
+    });
+
+    const avgTimeSeconds = durations.length > 0
+      ? durations.reduce((sum, d) => sum + d, 0) / durations.length
       : 0;
+
+    const avgTimeMinutes = avgTimeSeconds / 60;
+    const avgTimeDisplay = avgTimeMinutes >= 1
+      ? `${Math.round(avgTimeMinutes * 10) / 10}m`
+      : `${Math.round(avgTimeSeconds * 10) / 10}s`;
 
     return {
       total,
-      completed,
+      executed,
       failed,
       running,
       pending,
-      successRate,
-      avgDuration: Math.round(avgDuration * 10) / 10,
+      avgTimeSeconds,
+      avgTimeDisplay,
+      durations,
     };
   }, [filteredExecutions]);
 
-  // Prepare data for execution trends chart (daily)
-  const executionTrendsData = useMemo(() => {
+  // Prepare data for execution trend chart (daily)
+  const executionTrendData = useMemo(() => {
     const days = dateRange === '7d' ? 7 : dateRange === '30d' ? 30 : dateRange === '90d' ? 90 : 90;
     const startDate = subDays(new Date(), days);
     const daysList = eachDayOfInterval({ start: startDate, end: new Date() });
@@ -136,22 +139,19 @@ export default function DashboardPage() {
         }
       });
 
-      const dayCompleted = dayExecutions.filter(
-        (e) => e.status === 'COMPLETED' || e.status === 'SUCCEEDED'
-      ).length;
-      const dayFailed = dayExecutions.filter((e) => e.status === 'FAILED').length;
-
       return {
         date: format(day, 'MMM d'),
+        executed: dayExecutions.filter((e) => e.status === 'COMPLETED' || e.status === 'SUCCEEDED').length,
+        failed: dayExecutions.filter((e) => e.status === 'FAILED').length,
+        pending: dayExecutions.filter((e) => e.status === 'PENDING').length,
+        running: dayExecutions.filter((e) => e.status === 'RUNNING').length,
         total: dayExecutions.length,
-        completed: dayCompleted,
-        failed: dayFailed,
       };
     });
   }, [filteredExecutions, dateRange]);
 
-  // Prepare data for success rate over time
-  const successRateData = useMemo(() => {
+  // Prepare data for time taken trend
+  const timeTakenTrendData = useMemo(() => {
     const days = dateRange === '7d' ? 7 : dateRange === '30d' ? 30 : dateRange === '90d' ? 90 : 90;
     const startDate = subDays(new Date(), days);
     const daysList = eachDayOfInterval({ start: startDate, end: new Date() });
@@ -168,46 +168,64 @@ export default function DashboardPage() {
         }
       });
 
-      const dayCompleted = dayExecutions.filter(
-        (e) => e.status === 'COMPLETED' || e.status === 'SUCCEEDED'
-      ).length;
-      const successRate = dayExecutions.length > 0
-        ? Math.round((dayCompleted / dayExecutions.length) * 100)
+      const completedExecutions = dayExecutions.filter(
+        (e) => (e.status === 'COMPLETED' || e.status === 'SUCCEEDED') && e.completed_at && e.created_at
+      );
+
+      const dayDurations = completedExecutions.map((e) => {
+        const start = new Date(e.created_at).getTime();
+        const end = new Date(e.completed_at!).getTime();
+        return (end - start) / 1000; // seconds
+      });
+
+      const avgTime = dayDurations.length > 0
+        ? dayDurations.reduce((sum, d) => sum + d, 0) / dayDurations.length
         : 0;
 
       return {
         date: format(day, 'MMM d'),
-        successRate,
+        avgTime: Math.round(avgTime * 10) / 10, // Round to 1 decimal (seconds)
+        count: completedExecutions.length,
       };
     });
   }, [filteredExecutions, dateRange]);
 
-  // Status distribution for pie chart
-  const statusDistributionData = useMemo(() => {
-    return [
-      { name: 'Completed', value: metrics.completed, color: COLORS[0] },
-      { name: 'Failed', value: metrics.failed, color: COLORS[1] },
-      { name: 'Running', value: metrics.running, color: COLORS[2] },
-      { name: 'Pending', value: metrics.pending, color: COLORS[3] },
-    ].filter((item) => item.value > 0);
-  }, [metrics]);
+  // Error analysis - get failed executions with error details
+  const errorAnalysis = useMemo(() => {
+    const failedExecutions = filteredExecutions.filter((e) => e.status === 'FAILED');
+    
+    // Group by workflow if showing all workflows
+    if (selectedWorkflowId === 'all') {
+      const byWorkflow = new Map<string, number>();
+      failedExecutions.forEach((exec) => {
+        const count = byWorkflow.get(exec.workflow_definition_id) || 0;
+        byWorkflow.set(exec.workflow_definition_id, count + 1);
+      });
 
-  // Execution by workflow (if no specific workflow selected)
-  const executionsByWorkflow = useMemo(() => {
-    if (selectedWorkflowId !== 'all') return [];
-    const workflowMap = new Map<string, number>();
-    filteredExecutions.forEach((exec) => {
-      const count = workflowMap.get(exec.workflow_definition_id) || 0;
-      workflowMap.set(exec.workflow_definition_id, count + 1);
-    });
-    return Array.from(workflowMap.entries())
-      .map(([id, count]) => ({
-        workflowId: id,
-        count,
-      }))
-      .sort((a, b) => b.count - a.count)
-      .slice(0, 10);
-  }, [filteredExecutions, selectedWorkflowId]);
+      return {
+        totalFailed: failedExecutions.length,
+        byWorkflow: Array.from(byWorkflow.entries())
+          .map(([id, count]) => ({
+            workflowId: id,
+            workflowName: workflows.find((w) => w.id === id)?.name || id,
+            count,
+          }))
+          .sort((a, b) => b.count - a.count)
+          .slice(0, 10),
+        recentFailures: failedExecutions
+          .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
+          .slice(0, 10),
+      };
+    }
+
+    return {
+      totalFailed: failedExecutions.length,
+      byWorkflow: [],
+      recentFailures: failedExecutions
+        .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
+        .slice(0, 10),
+    };
+  }, [filteredExecutions, selectedWorkflowId, workflows]);
 
   // Update URL when filter changes
   useEffect(() => {
@@ -291,78 +309,93 @@ export default function DashboardPage() {
         </Card>
       )}
 
-      {/* Key Metrics */}
-      <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
+      {/* Metrics */}
+      <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-5">
         <Card>
           <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-            <CardTitle className="text-sm font-medium">Total Executions</CardTitle>
-            <Activity className="h-4 w-4 text-muted-foreground" />
+            <CardTitle className="text-sm font-medium">Total Executed</CardTitle>
+            <CheckCircle2 className="h-4 w-4 text-green-500" />
           </CardHeader>
           <CardContent>
-            <div className="text-2xl font-bold">{metrics.total}</div>
+            <div className="text-2xl font-bold">{metrics.executed}</div>
             <p className="text-xs text-muted-foreground">
-              {dateRange === 'all' ? 'All time' : `Last ${dateRange}`}
+              {metrics.total > 0 ? Math.round((metrics.executed / metrics.total) * 100) : 0}% of total
             </p>
           </CardContent>
         </Card>
+
         <Card>
           <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-            <CardTitle className="text-sm font-medium">Success Rate</CardTitle>
-            <TrendingUp className="h-4 w-4 text-muted-foreground" />
-          </CardHeader>
-          <CardContent>
-            <div className="text-2xl font-bold">{metrics.successRate}%</div>
-            <p className="text-xs text-muted-foreground">
-              {metrics.completed} of {metrics.total} succeeded
-            </p>
-          </CardContent>
-        </Card>
-        <Card>
-          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-            <CardTitle className="text-sm font-medium">Failed Executions</CardTitle>
-            <XCircle className="h-4 w-4 text-muted-foreground" />
+            <CardTitle className="text-sm font-medium">Failed</CardTitle>
+            <XCircle className="h-4 w-4 text-red-500" />
           </CardHeader>
           <CardContent>
             <div className="text-2xl font-bold">{metrics.failed}</div>
             <p className="text-xs text-muted-foreground">
-              {metrics.total > 0
-                ? `${Math.round((metrics.failed / metrics.total) * 100)}% failure rate`
-                : 'No executions'}
+              {metrics.total > 0 ? Math.round((metrics.failed / metrics.total) * 100) : 0}% of total
             </p>
           </CardContent>
         </Card>
+
         <Card>
           <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-            <CardTitle className="text-sm font-medium">Avg Duration</CardTitle>
-            <Clock className="h-4 w-4 text-muted-foreground" />
+            <CardTitle className="text-sm font-medium">Pending</CardTitle>
+            <Clock className="h-4 w-4 text-yellow-500" />
           </CardHeader>
           <CardContent>
-            <div className="text-2xl font-bold">{metrics.avgDuration}m</div>
+            <div className="text-2xl font-bold">{metrics.pending}</div>
             <p className="text-xs text-muted-foreground">
-              Average execution time
+              {metrics.total > 0 ? Math.round((metrics.pending / metrics.total) * 100) : 0}% of total
+            </p>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+            <CardTitle className="text-sm font-medium">Running</CardTitle>
+            <Zap className="h-4 w-4 text-blue-500" />
+          </CardHeader>
+          <CardContent>
+            <div className="text-2xl font-bold">{metrics.running}</div>
+            <p className="text-xs text-muted-foreground">
+              {metrics.total > 0 ? Math.round((metrics.running / metrics.total) * 100) : 0}% of total
+            </p>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+            <CardTitle className="text-sm font-medium">Avg Time Taken</CardTitle>
+            <Activity className="h-4 w-4 text-muted-foreground" />
+          </CardHeader>
+          <CardContent>
+            <div className="text-2xl font-bold">{metrics.avgTimeDisplay}</div>
+            <p className="text-xs text-muted-foreground">
+              Average execution duration
             </p>
           </CardContent>
         </Card>
       </div>
 
-      {/* Charts Row 1 */}
+      {/* Graphs */}
       <div className="grid gap-4 md:grid-cols-2">
         <Card>
           <CardHeader>
-            <CardTitle>Execution Trends</CardTitle>
-            <CardDescription>Daily execution volume over time</CardDescription>
+            <CardTitle>Execution Trend</CardTitle>
+            <CardDescription>Daily execution volume by status</CardDescription>
           </CardHeader>
           <CardContent>
-            <ResponsiveContainer width="100%" height={300}>
-              <LineChart data={executionTrendsData}>
+            <ResponsiveContainer width="100%" height={350}>
+              <LineChart data={executionTrendData}>
                 <CartesianGrid strokeDasharray="3 3" />
                 <XAxis dataKey="date" />
                 <YAxis />
                 <Tooltip />
                 <Legend />
-                <Line type="monotone" dataKey="total" stroke="#3b82f6" name="Total" />
-                <Line type="monotone" dataKey="completed" stroke="#10b981" name="Completed" />
-                <Line type="monotone" dataKey="failed" stroke="#ef4444" name="Failed" />
+                <Line type="monotone" dataKey="executed" stroke="#10b981" name="Executed" strokeWidth={2} />
+                <Line type="monotone" dataKey="failed" stroke="#ef4444" name="Failed" strokeWidth={2} />
+                <Line type="monotone" dataKey="pending" stroke="#f59e0b" name="Pending" strokeWidth={2} />
+                <Line type="monotone" dataKey="running" stroke="#3b82f6" name="Running" strokeWidth={2} />
               </LineChart>
             </ResponsiveContainer>
           </CardContent>
@@ -370,22 +403,24 @@ export default function DashboardPage() {
 
         <Card>
           <CardHeader>
-            <CardTitle>Success Rate Trend</CardTitle>
-            <CardDescription>Daily success rate percentage</CardDescription>
+            <CardTitle>Latency</CardTitle>
+            <CardDescription>Latency per day</CardDescription>
           </CardHeader>
           <CardContent>
-            <ResponsiveContainer width="100%" height={300}>
-              <LineChart data={successRateData}>
+            <ResponsiveContainer width="100%" height={350}>
+              <LineChart data={timeTakenTrendData}>
                 <CartesianGrid strokeDasharray="3 3" />
                 <XAxis dataKey="date" />
-                <YAxis domain={[0, 100]} />
-                <Tooltip formatter={(value) => `${value}%`} />
+                <YAxis label={{ value: 'Time (seconds)', angle: -90, position: 'insideLeft' }} />
+                <Tooltip formatter={(value) => `${value} seconds`} />
+                <Legend />
                 <Line
                   type="monotone"
-                  dataKey="successRate"
-                  stroke="#10b981"
-                  name="Success Rate (%)"
+                  dataKey="avgTime"
+                  stroke="#8b5cf6"
+                  name="Avg Time (seconds)"
                   strokeWidth={2}
+                  dot={{ r: 4 }}
                 />
               </LineChart>
             </ResponsiveContainer>
@@ -393,195 +428,129 @@ export default function DashboardPage() {
         </Card>
       </div>
 
-      {/* Charts Row 2 */}
-      <div className="grid gap-4 md:grid-cols-2">
-        <Card>
-          <CardHeader>
-            <CardTitle>Status Distribution</CardTitle>
-            <CardDescription>Breakdown of execution statuses</CardDescription>
-          </CardHeader>
-          <CardContent>
-            {statusDistributionData.length > 0 ? (
-              <ResponsiveContainer width="100%" height={300}>
-                <PieChart>
-                  <Pie
-                    data={statusDistributionData}
-                    cx="50%"
-                    cy="50%"
-                    labelLine={false}
-                    label={({ name, percent }) => `${name}: ${(percent * 100).toFixed(0)}%`}
-                    outerRadius={80}
-                    fill="#8884d8"
-                    dataKey="value"
-                  >
-                    {statusDistributionData.map((entry, index) => (
-                      <Cell key={`cell-${index}`} fill={entry.color} />
-                    ))}
-                  </Pie>
-                  <Tooltip />
-                </PieChart>
-              </ResponsiveContainer>
-            ) : (
-              <div className="flex items-center justify-center h-[300px] text-muted-foreground">
-                No data available
+      {/* Error Analysis */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            <AlertCircle className="h-5 w-5 text-destructive" />
+            Error Analysis
+          </CardTitle>
+          <CardDescription>
+            Analysis of failed executions and error patterns
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <div className="space-y-6">
+            <div>
+              <h3 className="text-lg font-semibold mb-4">Summary</h3>
+              <div className="grid gap-4 md:grid-cols-3">
+                <div className="border rounded-lg p-4">
+                  <div className="text-2xl font-bold text-destructive">{errorAnalysis.totalFailed}</div>
+                  <div className="text-sm text-muted-foreground">Total Failed Executions</div>
+                </div>
+                <div className="border rounded-lg p-4">
+                  <div className="text-2xl font-bold">
+                    {metrics.total > 0 ? Math.round((errorAnalysis.totalFailed / metrics.total) * 100) : 0}%
+                  </div>
+                  <div className="text-sm text-muted-foreground">Failure Rate</div>
+                </div>
+                <div className="border rounded-lg p-4">
+                  <div className="text-2xl font-bold">
+                    {errorAnalysis.totalFailed > 0 && metrics.executed > 0
+                      ? Math.round((errorAnalysis.totalFailed / (errorAnalysis.totalFailed + metrics.executed)) * 100)
+                      : 0}%
+                  </div>
+                  <div className="text-sm text-muted-foreground">Failure vs Success Ratio</div>
+                </div>
+              </div>
+            </div>
+
+            {selectedWorkflowId === 'all' && errorAnalysis.byWorkflow.length > 0 && (
+              <div>
+                <h3 className="text-lg font-semibold mb-4">Failures by Workflow</h3>
+                <div className="border rounded-lg overflow-hidden">
+                  <div className="max-h-[300px] overflow-y-auto">
+                    <table className="w-full">
+                      <thead className="bg-muted/50 sticky top-0">
+                        <tr>
+                          <th className="text-left p-3 text-sm font-medium">Workflow</th>
+                          <th className="text-left p-3 text-sm font-medium">Workflow ID</th>
+                          <th className="text-right p-3 text-sm font-medium">Failed Count</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {errorAnalysis.byWorkflow.map((item) => (
+                          <tr key={item.workflowId} className="border-t">
+                            <td className="p-3 text-sm">{item.workflowName}</td>
+                            <td className="p-3 text-sm font-mono text-xs">{item.workflowId}</td>
+                            <td className="p-3 text-sm text-right font-semibold text-destructive">
+                              {item.count}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {errorAnalysis.recentFailures.length > 0 && (
+              <div>
+                <h3 className="text-lg font-semibold mb-4">Recent Failures</h3>
+                <div className="border rounded-lg overflow-hidden">
+                  <div className="max-h-[400px] overflow-y-auto">
+                    <table className="w-full">
+                      <thead className="bg-muted/50 sticky top-0">
+                        <tr>
+                          <th className="text-left p-3 text-sm font-medium">Execution ID</th>
+                          <th className="text-left p-3 text-sm font-medium">Workflow ID</th>
+                          <th className="text-left p-3 text-sm font-medium">Failed At</th>
+                          <th className="text-right p-3 text-sm font-medium">Duration</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {errorAnalysis.recentFailures.map((execution) => {
+                          const duration = execution.completed_at && execution.created_at
+                            ? (() => {
+                                const start = new Date(execution.created_at).getTime();
+                                const end = new Date(execution.completed_at).getTime();
+                                const minutes = (end - start) / 1000 / 60;
+                                return minutes >= 60 ? `${Math.round(minutes / 60 * 10) / 10}h` : `${Math.round(minutes)}m`;
+                              })()
+                            : '-';
+
+                          return (
+                            <tr key={execution.id} className="border-t hover:bg-muted/30">
+                              <td className="p-3 text-sm font-mono text-xs">{execution.id.slice(0, 8)}...</td>
+                              <td className="p-3 text-sm font-mono text-xs">{execution.workflow_definition_id}</td>
+                              <td className="p-3 text-sm text-muted-foreground">
+                                {execution.completed_at
+                                  ? format(new Date(execution.completed_at), 'MMM d, yyyy HH:mm')
+                                  : execution.created_at
+                                  ? format(new Date(execution.created_at), 'MMM d, yyyy HH:mm')
+                                  : '-'}
+                              </td>
+                              <td className="p-3 text-sm text-right">{duration}</td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {errorAnalysis.totalFailed === 0 && (
+              <div className="text-center py-8 text-muted-foreground">
+                <CheckCircle2 className="h-12 w-12 mx-auto mb-2 text-green-500" />
+                <p>No failed executions in the selected time period</p>
               </div>
             )}
-          </CardContent>
-        </Card>
-
-        {selectedWorkflowId === 'all' && executionsByWorkflow.length > 0 && (
-          <Card>
-            <CardHeader>
-              <CardTitle>Top Workflows by Execution Count</CardTitle>
-              <CardDescription>Most executed workflows</CardDescription>
-            </CardHeader>
-            <CardContent>
-              <ResponsiveContainer width="100%" height={300}>
-                <BarChart data={executionsByWorkflow}>
-                  <CartesianGrid strokeDasharray="3 3" />
-                  <XAxis
-                    dataKey="workflowId"
-                    angle={-45}
-                    textAnchor="end"
-                    height={100}
-                    tick={{ fontSize: 10 }}
-                  />
-                  <YAxis />
-                  <Tooltip />
-                  <Bar dataKey="count" fill="#3b82f6" name="Executions" />
-                </BarChart>
-              </ResponsiveContainer>
-            </CardContent>
-          </Card>
-        )}
-
-        {selectedWorkflowId !== 'all' && (
-          <Card>
-            <CardHeader>
-              <CardTitle>Execution Status Breakdown</CardTitle>
-              <CardDescription>Detailed status distribution</CardDescription>
-            </CardHeader>
-            <CardContent>
-              <div className="space-y-4">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2">
-                    <CheckCircle2 className="h-4 w-4 text-green-500" />
-                    <span>Completed</span>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <span className="font-semibold">{metrics.completed}</span>
-                    <span className="text-xs text-muted-foreground">
-                      ({metrics.total > 0 ? Math.round((metrics.completed / metrics.total) * 100) : 0}%)
-                    </span>
-                  </div>
-                </div>
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2">
-                    <XCircle className="h-4 w-4 text-red-500" />
-                    <span>Failed</span>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <span className="font-semibold">{metrics.failed}</span>
-                    <span className="text-xs text-muted-foreground">
-                      ({metrics.total > 0 ? Math.round((metrics.failed / metrics.total) * 100) : 0}%)
-                    </span>
-                  </div>
-                </div>
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2">
-                    <Zap className="h-4 w-4 text-blue-500" />
-                    <span>Running</span>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <span className="font-semibold">{metrics.running}</span>
-                    <span className="text-xs text-muted-foreground">
-                      ({metrics.total > 0 ? Math.round((metrics.running / metrics.total) * 100) : 0}%)
-                    </span>
-                  </div>
-                </div>
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2">
-                    <Clock className="h-4 w-4 text-yellow-500" />
-                    <span>Pending</span>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <span className="font-semibold">{metrics.pending}</span>
-                    <span className="text-xs text-muted-foreground">
-                      ({metrics.total > 0 ? Math.round((metrics.pending / metrics.total) * 100) : 0}%)
-                    </span>
-                  </div>
-                </div>
-              </div>
-            </CardContent>
-          </Card>
-        )}
-      </div>
-
-      {/* Additional Metrics */}
-      <div className="grid gap-4 md:grid-cols-3">
-        <Card>
-          <CardHeader>
-            <CardTitle className="text-base">Execution Velocity</CardTitle>
-            <CardDescription>Executions per day</CardDescription>
-          </CardHeader>
-          <CardContent>
-            <div className="text-3xl font-bold">
-              {dateRange === 'all'
-                ? metrics.total > 0 && filteredExecutions.length > 0
-                  ? (() => {
-                      const oldestExecution = filteredExecutions.reduce((oldest, exec) => {
-                        const execDate = new Date(exec.created_at).getTime();
-                        const oldestDate = new Date(oldest.created_at).getTime();
-                        return execDate < oldestDate ? exec : oldest;
-                      }, filteredExecutions[0]);
-                      const daysSinceFirst = Math.max(
-                        1,
-                        Math.floor(
-                          (new Date().getTime() - new Date(oldestExecution.created_at).getTime()) /
-                            (1000 * 60 * 60 * 24)
-                        )
-                      );
-                      return Math.round(metrics.total / daysSinceFirst);
-                    })()
-                  : 0
-                : dateRange === '7d'
-                ? Math.round(metrics.total / 7)
-                : dateRange === '30d'
-                ? Math.round(metrics.total / 30)
-                : Math.round(metrics.total / 90)}
-            </div>
-            <p className="text-xs text-muted-foreground mt-2">Average daily executions</p>
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardHeader>
-            <CardTitle className="text-base">Failure Trend</CardTitle>
-            <CardDescription>Failed vs total ratio</CardDescription>
-          </CardHeader>
-          <CardContent>
-            <div className="text-3xl font-bold">
-              {metrics.total > 0 ? Math.round((metrics.failed / metrics.total) * 100) : 0}%
-            </div>
-            <p className="text-xs text-muted-foreground mt-2">
-              {metrics.failed} failures out of {metrics.total} total
-            </p>
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardHeader>
-            <CardTitle className="text-base">Completion Rate</CardTitle>
-            <CardDescription>Successfully completed executions</CardDescription>
-          </CardHeader>
-          <CardContent>
-            <div className="text-3xl font-bold">{metrics.completed}</div>
-            <p className="text-xs text-muted-foreground mt-2">
-              {metrics.total > 0 ? Math.round((metrics.completed / metrics.total) * 100) : 0}% of all executions
-            </p>
-          </CardContent>
-        </Card>
-      </div>
+          </div>
+        </CardContent>
+      </Card>
     </div>
   );
 }
