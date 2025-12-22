@@ -254,9 +254,9 @@ export function ConfigurationDialog({
           </div>
         ) : (
           <ScrollArea className="flex-1 min-h-0 pr-4">
-            <div className="grid gap-6 py-4">
+            <div className="grid gap-4 py-4">
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                <div className="space-y-2">
+                <div className="space-y-1.5">
                   <Label htmlFor="name">
                     Name <span className="text-destructive">*</span>
                   </Label>
@@ -268,7 +268,7 @@ export function ConfigurationDialog({
                     disabled={isSaving}
                   />
                 </div>
-                <div className="space-y-2">
+                <div className="space-y-1.5">
                   <Label htmlFor="type">
                     {isEditMode ? 'Type' : 'Type '}
                     {!isEditMode && <span className="text-destructive">*</span>}
@@ -297,7 +297,7 @@ export function ConfigurationDialog({
                 </div>
               </div>
 
-              <div className="space-y-2">
+              <div className="space-y-1.5">
                 <Label htmlFor="description">Description</Label>
                 <Textarea
                   id="description"
@@ -309,7 +309,7 @@ export function ConfigurationDialog({
                 />
               </div>
 
-              <div className="space-y-2">
+              <div className="space-y-1.5">
                 <div className="flex items-center justify-between">
                   <Label htmlFor="config-json">
                     Configuration JSON <span className="text-destructive">*</span>
@@ -324,7 +324,7 @@ export function ConfigurationDialog({
                     Format JSON
                   </Button>
                 </div>
-                <div className="border rounded-md overflow-hidden" style={{ height: '300px' }}>
+                <div className="border rounded-md overflow-hidden" style={{ height: '200px' }}>
                   <Editor
                     height="100%"
                     defaultLanguage="json"
@@ -332,7 +332,7 @@ export function ConfigurationDialog({
                     onChange={(value) => setConfigJson(value || '{}')}
                     options={{
                       minimap: { enabled: false },
-                      fontSize: 14,
+                      fontSize: 13,
                       lineNumbers: 'on',
                       tabSize: 2,
                       wordWrap: 'on',

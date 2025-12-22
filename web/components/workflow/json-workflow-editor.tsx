@@ -101,8 +101,12 @@ export function JsonWorkflowEditor({
 
   // Deduplicate configurations by name and update refs
   React.useEffect(() => {
+    // Ensure configurationsRaw is an array (handle null/undefined cases)
+    const configs = Array.isArray(configurationsRaw) ? configurationsRaw : [];
+    
     const seen = new Set<string>();
-    const deduped = configurationsRaw.filter((config) => {
+    const deduped = configs.filter((config) => {
+      if (!config || !config.name) return false;
       if (seen.has(config.name)) {
         return false;
       }
@@ -113,7 +117,9 @@ export function JsonWorkflowEditor({
     // Create a map for quick lookup by name
     const map = new Map<string, any>();
     deduped.forEach((config) => {
-      map.set(config.name, config);
+      if (config && config.name) {
+        map.set(config.name, config);
+      }
     });
     
     // Update refs

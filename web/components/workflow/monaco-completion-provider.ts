@@ -73,8 +73,9 @@ export function createCompletionProvider(
       } else {
         // Config not found, but user might be typing it - suggest config names that match
         const partialMatch = configName.toLowerCase();
-        const matchingConfigs = configurationsRef.current.filter((c: any) => 
-          c.name.toLowerCase().startsWith(partialMatch)
+        const configs = Array.isArray(configurationsRef.current) ? configurationsRef.current : [];
+        const matchingConfigs = configs.filter((c: any) => 
+          c && c.name && c.name.toLowerCase().startsWith(partialMatch)
         );
         return createConfigNameSuggestions(monaco, { current: matchingConfigs }, wordRange);
       }
@@ -90,8 +91,11 @@ function createConfigNameSuggestions(
   const suggestions: any[] = [];
   const seenNames = new Set<string>();
   
-  configurationsRef.current.forEach((config: any) => {
-    if (config.name && !seenNames.has(config.name)) {
+  // Ensure configurationsRef.current is an array
+  const configs = Array.isArray(configurationsRef.current) ? configurationsRef.current : [];
+  
+  configs.forEach((config: any) => {
+    if (config && config.name && !seenNames.has(config.name)) {
       seenNames.add(config.name);
       suggestions.push({
         label: `config.${config.name}`,

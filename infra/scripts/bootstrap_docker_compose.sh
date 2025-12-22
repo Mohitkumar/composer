@@ -3,8 +3,16 @@
 # This script sets up the local development environment using Docker Compose
 #
 # Usage:
-#   ./bootstrap_docker_compose.sh          # Build images and start services
-#   ./bootstrap_docker_compose.sh --no-build  # Skip building images, use existing ones
+#   ./bootstrap_docker_compose.sh                    # Build images and start all services
+#   ./bootstrap_docker_compose.sh --no-build        # Skip building images, use existing ones
+#   ./bootstrap_docker_compose.sh -s web            # Build and start only web service
+#   ./bootstrap_docker_compose.sh -s web --build-only    # Only build web service
+#   ./bootstrap_docker_compose.sh -s coordinator --up-only  # Only start coordinator (no build)
+
+# Ensure we're using bash (not zsh or other shells)
+if [ -z "$BASH_VERSION" ]; then
+    exec bash "$0" "$@"
+fi
 
 set -euo pipefail
 
@@ -12,31 +20,81 @@ set -euo pipefail
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
 NC='\033[0m' # No Color
+
+# Available services
+AVAILABLE_SERVICES=("postgres" "redis" "coordinator" "worker" "worker-js" "worker-py" "ai-service" "web" "otel-collector" "jaeger")
 
 # Parse command line arguments
 SKIP_BUILD=false
-for arg in "$@"; do
-    case $arg in
+BUILD_ONLY=false
+UP_ONLY=false
+SERVICE=""
+ALL_SERVICES=true
+
+while [[ $# -gt 0 ]]; do
+    case $1 in
         --no-build|--skip-build|-n)
             SKIP_BUILD=true
             shift
+            ;;
+        --build-only|-b)
+            BUILD_ONLY=true
+            shift
+            ;;
+        --up-only|-u)
+            UP_ONLY=true
+            SKIP_BUILD=true
+            shift
+            ;;
+        --service|-s)
+            if [ -z "${2:-}" ]; then
+                echo -e "${RED}Error: --service requires a service name${NC}"
+                exit 1
+            fi
+            SERVICE="$2"
+            ALL_SERVICES=false
+            shift 2
             ;;
         -h|--help)
             echo "Usage: $0 [OPTIONS]"
             echo ""
             echo "Options:"
             echo "  --no-build, --skip-build, -n    Skip building Docker images"
+            echo "  --build-only, -b                 Only build images, don't start services"
+            echo "  --up-only, -u                   Only start services, don't build (implies --no-build)"
+            echo "  --service, -s <name>             Build/start specific service (one at a time)"
             echo "  -h, --help                       Show this help message"
+            echo ""
+            echo "Available services:"
+            for svc in "${AVAILABLE_SERVICES[@]}"; do
+                echo "  - $svc"
+            done
+            echo ""
+            echo "Examples:"
+            echo "  $0                              # Build and start all services"
+            echo "  $0 -s web                       # Build and start web service"
+            echo "  $0 -s web --build-only          # Only build web service"
+            echo "  $0 -s coordinator --up-only     # Only start coordinator (no build)"
             exit 0
             ;;
         *)
-            echo -e "${RED}Unknown option: $arg${NC}"
+            echo -e "${RED}Unknown option: $1${NC}"
             echo "Use -h or --help for usage information"
             exit 1
             ;;
     esac
 done
+
+# Validate service name if provided
+if [ "$ALL_SERVICES" = false ]; then
+    if [[ ! " ${AVAILABLE_SERVICES[@]} " =~ " ${SERVICE} " ]]; then
+        echo -e "${RED}Error: Unknown service: $SERVICE${NC}"
+        echo "Available services: ${AVAILABLE_SERVICES[*]}"
+        exit 1
+    fi
+fi
 
 # Get the directory where this script is located
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -76,34 +134,78 @@ echo -e "${GREEN}✓ Prerequisites check passed${NC}\n"
 # Navigate to docker directory
 cd "$DOCKER_DIR"
 
-# Check if services are already running
-if $DOCKER_COMPOSE_CMD ps 2>/dev/null | grep -q "Up"; then
-    echo -e "${YELLOW}Some services are already running.${NC}"
-    read -p "Do you want to restart all services? (y/N): " -n 1 -r
-    echo
-    if [[ $REPLY =~ ^[Yy]$ ]]; then
-        echo -e "${YELLOW}Stopping existing services...${NC}"
-        $DOCKER_COMPOSE_CMD down
-    else
-        echo -e "${GREEN}Keeping existing services running.${NC}"
-        exit 0
+# Function to check if service is running
+is_service_running() {
+    local service=$1
+    $DOCKER_COMPOSE_CMD ps "$service" 2>/dev/null | grep -q "Up"
+}
+
+# Determine which services to operate on
+if [ "$ALL_SERVICES" = true ]; then
+    TARGET_SERVICE=""
+    SERVICES_STRING="all services"
+else
+    TARGET_SERVICE="$SERVICE"
+    SERVICES_STRING="$SERVICE"
+fi
+
+# Check if service is already running (only for single service mode)
+if [ "$UP_ONLY" = false ] && [ "$BUILD_ONLY" = false ] && [ "$ALL_SERVICES" = false ]; then
+    if is_service_running "$SERVICE"; then
+        echo -e "${YELLOW}Service $SERVICE is already running.${NC}"
+        read -p "Do you want to restart it? (y/N): " -n 1 -r
+        echo
+        if [[ $REPLY =~ ^[Yy]$ ]]; then
+            echo -e "${YELLOW}Stopping $SERVICE...${NC}"
+            $DOCKER_COMPOSE_CMD stop "$SERVICE" 2>/dev/null || true
+            $DOCKER_COMPOSE_CMD rm -f "$SERVICE" 2>/dev/null || true
+        else
+            echo -e "${GREEN}Keeping $SERVICE running.${NC}"
+            exit 0
+        fi
     fi
 fi
 
-# Build images (if not skipped)
-if [ "$SKIP_BUILD" = false ]; then
-    echo -e "${YELLOW}Rebuilding Docker images...${NC}"
-    $DOCKER_COMPOSE_CMD build --pull
-else
+# Build images (if not skipped and not up-only)
+if [ "$SKIP_BUILD" = false ] && [ "$UP_ONLY" = false ]; then
+    if [ "$ALL_SERVICES" = true ]; then
+        echo -e "${YELLOW}Building all Docker images...${NC}"
+        $DOCKER_COMPOSE_CMD build --pull
+    else
+        echo -e "${YELLOW}Building Docker image for: $SERVICE${NC}"
+        $DOCKER_COMPOSE_CMD build --pull "$SERVICE"
+    fi
+elif [ "$UP_ONLY" = false ]; then
     echo -e "${YELLOW}Skipping image build (using existing images)...${NC}"
 fi
 
+# Exit if build-only mode
+if [ "$BUILD_ONLY" = true ]; then
+    echo -e "${GREEN}✓ Build completed${NC}"
+    exit 0
+fi
+
 # Start services
-echo -e "${YELLOW}Starting services...${NC}"
-if [ "$SKIP_BUILD" = false ]; then
-    $DOCKER_COMPOSE_CMD up --build -d
+if [ "$ALL_SERVICES" = true ]; then
+    echo -e "${YELLOW}Starting all services...${NC}"
+    if [ "$SKIP_BUILD" = false ]; then
+        $DOCKER_COMPOSE_CMD up --build -d
+    else
+        $DOCKER_COMPOSE_CMD up -d
+    fi
 else
-    $DOCKER_COMPOSE_CMD up -d
+    echo -e "${YELLOW}Starting service: $SERVICE${NC}"
+    # For single service: build only that service, then start it (dependencies will start but not rebuild)
+    if [ "$SKIP_BUILD" = false ]; then
+        # Build only the specified service (not dependencies)
+        echo -e "${BLUE}Building $SERVICE (dependencies will not be rebuilt)...${NC}"
+        $DOCKER_COMPOSE_CMD build "$SERVICE"
+        # Start the service (dependencies will start if needed, but won't rebuild)
+        $DOCKER_COMPOSE_CMD up -d "$SERVICE"
+    else
+        # Just start the service (dependencies will start if needed)
+        $DOCKER_COMPOSE_CMD up -d "$SERVICE"
+    fi
 fi
 
 # Wait for services to be healthy
@@ -153,7 +255,11 @@ fi
 
 # Display service status
 echo -e "\n${GREEN}=== Service Status ===${NC}"
-$DOCKER_COMPOSE_CMD ps
+if [ "$ALL_SERVICES" = true ]; then
+    $DOCKER_COMPOSE_CMD ps
+else
+    $DOCKER_COMPOSE_CMD ps "$SERVICE"
+fi
 
 # Display access information
 echo -e "\n${GREEN}=== Access Information ===${NC}"
