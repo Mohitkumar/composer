@@ -12,11 +12,12 @@ processors:
     send_batch_size: 1024
   memory_limiter:
     limit_mib: 512
+    check_interval: 1s
 
 exporters:
-  # Export traces to Jaeger
-  jaeger:
-    endpoint: jaeger:14250
+  # Export traces to Jaeger via OTLP (Jaeger accepts OTLP on port 4317)
+  otlp:
+    endpoint: jaeger:4317
     tls:
       insecure: true
 
@@ -29,6 +30,6 @@ service:
     traces:
       receivers: [otlp]
       processors: [memory_limiter, batch]
-      exporters: [jaeger, debug]
+      exporters: [otlp, debug]
   extensions: []
 
