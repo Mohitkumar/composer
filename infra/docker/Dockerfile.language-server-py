@@ -4,13 +4,13 @@ FROM ghcr.io/astral-sh/uv:python3.11-alpine AS builder
 WORKDIR /app
 
 # Copy project files
-COPY cmd/worker-py/pyproject.toml cmd/worker-py/uv.lock ./
+COPY cmd/language-server-py/pyproject.toml cmd/language-server-py/uv.lock ./
 
 # Install dependencies
 RUN uv sync --frozen
 
 # Copy source code
-COPY cmd/worker-py/ ./
+COPY cmd/language-server-py/ ./
 COPY pkg/api/proto ./proto
 
 # Generate protobuf files

@@ -4,11 +4,11 @@ FROM node:20-alpine AS builder
 WORKDIR /app
 
 # Copy package files
-COPY cmd/worker-js/package*.json ./
+COPY cmd/language-server-js/package*.json ./
 RUN npm ci --omit=dev
 
 # Copy source code
-COPY cmd/worker-js/ ./
+COPY cmd/language-server-js/ ./
 COPY pkg/api/proto ./proto
 
 # Runtime stage
