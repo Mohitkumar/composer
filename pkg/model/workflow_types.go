@@ -27,8 +27,18 @@ const (
 type NodeType string
 
 const (
-	NodeTypeTask     NodeType = "TASK"
-	NodeTypeSwitch   NodeType = "SWITCH"
-	NodeTypeParallel NodeType = "PARALLEL"
-	NodeTypeWait     NodeType = "WAIT"
+	// CODE - Execute code in a language runtime (requires runtime field)
+	NodeTypeCode NodeType = "CODE"
+	// HTTP - Execute HTTP request
+	NodeTypeHTTP NodeType = "HTTP"
+	// CSV - Process CSV data
+	NodeTypeCSV NodeType = "CSV"
+	// SWITCH - Conditional branching based on conditions
+	NodeTypeSwitch NodeType = "SWITCH"
+	// FORK - Fork execution into parallel branches
+	NodeTypeFork NodeType = "FORK"
+	// JOIN - Join parallel branches (handled automatically)
+	NodeTypeJoin NodeType = "JOIN"
+	// WAIT - Wait for external event
+	NodeTypeWait NodeType = "WAIT"
 )

@@ -70,8 +70,8 @@ apiClient.interceptors.response.use(
 export interface Node {
   node_id: string;
   name: string;
-  type: 'TASK' | 'SWITCH' | 'PARALLEL' | 'WAIT';
-  runtime: string;
+  type: 'CODE' | 'HTTP' | 'CSV' | 'SWITCH' | 'FORK' | 'JOIN' | 'WAIT';
+  runtime?: string; // Optional, only for CODE type nodes
   spec: Record<string, any>;
 }
 

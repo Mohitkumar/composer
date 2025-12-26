@@ -9,8 +9,8 @@ nodes:
   # Initial task: Process input data
   - name: Initialize Data
     node_id: init_data
+    type: CODE
     runtime: python
-    type: TASK
     spec:
       code: |
         def handler(input):
@@ -42,8 +42,8 @@ nodes:
   # Increment counter task
   - name: Increment Counter
     node_id: increment_counter
+    type: CODE
     runtime: python
-    type: TASK
     spec:
       code: |
         def handler(input):
@@ -81,15 +81,14 @@ nodes:
   # Note: SWITCH nodes don't execute code - they evaluate edge conditions
   - name: Check Counter Value
     node_id: check_counter
-    runtime: go
     type: SWITCH
     spec: {}
 
   # Branch 1: Counter is high (>= 5)
   - name: Process High Counter
     node_id: process_high
+    type: CODE
     runtime: python
-    type: TASK
     spec:
       code: |
         def handler(input):
@@ -127,8 +126,8 @@ nodes:
   # Branch 2: Counter is low (< 5)
   - name: Process Low Counter
     node_id: process_low
+    type: CODE
     runtime: python
-    type: TASK
     spec:
       code: |
         def handler(input):
@@ -163,19 +162,18 @@ nodes:
       input: "{{tasks.check_counter.output}}"
       timeout: 30
 
-  # PARALLEL node: Fork into multiple parallel branches
-  # Note: PARALLEL nodes don't execute code - they fork execution immediately
+  # PARALLEL/FORK node: Fork into multiple parallel branches
+  # Note: FORK nodes don't execute code - they fork execution immediately
   - name: Fork Parallel Processing
     node_id: fork_parallel
-    runtime: go
-    type: PARALLEL
+    type: FORK
     spec: {}
 
   # Parallel Branch 1: Calculate sum
   - name: Calculate Sum
     node_id: calc_sum
+    type: CODE
     runtime: python
-    type: TASK
     spec:
       code: |
         def handler(input):
@@ -209,8 +207,8 @@ nodes:
   # Parallel Branch 2: Calculate product
   - name: Calculate Product
     node_id: calc_product
+    type: CODE
     runtime: python
-    type: TASK
     spec:
       code: |
         def handler(input):
@@ -244,8 +242,8 @@ nodes:
   # Parallel Branch 3: Calculate difference
   - name: Calculate Difference
     node_id: calc_difference
+    type: CODE
     runtime: python
-    type: TASK
     spec:
       code: |
         def handler(input):
@@ -279,8 +277,8 @@ nodes:
   # JOIN node: Aggregate results from all parallel branches
   - name: Aggregate Results
     node_id: aggregate_results
+    type: CODE
     runtime: python
-    type: TASK
     spec:
       code: |
         def handler(input):
@@ -327,8 +325,8 @@ nodes:
   # Final task: Generate summary
   - name: Generate Final Summary
     node_id: final_summary
+    type: CODE
     runtime: python
-    type: TASK
     spec:
       code: |
         def handler(input):

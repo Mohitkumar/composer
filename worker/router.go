@@ -29,16 +29,14 @@ func truncateString(s string, maxLen int) string {
 // Router routes tasks to appropriate executors
 type Router struct {
 	executors     map[string]executors.Executor
-	langClient    *LangClient        // Legacy single client (for backward compatibility)
-	langClientMgr *LangClientManager // New multi-client manager
+	langClientMgr *LangClientManager // Multi-client manager for language runtimes
 	logger        zerolog.Logger
 }
 
 // NewRouter creates a new task router
-func NewRouter(langClient *LangClient, langClientMgr *LangClientManager, logger zerolog.Logger) *Router {
+func NewRouter(langClientMgr *LangClientManager, logger zerolog.Logger) *Router {
 	r := &Router{
 		executors:     make(map[string]executors.Executor),
-		langClient:    langClient,
 		langClientMgr: langClientMgr,
 		logger:        logger,
 	}
@@ -57,34 +55,27 @@ func (r *Router) RegisterExecutor(exec executors.Executor) {
 }
 
 // Route routes a task to the appropriate executor based on node type
+// nodeType can be:
+// - For CODE nodes: runtime (python, js, node) - routes to language executor
+// - For other nodes: type (HTTP, CSV) - routes to built-in executor
+// - Control flow nodes (SWITCH, PARALLEL/FORK, JOIN) are handled by coordinator, not worker
 func (r *Router) Route(ctx context.Context, nodeType string, input json.RawMessage) (json.RawMessage, error) {
 	logger := r.logger.With().Str("node_type", nodeType).Logger()
 
-	// Check if it's a language executor (python, js, node, etc.)
+	// Check if it's a language runtime (python, js, node, etc.)
+	// These come from CODE type nodes where runtime is specified
 	if isLanguageRuntime(nodeType) {
-		// Try to get client from manager first (new multi-client approach)
-		var langClient *LangClient
-		if r.langClientMgr != nil {
-			var err error
-			langClient, err = r.langClientMgr.GetClientForRuntime(nodeType)
-			if err != nil {
-				logger.Error().Err(err).Str("runtime", nodeType).Msg("failed to get language client from manager")
-				// Fall back to legacy single client if available
-				if r.langClient == nil {
-					return nil, fmt.Errorf("language client not configured for runtime: %s", nodeType)
-				}
-				langClient = r.langClient
-			}
-		} else if r.langClient != nil {
-			// Fall back to legacy single client
-			langClient = r.langClient
-		} else {
-			return nil, fmt.Errorf("language client not configured for runtime: %s", nodeType)
+		if r.langClientMgr == nil {
+			return nil, fmt.Errorf("language client manager not configured")
+		}
+		langClient, err := r.langClientMgr.GetClientForRuntime(nodeType)
+		if err != nil {
+			return nil, fmt.Errorf("language client not configured for runtime: %s: %w", nodeType, err)
 		}
 		return r.executeLanguageTaskWithClient(ctx, nodeType, input, langClient, logger)
 	}
 
-	// Check for built-in executor
+	// Check for built-in executor (HTTP, CSV, etc.)
 	exec, exists := r.executors[nodeType]
 	if !exists {
 		return nil, fmt.Errorf("no executor found for node type: %s", nodeType)

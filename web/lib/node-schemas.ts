@@ -319,10 +319,10 @@ export const nodeFormSchemas: Record<string, NodeFormSchema> = {
   },
 };
 
-// Get schema for a runtime, or return a generic JSON editor
-export function getNodeFormSchema(runtime: string): NodeFormSchema {
-  return nodeFormSchemas[runtime.toLowerCase()] || {
-    runtime,
+// Get schema for a runtime or node type, or return a generic JSON editor
+export function getNodeFormSchema(runtimeOrType: string): NodeFormSchema {
+  return nodeFormSchemas[runtimeOrType.toLowerCase()] || {
+    runtime: runtimeOrType,
     fields: [
       {
         key: 'spec',

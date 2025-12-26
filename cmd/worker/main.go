@@ -80,9 +80,7 @@ func main() {
 	// Support multiple formats:
 	// 1. LANG_WORKER_ADDRS=python:localhost:50053,js:localhost:50052
 	// 2. Individual env vars: LANG_WORKER_PYTHON_ADDR, LANG_WORKER_JS_ADDR, etc.
-	// 3. Legacy: LANG_WORKER_ADDR (single address for backward compatibility)
 	langWorkerAddrs := parseLangWorkerAddrs()
-	langWorkerAddr := os.Getenv("LANG_WORKER_ADDR") // Legacy: single address for backward compatibility
 
 	streamName := os.Getenv("STREAM_NAME")
 	if streamName == "" {
@@ -138,8 +136,7 @@ func main() {
 	wcfg := worker.WorkerConfig{
 		Redis:           redisStream,
 		CoordinatorAddr: coordAddr,
-		LangWorkerAddr:  langWorkerAddr,  // Legacy support
-		LangWorkerAddrs: langWorkerAddrs, // New multi-runtime support
+		LangWorkerAddrs: langWorkerAddrs,
 		StreamName:      streamName,
 		ConsumerGroup:   consumerGroup,
 		ConsumerName:    workerID,

@@ -12,7 +12,7 @@ edges:
 nodes:
   - name: Get Job Details
     node_id: get_job
-    runtime: http
+    type: HTTP
     spec:
       headers:
         Content-Type: application/json
@@ -20,10 +20,9 @@ nodes:
       method: GET
       timeout_seconds: 30
       url: https://portal-api-dev.freightexchange.com.au/portal/internal/job/{{input.job_id}}
-    type: TASK
   - name: Get Auth Token
     node_id: get_auth_token
-    runtime: http
+    type: HTTP
     spec:
       body: grant_type=client_credentials&client_id={{config.aramex_connection.client_id}}&client_secret={{config.aramex_connection.client_secret}}&scope={{config.aramex_connection.scope}}
       headers:
@@ -31,9 +30,9 @@ nodes:
       method: POST
       timeout_seconds: 30
       url: "{{config.aramex_connection.url}}"
-    type: TASK
   - name: Map Job to Consignment Request
     node_id: map_job_to_consignment_request
+    type: CODE
     runtime: js
     spec:
       code: >-
@@ -140,10 +139,9 @@ nodes:
         config: "{{config}}"
         job: "{{tasks.get_job.output}}"
       timeout: 60
-    type: TASK
   - name: Send Consignment
     node_id: send_consignment
-    runtime: http
+    type: HTTP
     spec:
       body: "{{tasks.map_job_to_consignment_request.output}}"
       headers:
@@ -152,9 +150,9 @@ nodes:
       method: POST
       timeout_seconds: 60
       url: "{{config.aramex_connection.consignment_url}}"
-    type: TASK
   - name: Parse Send Consignment Response
     node_id: parse_send_consignment_response
+    type: CODE
     runtime: js
     spec:
       code: >-
@@ -208,10 +206,9 @@ nodes:
         }
       filename: parse_response.js
       timeout: 30
-    type: TASK
   - name: Download Label
     node_id: download_label
-    runtime: http
+    type: HTTP
     spec:
       headers:
         Authorization: Bearer {{tasks.get_auth_token.output.access_token}}
@@ -221,4 +218,3 @@ nodes:
       url: "{{carrierAliasProperties.carrierDetailsJson.otherDetails.aramexBaseUrl}}/\
         api/consignments/{{tasks.send_consignment.output.data.conId}}/labels?pa\
         geSize=4x6"
-    type: TASK

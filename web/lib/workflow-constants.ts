@@ -3,8 +3,7 @@ export const SAMPLE_NODES = [
   {
     node_id: "start_node",
     name: "Start",
-    type: "TASK",
-    runtime: "http",
+    type: "HTTP",
     spec: {
       url: "https://api.example.com/start",
       method: "GET",
@@ -14,7 +13,7 @@ export const SAMPLE_NODES = [
   {
     node_id: "process_node",
     name: "Process",
-    type: "TASK",
+    type: "CODE",
     runtime: "javascript",
     spec: {
       code: "function handler(input) {\n  // Process the input\n  return input;\n}",

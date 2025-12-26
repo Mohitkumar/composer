@@ -97,8 +97,6 @@ func NewLangClientManager(addrs map[string]string, logger zerolog.Logger) (*Lang
 		logger.Info().Str("runtime", runtime).Str("addr", addr).Msg("language client created")
 	}
 
-	// Also support legacy single LangWorkerAddr for backward compatibility
-	// This will be handled in GetClientForRuntime
 
 	return manager, nil
 }

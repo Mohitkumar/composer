@@ -21,6 +21,7 @@ type Coordinator struct {
 	Outbox       *outbox.OutboxEnqueuer
 	Template     *template.Resolver
 	Intelligence *intelligence.Client
+	Repository   WorkflowRepository // Repository for database operations
 }
 
 func NewCoordinator(config *Config, logger *zerolog.Logger) (*Coordinator, error) {
@@ -57,7 +58,7 @@ func NewCoordinator(config *Config, logger *zerolog.Logger) (*Coordinator, error
 	// Create intelligence client
 	intelligenceClient := intelligence.NewClient(config.IntelligenceConfig, *logger)
 
-	return &Coordinator{
+	coordinator := &Coordinator{
 		Config:       config,
 		Logger:       logger,
 		Redis:        redisStream,
@@ -66,7 +67,12 @@ func NewCoordinator(config *Config, logger *zerolog.Logger) (*Coordinator, error
 		Outbox:       outboxEnqueuer,
 		Template:     templateResolver,
 		Intelligence: intelligenceClient,
-	}, nil
+	}
+
+	// Create repository
+	coordinator.Repository = NewWorkflowRepository(dbPool, coordinator)
+
+	return coordinator, nil
 }
 
 func (b *Coordinator) Run(ctx context.Context) error {

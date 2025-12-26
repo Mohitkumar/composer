@@ -48,7 +48,7 @@ func (c *Coordinator) StartWorkflow(ctx context.Context, p *model.StartWorkflowR
 	}
 
 	err = c.ExecuteWithTransaction(ctx, span, logger, func(ctx context.Context, tx pgx.Tx) error {
-		if err := c.insertWorkflowRun(ctx, tx, p, logger, span); err != nil {
+		if err := c.Repository.InsertWorkflowRun(ctx, tx, p, logger, span); err != nil {
 			return err
 		}
 
@@ -76,15 +76,15 @@ func (c *Coordinator) StartWorkflow(ctx context.Context, p *model.StartWorkflowR
 		taskLogger := logger.With().
 			Str("task_id", taskID).
 			Str("node_id", startNode.NodeID).
-			Str("node_type", startNode.Runtime).
+			Str("node_type", startNode.GetNodeTypeForRouting()).
 			Logger()
 
-		if err := c.insertTaskInstance(ctx, tx, taskID, p.RunID, startNode, taskInput, scheduledAt, taskLogger, span); err != nil {
+		if err := c.Repository.InsertTaskInstance(ctx, tx, taskID, p.RunID, startNode, taskInput, scheduledAt, taskLogger, span); err != nil {
 			return err
 		}
 		c.recordTaskCreated(ctx, taskLogger, span, taskID, p.RunID, startNode)
 
-		if err := c.insertTaskOutbox(ctx, tx, taskID, p.RunID, startNode, taskInput, taskLogger, span); err != nil {
+		if err := c.Repository.InsertTaskOutbox(ctx, tx, taskID, p.RunID, startNode, taskInput, taskLogger, span); err != nil {
 			return err
 		}
 		return nil
@@ -109,10 +109,7 @@ func (c *Coordinator) StartWorkflow(ctx context.Context, p *model.StartWorkflowR
 
 func (c *Coordinator) HandleNodeCompleted(ctx context.Context, taskID string, runID string, nodeID string, output json.RawMessage) error {
 	// Get workflow run info to load workflow definition (before transaction)
-	var workflowID string
-	var workflowVersion int
-	err := c.DB.QueryRow(ctx, `SELECT workflow_definition_id, workflow_version FROM workflow_runs WHERE id=$1`, runID).
-		Scan(&workflowID, &workflowVersion)
+	workflowID, workflowVersion, err := c.Repository.GetWorkflowRunInfo(ctx, runID)
 	if err != nil {
 		c.Logger.Error().Err(err).Str("run_id", runID).Msg("failed to get workflow run")
 		return fmt.Errorf("failed to get workflow run: %w", err)
@@ -142,21 +139,21 @@ func (c *Coordinator) HandleNodeCompleted(ctx context.Context, taskID string, ru
 	// This transaction should always succeed to preserve the node completion state
 	var runContext *model.RunContext
 	err = c.ExecuteWithTransaction(ctx, span, logger, func(ctx context.Context, tx pgx.Tx) error {
-		updated, err := c.markTaskCompleted(ctx, tx, runID, nodeID, output, logger, span)
+		updated, err := c.Repository.MarkTaskCompleted(ctx, tx, runID, nodeID, output, logger, span)
 		if err != nil {
 			return err
 		}
 		if !updated {
 			// Task was already completed, load run context for potential next node processing
-			runContext, err = c.loadRunContext(ctx, tx, runID, logger, span)
+			runContext, err = c.Repository.LoadRunContext(ctx, tx, runID, logger, span)
 			return err
 		}
 
-		if err := c.clearTaskLease(ctx, tx, runID, nodeID, logger, span); err != nil {
+		if err := c.Repository.ClearTaskLease(ctx, tx, runID, nodeID, logger, span); err != nil {
 			return err
 		}
 
-		runContext, err = c.loadAndUpdateRunContext(ctx, tx, runID, nodeID, output, logger, span)
+		runContext, err = c.Repository.LoadAndUpdateRunContext(ctx, tx, runID, nodeID, output, logger, span)
 		if err != nil {
 			return err
 		}
@@ -190,15 +187,16 @@ func (c *Coordinator) HandleNodeCompleted(ctx context.Context, taskID string, ru
 			logger.Error().Err(nextNodesErr).Msg("failed to handle switch node")
 			return fmt.Errorf("failed to handle switch node: %w", nextNodesErr)
 		}
-	case model.NodeTypeParallel:
-		// For PARALLEL nodes, fork into all outgoing branches immediately
+	case model.NodeTypeFork:
+		// For FORK nodes, fork into all outgoing branches immediately
 		// The join logic will be handled when branch nodes complete
 		nextNodes = wfSpec.FindNextNodes(nodeID)
 		logger.Info().
 			Int("forked_branches", len(nextNodes)).
 			Msg("parallel node forking into branches")
 	default:
-		// For TASK and WAIT nodes, use standard next node logic
+		// For CODE, HTTP, CSV, WAIT, and other executable nodes, use standard next node logic
+		// Control flow nodes (SWITCH, FORK) are handled above
 		nextNodes = wfSpec.FindNextNodes(nodeID)
 
 		// Check if this node is part of a parallel execution (a branch node)
@@ -238,7 +236,7 @@ func (c *Coordinator) HandleNodeCompleted(ctx context.Context, taskID string, ru
 		}
 	} else {
 		// Start next nodes in a separate transaction
-		err = c.startNextNodes(ctx, span, logger, runID, workflowID, nextNodes, runContext)
+		err = c.startNextNodes(ctx, span, logger, runID, workflowID, workflowVersion, nextNodes, runContext)
 		if err != nil {
 			// Only fail workflow if there's a database/system error
 			// CEL resolution errors are now handled by creating FAILED task instances
@@ -325,43 +323,6 @@ func (c *Coordinator) newRunContext(input json.RawMessage, config json.RawMessag
 	}
 }
 
-func (c *Coordinator) insertWorkflowRun(ctx context.Context, tx pgx.Tx, p *model.StartWorkflowRequest, logger zerolog.Logger, span trace.Span) error {
-	status := "RUNNING"
-	runContext := c.newRunContext(p.Input, p.ExecutionOptions)
-	runContextJSON, err := json.Marshal(runContext)
-	if err != nil {
-		logger.Error().Err(err).Msg("failed to marshal run context")
-		util.RecordError(span, err)
-		return err
-	}
-
-	// Check if workflow is deleted before creating run
-	var deletedAt sql.NullTime
-	err = tx.QueryRow(ctx, `SELECT deleted_at FROM workflow_definitions WHERE id = $1 AND version = $2`,
-		p.WorkflowID, p.WorkflowVersion).Scan(&deletedAt)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return fmt.Errorf("workflow definition not found: %s v%d", p.WorkflowID, p.WorkflowVersion)
-		}
-		return fmt.Errorf("failed to check workflow definition: %w", err)
-	}
-	if deletedAt.Valid {
-		return fmt.Errorf("cannot start workflow: workflow %s v%d has been deleted", p.WorkflowID, p.WorkflowVersion)
-	}
-
-	_, err = tx.Exec(ctx, `INSERT INTO workflow_runs (id, workflow_definition_id, workflow_version, status, input_json, context_json, created_at, updated_at)
-        VALUES ($1,$2,$3,$4,$5::jsonb,$6::jsonb,NOW(),NOW()) ON CONFLICT (id) DO NOTHING`,
-		p.RunID, p.WorkflowID, p.WorkflowVersion, status, p.Input, runContextJSON)
-	if err != nil {
-		logger.Error().Err(err).Msg("failed to create workflow run")
-		util.RecordError(span, err)
-		return err
-	}
-
-	logger.Debug().Msg("created workflow run record")
-	return nil
-}
-
 func (c *Coordinator) resolveNodeInputFromSpecRaw(specRaw json.RawMessage, runContext *model.RunContext, logger zerolog.Logger) (json.RawMessage, error) {
 	var spec interface{}
 	if len(specRaw) > 0 {
@@ -390,172 +351,15 @@ func (c *Coordinator) resolveNodeInputFromSpecRaw(specRaw json.RawMessage, runCo
 	return taskInput, nil
 }
 
-func (c *Coordinator) insertTaskInstance(ctx context.Context, tx pgx.Tx, taskID, runID string, node *model.Node, taskInput json.RawMessage, scheduledAt time.Time, logger zerolog.Logger, span trace.Span) error {
-	_, err := tx.Exec(ctx, `INSERT INTO task_instances (id, run_id, node_id, node_type, state, attempt, input_json, scheduled_at, created_at, updated_at)
-        VALUES ($1,$2,$3,$4,'PENDING',0,$5::jsonb,$6,NOW(),NOW()) ON CONFLICT (id) DO NOTHING`,
-		taskID, runID, node.NodeID, node.Runtime, taskInput, scheduledAt)
-	if err != nil {
-		logger.Error().Err(err).Msg("failed to create task instance")
-		util.RecordError(span, err)
-		return fmt.Errorf("failed to create task instance: %w", err)
-	}
-
-	return nil
-}
-
-// insertTaskInstanceWithState inserts a task instance with a specific state and optional error
-func (c *Coordinator) insertTaskInstanceWithState(ctx context.Context, tx pgx.Tx, taskID, runID string, node *model.Node, taskInput json.RawMessage, scheduledAt time.Time, state string, errorMsg string, logger zerolog.Logger, span trace.Span) error {
-	var errorJSON json.RawMessage
-	if errorMsg != "" {
-		errorMap := map[string]string{"error": errorMsg}
-		var err error
-		errorJSON, err = json.Marshal(errorMap)
-		if err != nil {
-			logger.Error().Err(err).Msg("failed to marshal error message")
-			errorJSON = json.RawMessage(fmt.Sprintf(`{"error": %q}`, errorMsg))
-		}
-	}
-
-	finishedAt := sql.NullTime{}
-	if state == "FAILED" || state == "COMPLETED" {
-		finishedAt = sql.NullTime{Time: time.Now(), Valid: true}
-	}
-
-	_, err := tx.Exec(ctx, `INSERT INTO task_instances (id, run_id, node_id, node_type, state, attempt, input_json, last_error, scheduled_at, finished_at, created_at, updated_at)
-        VALUES ($1,$2,$3,$4,$5,0,$6::jsonb,$7::jsonb,$8,$9,NOW(),NOW()) ON CONFLICT (id) DO NOTHING`,
-		taskID, runID, node.NodeID, node.Runtime, state, taskInput, errorJSON, scheduledAt, finishedAt)
-	if err != nil {
-		logger.Error().Err(err).Msg("failed to create task instance with state")
-		util.RecordError(span, err)
-		return fmt.Errorf("failed to create task instance with state: %w", err)
-	}
-
-	return nil
-}
-
 func (c *Coordinator) recordTaskCreated(ctx context.Context, logger zerolog.Logger, span trace.Span, taskID, runID string, node *model.Node) {
 	logger.Info().Msg("created task instance")
-	util.RecordTaskCreated(ctx, taskID, runID, node.NodeID, node.Runtime)
+	nodeTypeForRouting := node.GetNodeTypeForRouting()
+	util.RecordTaskCreated(ctx, taskID, runID, node.NodeID, nodeTypeForRouting)
 	util.SetSpanAttributes(span,
 		util.Attribute("task.id", taskID),
 		util.Attribute("task.node_id", node.NodeID),
-		util.Attribute("task.node_type", node.Runtime),
+		util.Attribute("task.node_type", nodeTypeForRouting),
 	)
-}
-
-func (c *Coordinator) insertTaskOutbox(ctx context.Context, tx pgx.Tx, taskID, runID string, node *model.Node, taskInput json.RawMessage, logger zerolog.Logger, span trace.Span) error {
-	outboxID := uuid.New().String()
-	outboxPayload := map[string]interface{}{
-		"task_id":   taskID,
-		"run_id":    runID,
-		"node_id":   node.NodeID,
-		"node_type": node.Runtime,
-		"input":     string(taskInput),
-	}
-	outboxPayloadBytes, err := json.Marshal(outboxPayload)
-	if err != nil {
-		logger.Error().Err(err).Msg("failed to marshal outbox payload")
-		return fmt.Errorf("failed to marshal outbox payload: %w", err)
-	}
-
-	_, err = tx.Exec(ctx, `INSERT INTO outbox (id, stream, payload, type, status, next_attempt_at, attempt_count, max_retries, created_at, updated_at)
-        VALUES ($1,'workflow.tasks',$2::jsonb,'TASK_EXECUTION','PENDING',NOW(),0,5,NOW(),NOW())`,
-		outboxID, outboxPayloadBytes)
-	if err != nil {
-		logger.Error().Err(err).Msg("failed to create outbox entry")
-		util.RecordError(span, err)
-		return fmt.Errorf("failed to create outbox entry: %w", err)
-	}
-
-	logger.Debug().Str("outbox_id", outboxID).Msg("created outbox entry for task")
-	return nil
-}
-
-func (c *Coordinator) markTaskCompleted(ctx context.Context, tx pgx.Tx, runID, nodeID string, output json.RawMessage, logger zerolog.Logger, span trace.Span) (bool, error) {
-	result, err := tx.Exec(ctx,
-		`UPDATE task_instances 
-             SET state='COMPLETED',
-                 output_json=$1::jsonb,
-                 completed_at=now(),
-                 updated_at=now() 
-         WHERE run_id=$2 AND node_id=$3 AND state IN ('RUNNING', 'PENDING')`,
-		output, runID, nodeID)
-	if err != nil {
-		return false, fmt.Errorf("failed to update task instance: %w", err)
-	}
-
-	rowsAffected := result.RowsAffected()
-	if rowsAffected == 0 {
-		return false, nil
-	}
-	logger.Debug().Int64("rows_updated", rowsAffected).Msg("marked task completed")
-	return true, nil
-}
-
-// loadRunContext loads the run context without updating it (for read-only operations)
-func (c *Coordinator) loadRunContext(ctx context.Context, tx pgx.Tx, runID string, logger zerolog.Logger, span trace.Span) (*model.RunContext, error) {
-	var workflowInput json.RawMessage
-	var runContextJSON json.RawMessage
-	if err := tx.QueryRow(ctx, `SELECT input_json, context_json FROM workflow_runs WHERE id=$1`, runID).
-		Scan(&workflowInput, &runContextJSON); err != nil {
-		logger.Error().Err(err).Msg("failed to load workflow run context")
-		util.RecordError(span, err)
-		return nil, fmt.Errorf("failed to load workflow run context: %w", err)
-	}
-
-	runContext, err := c.mergeRunContext(workflowInput, runContextJSON)
-	if err != nil {
-		logger.Error().Err(err).Msg("failed to merge run context")
-		util.RecordError(span, err)
-		return nil, err
-	}
-
-	return runContext, nil
-}
-
-func (c *Coordinator) loadAndUpdateRunContext(ctx context.Context, tx pgx.Tx, runID, nodeID string, output json.RawMessage, logger zerolog.Logger, span trace.Span) (*model.RunContext, error) {
-	var workflowInput json.RawMessage
-	var runContextJSON json.RawMessage
-	if err := tx.QueryRow(ctx, `SELECT input_json, context_json FROM workflow_runs WHERE id=$1 FOR UPDATE`, runID).
-		Scan(&workflowInput, &runContextJSON); err != nil {
-		logger.Error().Err(err).Msg("failed to load workflow run context")
-		util.RecordError(span, err)
-		return nil, fmt.Errorf("failed to load workflow run context: %w", err)
-	}
-
-	runContext, err := c.mergeRunContext(workflowInput, runContextJSON)
-	if err != nil {
-		logger.Error().Err(err).Msg("failed to merge run context")
-		util.RecordError(span, err)
-		return nil, err
-	}
-
-	var outputObj interface{}
-	if len(output) > 0 {
-		if err := json.Unmarshal(output, &outputObj); err != nil {
-			outputObj = string(output)
-		}
-	}
-
-	runContext.Tasks[nodeID] = &model.StepResult{
-		Status: model.TaskInstanceStatusCompleted,
-		Output: outputObj,
-	}
-
-	runContextBytes, err := json.Marshal(runContext)
-	if err != nil {
-		logger.Error().Err(err).Msg("failed to marshal run context")
-		util.RecordError(span, err)
-		return nil, fmt.Errorf("failed to marshal run context: %w", err)
-	}
-
-	if _, err := tx.Exec(ctx, `UPDATE workflow_runs SET context_json=$1, updated_at=now() WHERE id=$2`, runContextBytes, runID); err != nil {
-		logger.Error().Err(err).Msg("failed to update workflow run context")
-		util.RecordError(span, err)
-		return nil, fmt.Errorf("failed to update workflow run context: %w", err)
-	}
-
-	return runContext, nil
 }
 
 func (c *Coordinator) mergeRunContext(workflowInput json.RawMessage, runContextJSON json.RawMessage) (*model.RunContext, error) {
@@ -579,91 +383,176 @@ func (c *Coordinator) mergeRunContext(workflowInput json.RawMessage, runContextJ
 	return runContext, nil
 }
 
-func (c *Coordinator) clearTaskLease(ctx context.Context, tx pgx.Tx, runID, nodeID string, logger zerolog.Logger, span trace.Span) error {
-	_, err := tx.Exec(ctx,
-		`UPDATE task_instances 
-         SET lease_owner=NULL,
-             lease_expires_at=NULL,
-             updated_at=now()
-       WHERE run_id=$1 AND node_id=$2`,
-		runID, nodeID)
-	if err != nil {
-		logger.Error().Err(err).Msg("failed to clear task lease")
-		util.RecordError(span, err)
-		return fmt.Errorf("failed to clear task lease: %w", err)
-	}
-	return nil
-}
-
+// finalizeWorkflowIfComplete checks if workflow is complete and marks it as succeeded if so
+// Returns (isComplete, pendingCount, error)
 func (c *Coordinator) finalizeWorkflowIfComplete(ctx context.Context, tx pgx.Tx, runID, workflowID string, span trace.Span, logger zerolog.Logger) (bool, int, error) {
-	var pending int
-	if err := tx.QueryRow(ctx,
-		`SELECT COUNT(1) FROM task_instances WHERE run_id=$1 AND state IN ('PENDING','RUNNING','QUEUED')`,
-		runID).Scan(&pending); err != nil {
-		logger.Error().Err(err).Msg("failed to check pending tasks")
-		util.RecordError(span, err)
-		return false, 0, fmt.Errorf("failed to check pending tasks: %w", err)
+	done, pending, err := c.Repository.CheckPendingTasks(ctx, tx, runID)
+	if err != nil {
+		return false, 0, err
 	}
 
-	if pending == 0 {
-		var workflowStartTime time.Time
-		_ = tx.QueryRow(ctx, `SELECT created_at FROM workflow_runs WHERE id=$1`, runID).Scan(&workflowStartTime)
-		workflowDuration := time.Since(workflowStartTime)
-
-		if _, err := tx.Exec(ctx,
-			`UPDATE workflow_runs SET status='SUCCEEDED', completed_at=now(), updated_at=now() WHERE id=$1`,
-			runID); err != nil {
-			logger.Error().Err(err).Msg("failed to mark workflow as succeeded")
-			util.RecordError(span, err)
-			return false, 0, fmt.Errorf("failed to mark workflow as succeeded: %w", err)
+	if done {
+		if err := c.Repository.MarkWorkflowCompleted(ctx, tx, runID, workflowID, span, logger); err != nil {
+			return false, 0, err
 		}
-
-		logger.Info().
-			Dur("workflow_duration_ms", workflowDuration).
-			Msg("workflow completed successfully")
-
-		util.RecordWorkflowCompleted(ctx, workflowID, runID, workflowDuration)
-		util.SetSpanAttributes(span,
-			util.Attribute("workflow.status", "succeeded"),
-			util.AttributeInt("workflow.duration_ms", workflowDuration.Milliseconds()),
-		)
-
+		logger.Info().Msg("workflow completed successfully")
 		return true, 0, nil
 	}
 
 	return false, pending, nil
 }
 
-func (c *Coordinator) taskInstanceExists(ctx context.Context, tx pgx.Tx, runID, nodeID string) (bool, string, string, error) {
-	var existingTaskID string
-	var existingState string
-	err := tx.QueryRow(ctx,
-		`SELECT id, state FROM task_instances WHERE run_id=$1 AND node_id=$2`,
-		runID, nodeID).Scan(&existingTaskID, &existingState)
-
-	if err != nil {
-		if err == pgx.ErrNoRows {
-			return false, "", "", nil
-		}
-		return false, "", "", fmt.Errorf("failed to check existing task instance: %w", err)
-	}
-
-	if existingTaskID != "" {
-		return true, existingTaskID, existingState, nil
-	}
-	return false, "", "", nil
-}
-
 // startNextNodes starts the next nodes in a separate transaction
 // This allows retrying if it fails without losing the completion record of the previous node
-func (c *Coordinator) startNextNodes(ctx context.Context, span trace.Span, logger zerolog.Logger, runID, workflowID string, nextNodes []*model.Node, runContext *model.RunContext) error {
+func (c *Coordinator) startNextNodes(ctx context.Context, span trace.Span, logger zerolog.Logger, runID, workflowID string, workflowVersion int, nextNodes []*model.Node, runContext *model.RunContext) error {
 	return c.ExecuteWithTransaction(ctx, span, logger, func(ctx context.Context, tx pgx.Tx) error {
 		// Create task instances and outbox entries for next nodes
 		var celResolutionErrors []string
+		var nodesToProcess []*model.Node
+
+		// First pass: handle control flow nodes (SWITCH, FORK) immediately
 		for _, nextNode := range nextNodes {
+			if nextNode.IsControlFlowNode() {
+				// Control flow nodes are handled by coordinator, not worker
+				if nextNode.Type == model.NodeTypeSwitch {
+					// For SWITCH nodes:
+					// 1. Create a task instance and mark it as completed immediately (SWITCH nodes pass through input as output)
+					// 2. Update run context with SWITCH node output
+					// 3. Evaluate conditions and process resulting nodes
+
+					// Check if task instance already exists
+					exists, existingTaskID, existingState, err := c.Repository.TaskInstanceExists(ctx, tx, runID, nextNode.NodeID)
+					if err != nil {
+						return err
+					}
+
+					var switchOutput json.RawMessage
+					if !exists || existingState == "FAILED" {
+						// Create task instance for SWITCH node
+						switchTaskID := uuid.New().String()
+						if exists && existingState == "FAILED" {
+							switchTaskID = existingTaskID
+						}
+
+						// SWITCH nodes pass through the input from the previous node as output
+						// Get the output from the last completed node in the run context
+						if runContext.Tasks != nil && len(runContext.Tasks) > 0 {
+							// Find the most recent completed task output
+							for _, taskResult := range runContext.Tasks {
+								if taskResult.Status == model.TaskInstanceStatusCompleted && taskResult.Output != nil {
+									// Type assert to json.RawMessage
+									if outputBytes, ok := taskResult.Output.(json.RawMessage); ok {
+										switchOutput = outputBytes
+									} else if outputStr, ok := taskResult.Output.(string); ok {
+										switchOutput = json.RawMessage(outputStr)
+									} else {
+										// Marshal to JSON if it's another type
+										outputBytes, err := json.Marshal(taskResult.Output)
+										if err == nil {
+											switchOutput = json.RawMessage(outputBytes)
+										}
+									}
+									break
+								}
+							}
+						}
+
+						// If no output found, use empty object
+						if switchOutput == nil {
+							switchOutput = json.RawMessage("{}")
+						}
+
+						// Create task instance and mark as completed immediately
+						if err := c.Repository.InsertTaskInstance(ctx, tx, switchTaskID, runID, nextNode, json.RawMessage("{}"), time.Now(), logger, span); err != nil {
+							logger.Error().Err(err).Str("node_id", nextNode.NodeID).Msg("failed to create task instance for switch node")
+							return fmt.Errorf("failed to create task instance for switch node: %w", err)
+						}
+
+						// Mark as completed with pass-through output
+						if _, err := c.Repository.MarkTaskCompleted(ctx, tx, runID, nextNode.NodeID, switchOutput, logger, span); err != nil {
+							logger.Error().Err(err).Str("node_id", nextNode.NodeID).Msg("failed to mark switch node as completed")
+							return fmt.Errorf("failed to mark switch node as completed: %w", err)
+						}
+
+						// Update run context in database with SWITCH node output
+						updatedRunContext, err := c.Repository.LoadAndUpdateRunContext(ctx, tx, runID, nextNode.NodeID, switchOutput, logger, span)
+						if err != nil {
+							logger.Error().Err(err).Str("node_id", nextNode.NodeID).Msg("failed to update run context for switch node")
+							return fmt.Errorf("failed to update run context for switch node: %w", err)
+						}
+
+						// Update local run context for condition evaluation
+						runContext = updatedRunContext
+
+						c.recordTaskCreated(ctx, logger, span, switchTaskID, runID, nextNode)
+						logger.Debug().
+							Str("switch_node_id", nextNode.NodeID).
+							Str("task_id", switchTaskID).
+							Msg("switch node task instance created and marked as completed")
+					} else {
+						// Task instance already exists, load its output for run context
+						var existingOutput json.RawMessage
+						err := tx.QueryRow(ctx, `SELECT output_json FROM task_instances WHERE run_id=$1 AND node_id=$2`, runID, nextNode.NodeID).
+							Scan(&existingOutput)
+						if err == nil && existingOutput != nil {
+							switchOutput = existingOutput
+							// Update local run context for condition evaluation
+							if runContext.Tasks == nil {
+								runContext.Tasks = make(map[string]*model.StepResult)
+							}
+							runContext.Tasks[nextNode.NodeID] = &model.StepResult{
+								Status: model.TaskInstanceStatusCompleted,
+								Output: switchOutput,
+							}
+						}
+					}
+
+					// Now evaluate conditions and get matched nodes
+					wfSpec, err := c.loadAndParseWorkflowSpec(ctx, workflowID, workflowVersion)
+					if err != nil {
+						logger.Error().Err(err).Str("node_id", nextNode.NodeID).Msg("failed to load workflow spec for switch node")
+						return fmt.Errorf("failed to load workflow spec: %w", err)
+					}
+
+					switchNodes, err := c.handleSwitchNode(ctx, wfSpec, nextNode.NodeID, runContext, logger)
+					if err != nil {
+						logger.Error().Err(err).Str("node_id", nextNode.NodeID).Msg("failed to handle switch node")
+						return fmt.Errorf("failed to handle switch node: %w", err)
+					}
+
+					// Recursively process the nodes that matched the switch conditions
+					nodesToProcess = append(nodesToProcess, switchNodes...)
+					logger.Debug().
+						Str("switch_node_id", nextNode.NodeID).
+						Int("matched_nodes", len(switchNodes)).
+						Msg("switch node processed, adding matched nodes to processing queue")
+				} else if nextNode.Type == model.NodeTypeFork {
+					// For FORK nodes, get all outgoing nodes and process them
+					wfSpec, err := c.loadAndParseWorkflowSpec(ctx, workflowID, workflowVersion)
+					if err != nil {
+						logger.Error().Err(err).Str("node_id", nextNode.NodeID).Msg("failed to load workflow spec for fork node")
+						return fmt.Errorf("failed to load workflow spec: %w", err)
+					}
+
+					forkNodes := wfSpec.FindNextNodes(nextNode.NodeID)
+					nodesToProcess = append(nodesToProcess, forkNodes...)
+					logger.Debug().
+						Str("fork_node_id", nextNode.NodeID).
+						Int("forked_nodes", len(forkNodes)).
+						Msg("fork node processed, adding forked nodes to processing queue")
+				}
+				// JOIN nodes are handled automatically when all parallel branches complete
+				continue
+			}
+			// Regular nodes go to the processing queue
+			nodesToProcess = append(nodesToProcess, nextNode)
+		}
+
+		// Second pass: create task instances for executable nodes
+		for _, nextNode := range nodesToProcess {
 			// Check if task instance already exists (idempotency)
 			// Allow recreating if the existing task is in FAILED state (for retry scenarios)
-			exists, existingTaskID, existingState, err := c.taskInstanceExists(ctx, tx, runID, nextNode.NodeID)
+			exists, existingTaskID, existingState, err := c.Repository.TaskInstanceExists(ctx, tx, runID, nextNode.NodeID)
 			if err != nil {
 				return err
 			}
@@ -689,7 +578,7 @@ func (c *Coordinator) startNextNodes(ctx context.Context, span trace.Span, logge
 			nextTaskLogger := logger.With().
 				Str("next_task_id", nextTaskID).
 				Str("next_node_id", nextNode.NodeID).
-				Str("next_node_type", nextNode.Runtime).
+				Str("next_node_type", nextNode.GetNodeTypeForRouting()).
 				Logger()
 
 			taskInput, err := c.resolveNodeInputFromSpecRaw(nextNode.Spec, runContext, nextTaskLogger)
@@ -702,7 +591,7 @@ func (c *Coordinator) startNextNodes(ctx context.Context, span trace.Span, logge
 					Msg("failed to resolve CEL expressions for next node - creating task instance as FAILED")
 
 				// Create task instance with FAILED state
-				if insertErr := c.insertTaskInstanceWithState(ctx, tx, nextTaskID, runID, nextNode, json.RawMessage("{}"), time.Now(), "FAILED", celError, nextTaskLogger, span); insertErr != nil {
+				if insertErr := c.Repository.InsertTaskInstanceWithState(ctx, tx, nextTaskID, runID, nextNode, json.RawMessage("{}"), time.Now(), "FAILED", celError, nextTaskLogger, span); insertErr != nil {
 					nextTaskLogger.Error().
 						Err(insertErr).
 						Str("error_type", "TASK_INSTANCE_CREATION_ERROR").
@@ -716,7 +605,7 @@ func (c *Coordinator) startNextNodes(ctx context.Context, span trace.Span, logge
 				continue
 			}
 
-			if err := c.insertTaskInstance(ctx, tx, nextTaskID, runID, nextNode, taskInput, time.Now(), nextTaskLogger, span); err != nil {
+			if err := c.Repository.InsertTaskInstance(ctx, tx, nextTaskID, runID, nextNode, taskInput, time.Now(), nextTaskLogger, span); err != nil {
 				nextTaskLogger.Error().
 					Err(err).
 					Str("error_type", "TASK_INSTANCE_CREATION_ERROR").
@@ -725,7 +614,7 @@ func (c *Coordinator) startNextNodes(ctx context.Context, span trace.Span, logge
 			}
 			c.recordTaskCreated(ctx, nextTaskLogger, span, nextTaskID, runID, nextNode)
 
-			if err := c.insertTaskOutbox(ctx, tx, nextTaskID, runID, nextNode, taskInput, nextTaskLogger, span); err != nil {
+			if err := c.Repository.InsertTaskOutbox(ctx, tx, nextTaskID, runID, nextNode, taskInput, nextTaskLogger, span); err != nil {
 				nextTaskLogger.Error().
 					Err(err).
 					Str("error_type", "OUTBOX_CREATION_ERROR").
@@ -744,7 +633,7 @@ func (c *Coordinator) startNextNodes(ctx context.Context, span trace.Span, logge
 		}
 
 		logger.Info().
-			Int("next_tasks_created", len(nextNodes)-len(celResolutionErrors)).
+			Int("next_tasks_created", len(nodesToProcess)-len(celResolutionErrors)).
 			Int("failed_tasks_created", len(celResolutionErrors)).
 			Msg("next nodes processing completed")
 
@@ -798,13 +687,14 @@ func (c *Coordinator) handleSwitchNode(ctx context.Context, wfSpec *model.Workfl
 
 // checkParallelJoin checks if a completed node is part of a parallel execution and if all branches are complete
 // Returns join nodes if all branches are done, otherwise returns empty slice
+// This is workflow state transition logic - it uses repository for database queries
 func (c *Coordinator) checkParallelJoin(ctx context.Context, wfSpec *model.WorkflowDefinitionSpec, completedNodeID string, runID string, logger zerolog.Logger, span trace.Span) ([]*model.Node, error) {
-	// Find if this node has an incoming edge from a PARALLEL node
+	// Find if this node has an incoming edge from a FORK node
 	var parallelNodeID string
 	for _, edge := range wfSpec.Edges {
 		if edge.To == completedNodeID {
 			node := wfSpec.GetNodeByID(edge.From)
-			if node != nil && node.Type == model.NodeTypeParallel {
+			if node != nil && node.Type == model.NodeTypeFork {
 				parallelNodeID = edge.From
 				break
 			}
@@ -833,32 +723,30 @@ func (c *Coordinator) checkParallelJoin(ctx context.Context, wfSpec *model.Workf
 		branchNodeIDs = append(branchNodeIDs, edge.To)
 	}
 
-	// Check if all branches are complete
-	var completedCount int
-	var totalCount int
-	err := c.DB.QueryRow(ctx,
-		`SELECT 
-			COUNT(*) FILTER (WHERE state IN ('COMPLETED', 'SUCCEEDED')) as completed_count,
-			COUNT(*) as total_count
-		FROM task_instances 
-		WHERE run_id = $1 AND node_id = ANY($2)`,
-		runID, branchNodeIDs).Scan(&completedCount, &totalCount)
+	// Check if all branches are complete using repository
+	var joinNodes []*model.Node
+	err := c.ExecuteWithTransaction(ctx, span, logger, func(ctx context.Context, tx pgx.Tx) error {
+		completedCount, totalCount, err := c.Repository.CheckParallelBranchesComplete(ctx, tx, runID, branchNodeIDs)
+		if err != nil {
+			return err
+		}
 
-	if err != nil {
-		return nil, fmt.Errorf("failed to check parallel branch status: %w", err)
-	}
+		// If not all branches are complete, return empty (no join yet)
+		if completedCount < totalCount {
+			logger.Debug().
+				Int("completed_branches", completedCount).
+				Int("total_branches", totalCount).
+				Msg("not all parallel branches complete yet")
+			joinNodes = nil
+			return nil
+		}
 
-	// If not all branches are complete, return empty (no join yet)
-	if completedCount < totalCount {
-		logger.Debug().
-			Int("completed_branches", completedCount).
-			Int("total_branches", totalCount).
-			Msg("not all parallel branches complete yet")
-		return nil, nil
-	}
+		// All branches are complete, find join nodes
+		joinNodes, err = c.findJoinNodes(wfSpec, branchNodeIDs, logger)
+		return err
+	})
 
-	// All branches are complete, find join nodes
-	return c.findJoinNodes(wfSpec, branchNodeIDs, logger)
+	return joinNodes, err
 }
 
 // findJoinNodes finds nodes that should be executed after all parallel branches complete
@@ -918,8 +806,8 @@ func (c *Coordinator) findJoinNodes(wfSpec *model.WorkflowDefinitionSpec, branch
 	return joinNodes, nil
 }
 
-// handleParallelNode handles completion of a PARALLEL node by checking if all parallel branches are complete
-// NOTE: This function is no longer used as PARALLEL nodes now fork immediately on completion
+// handleParallelNode handles completion of a FORK node by checking if all parallel branches are complete
+// NOTE: This function is no longer used as FORK nodes now fork immediately on completion
 // Keeping for reference but the logic is now in checkParallelJoin
 func (c *Coordinator) handleParallelNode(ctx context.Context, wfSpec *model.WorkflowDefinitionSpec, nodeID string, runID string, runContext *model.RunContext, logger zerolog.Logger, span trace.Span) ([]*model.Node, error) {
 	logger.Debug().Str("node_id", nodeID).Msg("handling parallel node completion")
@@ -1057,37 +945,26 @@ func (c *Coordinator) HandleNodeFailed(ctx context.Context, runID string, nodeID
 
 	err := c.ExecuteWithTransaction(ctx, span, logger, func(ctx context.Context, tx pgx.Tx) error {
 		// Get task info for metrics
-		var taskID string
-		var nodeType string
-		var taskStartTime time.Time
-		_ = tx.QueryRow(ctx,
-			`SELECT id, node_type, started_at FROM task_instances WHERE run_id=$1 AND node_id=$2`,
-			runID, nodeID).Scan(&taskID, &nodeType, &taskStartTime)
+		taskID, nodeType, taskStartTime, err := c.Repository.GetTaskInstanceInfo(ctx, tx, runID, nodeID)
+		if err != nil {
+			logger.Warn().Err(err).Msg("failed to get task instance info, continuing with failure handling")
+		}
 
 		// Mark task instance as failed
-		errorJSON, _ := json.Marshal(map[string]string{"error": errorMsg})
-		result, err := tx.Exec(ctx,
-			`UPDATE task_instances 
-             SET state='FAILED',
-                 last_error=$1::jsonb,
-                 finished_at=now(),
-                 updated_at=now() 
-         WHERE run_id=$2 AND node_id=$3 AND state IN ('RUNNING', 'PENDING')`,
-			errorJSON, runID, nodeID)
+		updated, err := c.Repository.MarkTaskFailed(ctx, tx, runID, nodeID, errorMsg, logger, span)
 		if err != nil {
 			logger.Error().Err(err).Msg("failed to update task instance")
 			util.RecordError(span, err)
 			return fmt.Errorf("failed to update task instance: %w", err)
 		}
 
-		rowsAffected := result.RowsAffected()
-		if rowsAffected == 0 {
+		if !updated {
 			// Task already failed or not found, return without error (idempotent)
 			logger.Debug().Msg("task already failed (idempotent)")
 			return nil
 		}
 
-		if err := c.clearTaskLease(ctx, tx, runID, nodeID, logger, span); err != nil {
+		if err := c.Repository.ClearTaskLease(ctx, tx, runID, nodeID, logger, span); err != nil {
 			return err
 		}
 
@@ -1108,40 +985,20 @@ func (c *Coordinator) HandleNodeFailed(ctx context.Context, runID string, nodeID
 		// Check if workflow should be marked as failed
 		// For now, we mark workflow as failed if any critical node fails
 		// This can be enhanced with retry logic or conditional failure handling
-		var pending int
-		if err := tx.QueryRow(ctx,
-			`SELECT COUNT(1) FROM task_instances WHERE run_id=$1 AND state IN ('PENDING','RUNNING','QUEUED')`,
-			runID).Scan(&pending); err != nil {
+		done, pending, err := c.Repository.CheckPendingTasks(ctx, tx, runID)
+		if err != nil {
 			logger.Error().Err(err).Msg("failed to check pending tasks")
 			util.RecordError(span, err)
 			return fmt.Errorf("failed to check pending tasks: %w", err)
 		}
 
 		// If no pending tasks and we have a failure, mark workflow as failed
-		if pending == 0 {
-			// Get workflow start time for duration calculation
-			var workflowStartTime time.Time
-			_ = c.DB.QueryRow(ctx, `SELECT created_at FROM workflow_runs WHERE id=$1`, runID).Scan(&workflowStartTime)
-			workflowDuration := time.Since(workflowStartTime)
-
-			_, err = tx.Exec(ctx,
-				`UPDATE workflow_runs SET status='FAILED', updated_at=now() WHERE id=$1`,
-				runID)
-			if err != nil {
+		if done {
+			if err := c.Repository.MarkWorkflowFailed(ctx, tx, runID, workflowID, errorMsg, logger, span); err != nil {
 				logger.Error().Err(err).Msg("failed to mark workflow as failed")
-				util.RecordError(span, err)
-				return fmt.Errorf("failed to mark workflow as failed: %w", err)
+				return err
 			}
-
-			logger.Error().
-				Dur("workflow_duration_ms", workflowDuration).
-				Msg("workflow marked as failed")
-
-			util.RecordWorkflowFailed(ctx, workflowID, runID, workflowDuration, errorMsg)
-			util.SetSpanAttributes(span,
-				util.Attribute("workflow.status", "failed"),
-				util.AttributeInt("workflow.duration_ms", workflowDuration.Milliseconds()),
-			)
+			logger.Error().Msg("workflow marked as failed")
 		} else {
 			logger.Debug().Int("pending_tasks", pending).Msg("workflow still has pending tasks, not marking as failed yet")
 		}
@@ -1165,40 +1022,19 @@ func (c *Coordinator) HandleNodeFailed(ctx context.Context, runID string, nodeID
 func (c *Coordinator) markWorkflowFailedWithReason(ctx context.Context, runID, workflowID, reason string, logger zerolog.Logger, span trace.Span) error {
 	return c.ExecuteWithTransaction(ctx, span, logger, func(ctx context.Context, tx pgx.Tx) error {
 		// Check current status - only mark as failed if still running/pending
-		var currentStatus string
-		err := tx.QueryRow(ctx, `SELECT status FROM workflow_runs WHERE id=$1`, runID).Scan(&currentStatus)
+		currentStatus, err := c.Repository.GetWorkflowRunStatus(ctx, tx, runID)
 		if err != nil {
 			return fmt.Errorf("failed to check workflow status: %w", err)
 		}
 
 		// Only update if workflow is still in a non-terminal state
 		if currentStatus != "FAILED" && currentStatus != "COMPLETED" && currentStatus != "SUCCEEDED" {
-			// Get workflow start time for duration calculation
-			var workflowStartTime time.Time
-			_ = tx.QueryRow(ctx, `SELECT created_at FROM workflow_runs WHERE id=$1`, runID).Scan(&workflowStartTime)
-			workflowDuration := time.Since(workflowStartTime)
-
-			// Update workflow status to FAILED
-			_, err = tx.Exec(ctx,
-				`UPDATE workflow_runs SET status='FAILED', completed_at=now(), updated_at=now() WHERE id=$1`,
-				runID)
-			if err != nil {
-				logger.Error().Err(err).Msg("failed to mark workflow as failed")
-				util.RecordError(span, err)
-				return fmt.Errorf("failed to mark workflow as failed: %w", err)
+			if err := c.Repository.MarkWorkflowFailed(ctx, tx, runID, workflowID, reason, logger, span); err != nil {
+				return err
 			}
-
 			logger.Error().
 				Str("failure_reason", reason).
-				Dur("workflow_duration_ms", workflowDuration).
 				Msg("workflow marked as failed: could not create task instance")
-
-			util.RecordWorkflowFailed(ctx, workflowID, runID, workflowDuration, reason)
-			util.SetSpanAttributes(span,
-				util.Attribute("workflow.status", "failed"),
-				util.Attribute("workflow.failure_reason", reason),
-				util.AttributeInt("workflow.duration_ms", workflowDuration.Milliseconds()),
-			)
 		} else {
 			logger.Debug().
 				Str("current_status", currentStatus).
@@ -1228,12 +1064,7 @@ func (c *Coordinator) RetryWorkflowInstance(ctx context.Context, p *model.RetryW
 	startTime := time.Now()
 
 	// Get workflow instance to retrieve workflow ID and current version
-	var workflowID string
-	var currentWorkflowVersion int
-	var currentStatus string
-	err := c.DB.QueryRow(ctx,
-		`SELECT workflow_definition_id, workflow_version, status FROM workflow_runs WHERE id=$1 AND deleted_at IS NULL`,
-		p.RunID).Scan(&workflowID, &currentWorkflowVersion, &currentStatus)
+	workflowID, _, _, err := c.Repository.GetWorkflowRunForRetry(ctx, p.RunID)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return fmt.Errorf("workflow instance not found: %s", p.RunID)
@@ -1281,22 +1112,19 @@ func (c *Coordinator) RetryWorkflowInstance(ctx context.Context, p *model.RetryW
 
 	err = c.ExecuteWithTransaction(ctx, span, logger, func(ctx context.Context, tx pgx.Tx) error {
 		// Load current run context
-		var workflowInput json.RawMessage
-		var runContextJSON json.RawMessage
-		err := tx.QueryRow(ctx, `SELECT input_json, context_json FROM workflow_runs WHERE id=$1 FOR UPDATE`, p.RunID).
-			Scan(&workflowInput, &runContextJSON)
+		runContext, err := c.Repository.LoadRunContext(ctx, tx, p.RunID, logger, span)
 		if err != nil {
-			logger.Error().Err(err).Msg("failed to load workflow run context")
-			util.RecordError(span, err)
-			return fmt.Errorf("failed to load workflow run context: %w", err)
+			return err
 		}
 
-		// Merge and update run context
-		runContext, err := c.mergeRunContext(workflowInput, runContextJSON)
+		// Get workflow input for updating
+		var workflowInput json.RawMessage
+		err = tx.QueryRow(ctx, `SELECT input_json FROM workflow_runs WHERE id=$1`, p.RunID).
+			Scan(&workflowInput)
 		if err != nil {
-			logger.Error().Err(err).Msg("failed to merge run context")
+			logger.Error().Err(err).Msg("failed to load workflow input")
 			util.RecordError(span, err)
-			return err
+			return fmt.Errorf("failed to load workflow input: %w", err)
 		}
 
 		// Update input and config if provided
@@ -1315,42 +1143,27 @@ func (c *Coordinator) RetryWorkflowInstance(ctx context.Context, p *model.RetryW
 		// Also remove the restart node itself if it has results
 		delete(runContext.Tasks, p.NodeID)
 
-		// Marshal updated context
-		runContextBytes, err := json.Marshal(runContext)
-		if err != nil {
-			logger.Error().Err(err).Msg("failed to marshal run context")
-			util.RecordError(span, err)
-			return fmt.Errorf("failed to marshal run context: %w", err)
+		// Update workflow run: reset status to RUNNING, update context and input, update version if changed
+		if err := c.Repository.UpdateWorkflowRunStatus(ctx, tx, p.RunID, "RUNNING", workflowVersion); err != nil {
+			return err
 		}
 
-		// Update workflow run: reset status to RUNNING, update context and input, update version if changed
-		_, err = tx.Exec(ctx,
-			`UPDATE workflow_runs 
-			 SET status='RUNNING', 
-			     context_json=$1::jsonb, 
-			     input_json=$2::jsonb,
-			     workflow_version=$3,
-			     completed_at=NULL,
-			     updated_at=now() 
-			 WHERE id=$4`,
-			runContextBytes, workflowInput, workflowVersion, p.RunID)
-		if err != nil {
-			logger.Error().Err(err).Msg("failed to update workflow run")
-			util.RecordError(span, err)
-			return fmt.Errorf("failed to update workflow run: %w", err)
+		// Update run context and input
+		if err := c.Repository.UpdateRunContext(ctx, tx, p.RunID, runContext, logger, span); err != nil {
+			return err
+		}
+
+		// Update input if changed
+		if len(p.Input) > 0 {
+			if err := c.Repository.UpdateWorkflowInput(ctx, tx, p.RunID, p.Input); err != nil {
+				return err
+			}
 		}
 
 		// Delete task instances for restart node and all descendant nodes
 		nodeIDsToDelete := append(descendantNodeIDs, p.NodeID)
-		if len(nodeIDsToDelete) > 0 {
-			_, err = tx.Exec(ctx,
-				`DELETE FROM task_instances WHERE run_id=$1 AND node_id = ANY($2)`,
-				p.RunID, nodeIDsToDelete)
-			if err != nil {
-				logger.Error().Err(err).Msg("failed to delete task instances")
-				util.RecordError(span, err)
-				return fmt.Errorf("failed to delete task instances: %w", err)
-			}
+		if err := c.Repository.DeleteTaskInstances(ctx, tx, p.RunID, nodeIDsToDelete, logger, span); err != nil {
+			return err
 		}
 
 		// Create new task instance for restart node
@@ -1365,15 +1178,15 @@ func (c *Coordinator) RetryWorkflowInstance(ctx context.Context, p *model.RetryW
 		taskLogger := logger.With().
 			Str("task_id", taskID).
 			Str("node_id", restartNode.NodeID).
-			Str("node_type", restartNode.Runtime).
+			Str("node_type", restartNode.GetNodeTypeForRouting()).
 			Logger()
 
-		if err := c.insertTaskInstance(ctx, tx, taskID, p.RunID, restartNode, taskInput, scheduledAt, taskLogger, span); err != nil {
+		if err := c.Repository.InsertTaskInstance(ctx, tx, taskID, p.RunID, restartNode, taskInput, scheduledAt, taskLogger, span); err != nil {
 			return err
 		}
 		c.recordTaskCreated(ctx, taskLogger, span, taskID, p.RunID, restartNode)
 
-		if err := c.insertTaskOutbox(ctx, tx, taskID, p.RunID, restartNode, taskInput, taskLogger, span); err != nil {
+		if err := c.Repository.InsertTaskOutbox(ctx, tx, taskID, p.RunID, restartNode, taskInput, taskLogger, span); err != nil {
 			return err
 		}
 

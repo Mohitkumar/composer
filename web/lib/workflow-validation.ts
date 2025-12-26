@@ -7,10 +7,10 @@ export interface ValidationResult {
 }
 
 // Valid node types
-export const VALID_NODE_TYPES = ["TASK", "SWITCH", "PARALLEL", "WAIT"];
+export const VALID_NODE_TYPES = ["CODE", "HTTP", "CSV", "SWITCH", "FORK", "JOIN", "WAIT"];
 
-// Valid runtimes
-export const VALID_RUNTIMES = ["http", "javascript", "python", "go", "sql", "s3", "csv"];
+// Valid runtimes (only for CODE type nodes)
+export const VALID_RUNTIMES = ["python", "javascript", "js", "node", "go"];
 
 // Basic CEL expression validation (checks for common syntax errors)
 export function validateCELExpression(expr: string): string | null {
@@ -161,15 +161,25 @@ export function validateWorkflowSpec(spec: any): ValidationResult {
       errors.push(`Node '${node.node_id || i}': invalid 'type'. Must be one of: ${VALID_NODE_TYPES.join(", ")}`);
     }
 
-    if (!node.runtime || typeof node.runtime !== "string") {
-      errors.push(`Node '${node.node_id || i}': missing or invalid 'runtime'`);
-    } else if (!VALID_RUNTIMES.includes(node.runtime.toLowerCase())) {
-      warnings.push(`Node '${node.node_id || i}': unknown runtime '${node.runtime}'`);
+    // Runtime is only required for CODE type nodes
+    if (node.type === "CODE") {
+      if (!node.runtime || typeof node.runtime !== "string") {
+        errors.push(`Node '${node.node_id || i}': CODE type nodes require a 'runtime' field (e.g., python, javascript)`);
+      } else if (!VALID_RUNTIMES.includes(node.runtime.toLowerCase())) {
+        warnings.push(`Node '${node.node_id || i}': unknown runtime '${node.runtime}'. Valid runtimes: ${VALID_RUNTIMES.join(", ")}`);
+      }
+    } else if (node.runtime) {
+      // Runtime should not be specified for non-CODE nodes
+      warnings.push(`Node '${node.node_id || i}': 'runtime' field is only valid for CODE type nodes. It will be ignored.`);
     }
 
-    // Validate node spec based on runtime
+    // Validate node spec based on runtime (for CODE nodes) or type (for other nodes)
     if (node.spec && typeof node.spec === "object") {
-      const schema = nodeFormSchemas[node.runtime?.toLowerCase()];
+      // For CODE nodes, use runtime to get schema; for others, use type
+      const schemaKey = node.type === "CODE" && node.runtime 
+        ? node.runtime.toLowerCase() 
+        : node.type?.toLowerCase();
+      const schema = nodeFormSchemas[schemaKey || ""];
       if (schema) {
         // Validate code fields
         for (const field of schema.fields) {

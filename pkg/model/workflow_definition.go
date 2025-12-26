@@ -20,9 +20,34 @@ type WorkflowDefinitionSpec struct {
 type Node struct {
 	NodeID  string          `json:"node_id"`
 	Name    string          `json:"name"`
-	Type    NodeType        `json:"type"`    // TASK, SWITCH, PARALLEL, WAIT, etc
-	Runtime string          `json:"runtime"` // go/python/js/http/sql etc
-	Spec    json.RawMessage `json:"spec"`    // task implementation definition (http spec, code reference etc)
+	Type    NodeType        `json:"type"`              // CODE, HTTP, CSV, SWITCH, FORK, JOIN, etc
+	Runtime *string         `json:"runtime,omitempty"` // Optional: python/js/node (only for CODE type nodes)
+	Spec    json.RawMessage `json:"spec"`              // task implementation definition (http spec, code reference etc)
+}
+
+// GetNodeTypeForRouting returns the node type string to use for routing to executors
+// For CODE nodes, returns the runtime (python/js/node)
+// For other nodes, returns the type string (HTTP/CSV/SWITCH/etc)
+func (n *Node) GetNodeTypeForRouting() string {
+	if n.Type == NodeTypeCode {
+		// For CODE nodes, use runtime
+		if n.Runtime != nil && *n.Runtime != "" {
+			return *n.Runtime
+		}
+		// Fallback to "python" if runtime not specified
+		return "python"
+	}
+	// For non-CODE nodes, use the type string
+	// Control flow nodes (FORK, SWITCH, JOIN) are handled by coordinator, not worker
+	if n.Type == NodeTypeFork || n.Type == NodeTypeSwitch || n.Type == NodeTypeJoin {
+		return string(n.Type) // These are handled by coordinator
+	}
+	return string(n.Type)
+}
+
+// IsControlFlowNode returns true if the node is a control flow node that should be handled by the coordinator
+func (n *Node) IsControlFlowNode() bool {
+	return n.Type == NodeTypeSwitch || n.Type == NodeTypeFork || n.Type == NodeTypeJoin
 }
 
 // Edge represents an edge in the workflow DAG

@@ -36,11 +36,9 @@ func NewWorker(cfg WorkerConfig) (*Worker, error) {
 
 	// Create language client manager if addresses provided
 	var langClientMgr *LangClientManager
-	var langClient *LangClient
 	var err error
 
 	if len(cfg.LangWorkerAddrs) > 0 {
-		// New multi-client approach
 		langClientMgr, err = NewLangClientManager(cfg.LangWorkerAddrs, cfg.Logger)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create language client manager: %w", err)
@@ -53,15 +51,6 @@ func NewWorker(cfg WorkerConfig) (*Worker, error) {
 		cfg.Logger.Info().
 			Strs("runtimes", runtimeNames).
 			Msg("language client manager created with multiple runtimes")
-	} else if cfg.LangWorkerAddr != "" {
-		// Legacy single client approach (for backward compatibility)
-		langClient, err = NewLangClient(cfg.LangWorkerAddr, cfg.Logger)
-		if err != nil {
-			return nil, fmt.Errorf("failed to create language client: %w", err)
-		}
-		cfg.Logger.Info().
-			Str("addr", cfg.LangWorkerAddr).
-			Msg("using legacy single language client")
 	}
 
 	// Create coordinator client
@@ -71,13 +60,12 @@ func NewWorker(cfg WorkerConfig) (*Worker, error) {
 	}
 
 	// Create router
-	router := NewRouter(langClient, langClientMgr, cfg.Logger)
+	router := NewRouter(langClientMgr, cfg.Logger)
 
 	return &Worker{
 		cfg:           cfg,
 		router:        router,
 		coordClient:   coordClient,
-		langClient:    langClient,
 		langClientMgr: langClientMgr,
 	}, nil
 }
@@ -87,11 +75,6 @@ func (w *Worker) Close() error {
 	var errs []error
 	if w.coordClient != nil {
 		if err := w.coordClient.Close(); err != nil {
-			errs = append(errs, err)
-		}
-	}
-	if w.langClient != nil {
-		if err := w.langClient.Close(); err != nil {
 			errs = append(errs, err)
 		}
 	}
