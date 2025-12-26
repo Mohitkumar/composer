@@ -6,6 +6,13 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Plus, Edit, Trash2, Play, Search, MoreVertical, AlertTriangle, Rocket, BarChart3 } from 'lucide-react';
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu';
 import Link from 'next/link';
 import { format } from 'date-fns';
 import { Badge } from '@/components/ui/badge';
@@ -386,6 +393,7 @@ export default function WorkflowsPage() {
                       </TableCell>
                       <TableCell className="py-2">
                         <div className="flex items-center justify-end gap-1">
+                          {/* Main menu: Edit, Run, Report */}
                           <Button
                             variant="ghost"
                             size="sm"
@@ -411,16 +419,6 @@ export default function WorkflowsPage() {
                             variant="ghost"
                             size="sm"
                             className="h-7 w-7 p-0"
-                            onClick={() => deployMutation.mutate(workflow)}
-                            title="Deploy latest version"
-                            disabled={deployMutation.isPending || isLatestVersionDeployed(workflow)}
-                          >
-                            <Rocket className="h-3.5 w-3.5" />
-                          </Button>
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            className="h-7 w-7 p-0"
                             asChild
                             title="View report"
                           >
@@ -428,26 +426,45 @@ export default function WorkflowsPage() {
                               <BarChart3 className="h-3.5 w-3.5" />
                             </Link>
                           </Button>
-                          {workflow.success_rate !== undefined && workflow.success_rate >= 0 && workflow.success_rate < 95 && (
-                            <Button
-                              variant="ghost"
-                              size="sm"
-                              className="h-7 w-7 p-0"
-                              onClick={() => handleViewIssueSummary(workflow)}
-                              title="View issue summary"
-                            >
-                              <AlertTriangle className="h-3.5 w-3.5 text-destructive" />
-                            </Button>
-                          )}
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            className="h-7 w-7 p-0 text-destructive hover:text-destructive"
-                            onClick={() => handleDelete(workflow)}
-                            title="Delete workflow"
-                          >
-                            <Trash2 className="h-3.5 w-3.5" />
-                          </Button>
+                          
+                          {/* Extended menu: Deploy, Issue Summary, Delete */}
+                          <DropdownMenu>
+                            <DropdownMenuTrigger asChild>
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                className="h-7 w-7 p-0"
+                                title="More options"
+                              >
+                                <MoreVertical className="h-3.5 w-3.5" />
+                              </Button>
+                            </DropdownMenuTrigger>
+                            <DropdownMenuContent align="end">
+                              <DropdownMenuItem
+                                onClick={() => deployMutation.mutate(workflow)}
+                                disabled={deployMutation.isPending || isLatestVersionDeployed(workflow)}
+                              >
+                                <Rocket className="mr-2 h-4 w-4" />
+                                Deploy Latest Version
+                              </DropdownMenuItem>
+                              {workflow.success_rate !== undefined && workflow.success_rate >= 0 && workflow.success_rate < 95 && (
+                                <DropdownMenuItem
+                                  onClick={() => handleViewIssueSummary(workflow)}
+                                >
+                                  <AlertTriangle className="mr-2 h-4 w-4 text-destructive" />
+                                  View Issue Summary
+                                </DropdownMenuItem>
+                              )}
+                              <DropdownMenuSeparator />
+                              <DropdownMenuItem
+                                onClick={() => handleDelete(workflow)}
+                                variant="destructive"
+                              >
+                                <Trash2 className="mr-2 h-4 w-4" />
+                                Delete Workflow
+                              </DropdownMenuItem>
+                            </DropdownMenuContent>
+                          </DropdownMenu>
                         </div>
                       </TableCell>
                     </TableRow>
