@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -15,6 +16,51 @@ import (
 	"github.com/mohitkumar/composer/worker"
 	"github.com/rs/zerolog"
 )
+
+// parseLangWorkerAddrs parses language worker addresses from environment variables
+// Supports multiple formats:
+// 1. LANG_WORKER_ADDRS=python:localhost:50053,js:localhost:50052
+// 2. Individual env vars: LANG_WORKER_PYTHON_ADDR, LANG_WORKER_JS_ADDR, etc.
+func parseLangWorkerAddrs() map[string]string {
+	addrs := make(map[string]string)
+
+	// Format 1: Comma-separated list with runtime:address format
+	if addrsStr := os.Getenv("LANG_WORKER_ADDRS"); addrsStr != "" {
+		pairs := strings.Split(addrsStr, ",")
+		for _, pair := range pairs {
+			pair = strings.TrimSpace(pair)
+			if pair == "" {
+				continue
+			}
+			parts := strings.SplitN(pair, ":", 2)
+			if len(parts) == 2 {
+				runtime := strings.TrimSpace(parts[0])
+				addr := strings.TrimSpace(parts[1])
+				if runtime != "" && addr != "" {
+					addrs[runtime] = addr
+				}
+			}
+		}
+	}
+
+	// Format 2: Individual environment variables
+	// LANG_WORKER_PYTHON_ADDR, LANG_WORKER_JS_ADDR, etc.
+	runtimeEnvVars := map[string]string{
+		"LANG_WORKER_PYTHON_ADDR":     "python",
+		"LANG_WORKER_PY_ADDR":         "python",
+		"LANG_WORKER_JS_ADDR":         "js",
+		"LANG_WORKER_NODE_ADDR":       "js",
+		"LANG_WORKER_JAVASCRIPT_ADDR": "js",
+	}
+
+	for envVar, runtime := range runtimeEnvVars {
+		if addr := os.Getenv(envVar); addr != "" {
+			addrs[runtime] = addr
+		}
+	}
+
+	return addrs
+}
 
 func main() {
 	logger := zerolog.New(os.Stderr).With().Timestamp().Logger()
@@ -30,7 +76,13 @@ func main() {
 		coordAddr = "localhost:50051"
 	}
 
-	langWorkerAddr := os.Getenv("LANG_WORKER_ADDR") // Optional: for python/js workers
+	// Parse language worker addresses
+	// Support multiple formats:
+	// 1. LANG_WORKER_ADDRS=python:localhost:50053,js:localhost:50052
+	// 2. Individual env vars: LANG_WORKER_PYTHON_ADDR, LANG_WORKER_JS_ADDR, etc.
+	// 3. Legacy: LANG_WORKER_ADDR (single address for backward compatibility)
+	langWorkerAddrs := parseLangWorkerAddrs()
+	langWorkerAddr := os.Getenv("LANG_WORKER_ADDR") // Legacy: single address for backward compatibility
 
 	streamName := os.Getenv("STREAM_NAME")
 	if streamName == "" {
@@ -86,7 +138,8 @@ func main() {
 	wcfg := worker.WorkerConfig{
 		Redis:           redisStream,
 		CoordinatorAddr: coordAddr,
-		LangWorkerAddr:  langWorkerAddr,
+		LangWorkerAddr:  langWorkerAddr,  // Legacy support
+		LangWorkerAddrs: langWorkerAddrs, // New multi-runtime support
 		StreamName:      streamName,
 		ConsumerGroup:   consumerGroup,
 		ConsumerName:    workerID,

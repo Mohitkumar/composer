@@ -27,9 +27,9 @@ type Node struct {
 
 // Edge represents an edge in the workflow DAG
 type Edge struct {
-	From string `json:"from"`
-	To   string `json:"to"`
-	// TODO: Condition expression or predicate for conditional edges
+	From      string `json:"from"`
+	To        string `json:"to"`
+	Condition string `json:"condition,omitempty"` // CEL expression for conditional edges (used in SWITCH nodes)
 }
 
 // WorkflowDefinitionRecord represents a workflow definition record in the database
@@ -126,6 +126,62 @@ func (wf *WorkflowDefinitionSpec) FindNextNodes(nodeID string) []*Node {
 	}
 
 	return nextNodes
+}
+
+// FindOutgoingEdges returns all edges that originate from the given nodeID.
+func (wf *WorkflowDefinitionSpec) FindOutgoingEdges(nodeID string) []*Edge {
+	edges := make([]*Edge, 0)
+	for i := range wf.Edges {
+		if wf.Edges[i].From == nodeID {
+			edges = append(edges, &wf.Edges[i])
+		}
+	}
+	return edges
+}
+
+// FindNextNodesWithConditions returns nodes that come after the given nodeID,
+// filtered by evaluating edge conditions. For edges without conditions, they are always included.
+// For edges with conditions, only those that evaluate to true are included.
+// This is used for SWITCH nodes to determine which branch to follow.
+func (wf *WorkflowDefinitionSpec) FindNextNodesWithConditions(nodeID string, evaluateCondition func(condition string) (bool, error)) ([]*Node, error) {
+	outgoingEdges := wf.FindOutgoingEdges(nodeID)
+	if len(outgoingEdges) == 0 {
+		return nil, nil
+	}
+
+	nextNodeIDs := make([]string, 0)
+	nodeMap := wf.GetNodeMap()
+
+	for _, edge := range outgoingEdges {
+		// If no condition, always include
+		if edge.Condition == "" {
+			nextNodeIDs = append(nextNodeIDs, edge.To)
+			continue
+		}
+
+		// Evaluate condition
+		shouldInclude, err := evaluateCondition(edge.Condition)
+		if err != nil {
+			return nil, fmt.Errorf("failed to evaluate condition for edge %s->%s: %w", edge.From, edge.To, err)
+		}
+
+		if shouldInclude {
+			nextNodeIDs = append(nextNodeIDs, edge.To)
+		}
+	}
+
+	if len(nextNodeIDs) == 0 {
+		return nil, nil
+	}
+
+	nextNodes := make([]*Node, 0, len(nextNodeIDs))
+	for _, nextNodeID := range nextNodeIDs {
+		if node := nodeMap[nextNodeID]; node != nil {
+			nextNodes = append(nextNodes, node)
+		}
+	}
+
+	return nextNodes, nil
 }
 
 // HasIncomingEdges checks if a node has any incoming edges

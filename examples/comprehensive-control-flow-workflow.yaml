@@ -1,0 +1,428 @@
+# Comprehensive Workflow Example
+# This workflow demonstrates:
+# - Python tasks that process and add data to output
+# - SWITCH node with conditional branching based on previous task outputs
+# - PARALLEL/FORK-JOIN nodes for concurrent execution
+# - Passing outputs between nodes using template variables
+
+nodes:
+  # Initial task: Process input data
+  - name: Initialize Data
+    node_id: init_data
+    runtime: python
+    type: TASK
+    spec:
+      code: |
+        def handler(input):
+            """
+            Initialize and process input data.
+            Adds a counter and timestamp to the output.
+            """
+            import json
+            from datetime import datetime
+            
+            # Parse input if it's a string
+            if isinstance(input, str):
+                data = json.loads(input)
+            else:
+                data = input if input else {}
+            
+            # Add initial processing
+            result = {
+                "initial_value": data.get("value", 0),
+                "counter": 1,
+                "timestamp": datetime.now().isoformat(),
+                "processed_by": "init_data",
+                "message": "Data initialized successfully"
+            }
+            
+            return result
+      timeout: 30
+
+  # Increment counter task
+  - name: Increment Counter
+    node_id: increment_counter
+    runtime: python
+    type: TASK
+    spec:
+      code: |
+        def handler(input):
+            """
+            Increment the counter from previous task.
+            Uses output from init_data node.
+            """
+            import json
+            
+            # Get data from previous task
+            if isinstance(input, str):
+                data = json.loads(input)
+            else:
+                data = input if input else {}
+            
+            # Increment counter
+            counter = data.get("counter", 0) + 1
+            
+            result = {
+                "counter": counter,
+                "previous_value": data.get("counter", 0),
+                "processed_by": "increment_counter",
+                "message": f"Counter incremented to {counter}"
+            }
+            
+            # Merge with previous data
+            result.update(data)
+            result["counter"] = counter
+            
+            return result
+      input: "{{tasks.init_data.output}}"
+      timeout: 30
+
+  # SWITCH node: Branch based on counter value
+  # Note: SWITCH nodes don't execute code - they evaluate edge conditions
+  - name: Check Counter Value
+    node_id: check_counter
+    runtime: go
+    type: SWITCH
+    spec: {}
+
+  # Branch 1: Counter is high (>= 5)
+  - name: Process High Counter
+    node_id: process_high
+    runtime: python
+    type: TASK
+    spec:
+      code: |
+        def handler(input):
+            """
+            Process when counter is high.
+            Adds a multiplier operation.
+            """
+            import json
+            
+            if isinstance(input, str):
+                data = json.loads(input)
+            else:
+                data = input if input else {}
+            
+            counter = data.get("counter", 0)
+            multiplied = counter * 10
+            
+            result = {
+                "counter": counter,
+                "multiplied_value": multiplied,
+                "branch": "high",
+                "processed_by": "process_high",
+                "message": f"High counter processed: {counter} -> {multiplied}"
+            }
+            
+            # Merge with previous data
+            result.update(data)
+            result["multiplied_value"] = multiplied
+            result["branch"] = "high"
+            
+            return result
+      input: "{{tasks.check_counter.output}}"
+      timeout: 30
+
+  # Branch 2: Counter is low (< 5)
+  - name: Process Low Counter
+    node_id: process_low
+    runtime: python
+    type: TASK
+    spec:
+      code: |
+        def handler(input):
+            """
+            Process when counter is low.
+            Adds a square operation.
+            """
+            import json
+            
+            if isinstance(input, str):
+                data = json.loads(input)
+            else:
+                data = input if input else {}
+            
+            counter = data.get("counter", 0)
+            squared = counter ** 2
+            
+            result = {
+                "counter": counter,
+                "squared_value": squared,
+                "branch": "low",
+                "processed_by": "process_low",
+                "message": f"Low counter processed: {counter} -> {squared}"
+            }
+            
+            # Merge with previous data
+            result.update(data)
+            result["squared_value"] = squared
+            result["branch"] = "low"
+            
+            return result
+      input: "{{tasks.check_counter.output}}"
+      timeout: 30
+
+  # PARALLEL node: Fork into multiple parallel branches
+  # Note: PARALLEL nodes don't execute code - they fork execution immediately
+  - name: Fork Parallel Processing
+    node_id: fork_parallel
+    runtime: go
+    type: PARALLEL
+    spec: {}
+
+  # Parallel Branch 1: Calculate sum
+  - name: Calculate Sum
+    node_id: calc_sum
+    runtime: python
+    type: TASK
+    spec:
+      code: |
+        def handler(input):
+            """
+            Parallel branch 1: Calculate sum of values.
+            """
+            import json
+            
+            if isinstance(input, str):
+                data = json.loads(input)
+            else:
+                data = input if input else {}
+            
+            counter = data.get("counter", 0)
+            multiplied = data.get("multiplied_value", 0)
+            sum_result = counter + multiplied
+            
+            result = {
+                "operation": "sum",
+                "operand1": counter,
+                "operand2": multiplied,
+                "result": sum_result,
+                "branch_id": "calc_sum",
+                "message": f"Sum calculated: {counter} + {multiplied} = {sum_result}"
+            }
+            
+            return result
+      input: "{{tasks.process_high.output}}"
+      timeout: 30
+
+  # Parallel Branch 2: Calculate product
+  - name: Calculate Product
+    node_id: calc_product
+    runtime: python
+    type: TASK
+    spec:
+      code: |
+        def handler(input):
+            """
+            Parallel branch 2: Calculate product of values.
+            """
+            import json
+            
+            if isinstance(input, str):
+                data = json.loads(input)
+            else:
+                data = input if input else {}
+            
+            counter = data.get("counter", 0)
+            multiplied = data.get("multiplied_value", 0)
+            product = counter * multiplied
+            
+            result = {
+                "operation": "product",
+                "operand1": counter,
+                "operand2": multiplied,
+                "result": product,
+                "branch_id": "calc_product",
+                "message": f"Product calculated: {counter} * {multiplied} = {product}"
+            }
+            
+            return result
+      input: "{{tasks.process_high.output}}"
+      timeout: 30
+
+  # Parallel Branch 3: Calculate difference
+  - name: Calculate Difference
+    node_id: calc_difference
+    runtime: python
+    type: TASK
+    spec:
+      code: |
+        def handler(input):
+            """
+            Parallel branch 3: Calculate difference of values.
+            """
+            import json
+            
+            if isinstance(input, str):
+                data = json.loads(input)
+            else:
+                data = input if input else {}
+            
+            counter = data.get("counter", 0)
+            multiplied = data.get("multiplied_value", 0)
+            difference = abs(counter - multiplied)
+            
+            result = {
+                "operation": "difference",
+                "operand1": counter,
+                "operand2": multiplied,
+                "result": difference,
+                "branch_id": "calc_difference",
+                "message": f"Difference calculated: |{counter} - {multiplied}| = {difference}"
+            }
+            
+            return result
+      input: "{{tasks.process_high.output}}"
+      timeout: 30
+
+  # JOIN node: Aggregate results from all parallel branches
+  - name: Aggregate Results
+    node_id: aggregate_results
+    runtime: python
+    type: TASK
+    spec:
+      code: |
+        def handler(input):
+            """
+            Aggregate results from all parallel branches.
+            This node receives input after all parallel branches complete.
+            """
+            import json
+            
+            if isinstance(input, str):
+                data = json.loads(input)
+            else:
+                data = input if input else {}
+            
+            # Collect results from all parallel branches
+            sum_result = data.get("sum_result", 0)
+            product_result = data.get("product_result", 0)
+            difference_result = data.get("difference_result", 0)
+            
+            # Aggregate all results
+            aggregated = {
+                "sum": sum_result,
+                "product": product_result,
+                "difference": difference_result,
+                "total": sum_result + product_result + difference_result,
+                "processed_by": "aggregate_results",
+                "message": "All parallel branches completed and results aggregated"
+            }
+            
+            # Merge with original data
+            result = data.copy()
+            result.update(aggregated)
+            
+            return result
+      input: |
+        {
+          "sum_result": {{tasks.calc_sum.output.result}},
+          "product_result": {{tasks.calc_product.output.result}},
+          "difference_result": {{tasks.calc_difference.output.result}},
+          "original_data": {{tasks.process_high.output}}
+        }
+      timeout: 30
+
+  # Final task: Generate summary
+  - name: Generate Final Summary
+    node_id: final_summary
+    runtime: python
+    type: TASK
+    spec:
+      code: |
+        def handler(input):
+            """
+            Generate final summary of the entire workflow execution.
+            """
+            import json
+            from datetime import datetime
+            
+            if isinstance(input, str):
+                data = json.loads(input)
+            else:
+                data = input if input else {}
+            
+            # Create comprehensive summary
+            summary = {
+                "workflow_completed": True,
+                "final_timestamp": datetime.now().isoformat(),
+                "initial_value": data.get("initial_value", 0),
+                "final_counter": data.get("counter", 0),
+                "branch_taken": data.get("branch", "unknown"),
+                "parallel_results": {
+                    "sum": data.get("sum", 0),
+                    "product": data.get("product", 0),
+                    "difference": data.get("difference", 0),
+                    "total": data.get("total", 0)
+                },
+                "execution_path": [
+                    "init_data",
+                    "increment_counter",
+                    "check_counter",
+                    data.get("branch", "unknown"),
+                    "fork_parallel",
+                    "calc_sum (parallel)",
+                    "calc_product (parallel)",
+                    "calc_difference (parallel)",
+                    "aggregate_results",
+                    "final_summary"
+                ],
+                "message": "Workflow execution completed successfully with all control structures"
+            }
+            
+            return summary
+      input: "{{tasks.aggregate_results.output}}"
+      timeout: 30
+
+edges:
+  # Linear flow: init -> increment
+  - from: init_data
+    to: increment_counter
+
+  # Linear flow: increment -> switch
+  - from: increment_counter
+    to: check_counter
+
+  # SWITCH conditions: Branch based on counter value
+  # High branch: counter >= 5
+  - from: check_counter
+    to: process_high
+    condition: "tasks.increment_counter.output.counter >= 5"
+
+  # Low branch: counter < 5
+  - from: check_counter
+    to: process_low
+    condition: "tasks.increment_counter.output.counter < 5"
+
+  # After switch, go to parallel fork
+  # Note: In this example, only the high branch continues to parallel processing
+  # You can modify to have both branches merge if needed
+  - from: process_high
+    to: fork_parallel
+
+  # PARALLEL fork: All three branches start simultaneously
+  - from: fork_parallel
+    to: calc_sum
+
+  - from: fork_parallel
+    to: calc_product
+
+  - from: fork_parallel
+    to: calc_difference
+
+  # JOIN: All parallel branches must complete before aggregate_results runs
+  # (This is detected automatically when all branches have edges to the same node)
+  - from: calc_sum
+    to: aggregate_results
+
+  - from: calc_product
+    to: aggregate_results
+
+  - from: calc_difference
+    to: aggregate_results
+
+  # Final step
+  - from: aggregate_results
+    to: final_summary
+

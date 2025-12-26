@@ -78,6 +78,7 @@ export interface Node {
 export interface Edge {
   from: string;
   to: string;
+  condition?: string; // CEL expression for conditional edges (used in SWITCH nodes)
 }
 
 export interface WorkflowDefinitionSpec {

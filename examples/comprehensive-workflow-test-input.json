@@ -1,0 +1,9 @@
+{
+  "value": 3,
+  "description": "Test input for comprehensive control flow workflow",
+  "metadata": {
+    "test": true,
+    "workflow_type": "comprehensive_control_flow"
+  }
+}
+

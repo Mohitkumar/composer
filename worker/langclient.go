@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	"google.golang.org/grpc"
@@ -67,3 +68,87 @@ func (c *LangClient) ExecuteInlineCode(ctx context.Context, taskID, runtime, cod
 }
 
 var ErrNoLangClient = fmt.Errorf("language client not configured")
+
+// LangClientManager manages multiple language clients, routing by runtime
+type LangClientManager struct {
+	clients map[string]*LangClient
+	mu      sync.RWMutex
+	logger  zerolog.Logger
+}
+
+// NewLangClientManager creates a new language client manager
+func NewLangClientManager(addrs map[string]string, logger zerolog.Logger) (*LangClientManager, error) {
+	manager := &LangClientManager{
+		clients: make(map[string]*LangClient),
+		logger:  logger,
+	}
+
+	// Create clients for each runtime
+	for runtime, addr := range addrs {
+		if addr == "" {
+			logger.Warn().Str("runtime", runtime).Msg("empty address for runtime, skipping")
+			continue
+		}
+		client, err := NewLangClient(addr, logger)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create language client for runtime %s at %s: %w", runtime, addr, err)
+		}
+		manager.clients[runtime] = client
+		logger.Info().Str("runtime", runtime).Str("addr", addr).Msg("language client created")
+	}
+
+	// Also support legacy single LangWorkerAddr for backward compatibility
+	// This will be handled in GetClientForRuntime
+
+	return manager, nil
+}
+
+// GetClientForRuntime returns the language client for the given runtime
+func (m *LangClientManager) GetClientForRuntime(runtime string) (*LangClient, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	// Normalize runtime name
+	normalized := normalizeRuntime(runtime)
+
+	client, ok := m.clients[normalized]
+	if !ok {
+		return nil, fmt.Errorf("no language client configured for runtime: %s (normalized: %s)", runtime, normalized)
+	}
+
+	return client, nil
+}
+
+// normalizeRuntime normalizes runtime names to handle aliases
+func normalizeRuntime(runtime string) string {
+	normalized := map[string]string{
+		"js":         "js",
+		"javascript": "js",
+		"node":       "js",
+		"nodejs":     "js",
+		"python":     "python",
+		"py":         "python",
+	}
+	if norm, ok := normalized[runtime]; ok {
+		return norm
+	}
+	return runtime
+}
+
+// Close closes all language clients
+func (m *LangClientManager) Close() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	var errs []error
+	for runtime, client := range m.clients {
+		if err := client.Close(); err != nil {
+			errs = append(errs, fmt.Errorf("failed to close client for %s: %w", runtime, err))
+		}
+	}
+
+	if len(errs) > 0 {
+		return fmt.Errorf("errors closing language clients: %v", errs)
+	}
+	return nil
+}

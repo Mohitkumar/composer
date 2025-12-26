@@ -3,7 +3,18 @@ Secure sandbox creation and management for Python code execution
 """
 
 import builtins
+import logging
+from RestrictedPython.Guards import (
+    safer_getattr,
+    guarded_setattr,
+    guarded_delattr,
+    guarded_iter_unpack_sequence,
+    guarded_unpack_sequence,
+    full_write_guard,
+)
 from config import ALLOWED_IMPORTS, BLOCKED_IMPORTS
+
+logger = logging.getLogger(__name__)
 
 
 class TimeoutError(Exception):
@@ -24,20 +35,36 @@ class SecureImporter:
         # Extract base module name
         base_module = name.split('.')[0]
         
+        logger.debug(f"Import attempt: {name} (base: {base_module})")
+        
         # Check if blocked
         if base_module in self.blocked_imports:
-            raise ImportError(f"Import of '{base_module}' is not allowed for security reasons")
+            error_msg = f"Import of '{base_module}' is not allowed for security reasons"
+            logger.warning(f"Blocked import attempt: {name} - {error_msg}")
+            raise ImportError(error_msg)
         
         # Check if allowed
         if base_module in self.allowed_imports:
-            return self._original_import(name, globals, locals, fromlist, level)
+            logger.debug(f"Allowed import: {name}")
+            try:
+                result = self._original_import(name, globals, locals, fromlist, level)
+                logger.debug(f"Import successful: {name}")
+                return result
+            except ImportError as e:
+                logger.error(f"Import failed for allowed module {name}: {str(e)}")
+                raise
+            except Exception as e:
+                logger.error(f"Unexpected error importing {name}: {type(e).__name__}: {str(e)}")
+                raise
         
         # For unknown modules, be conservative and block
         # This prevents importing dangerous modules
-        raise ImportError(
+        error_msg = (
             f"Import of '{base_module}' is not in the allowed list. "
             f"Allowed imports: {', '.join(sorted(self.allowed_imports))}"
         )
+        logger.warning(f"Blocked import attempt: {name} - {error_msg}")
+        raise ImportError(error_msg)
 
 
 def create_safe_globals(input_data):
@@ -50,24 +77,99 @@ def create_safe_globals(input_data):
     Returns:
         dict: Safe global namespace
     """
+    logger.debug("Creating safe execution environment")
+    logger.debug(f"Input data type: {type(input_data)}")
+    logger.debug(f"Allowed imports: {len(ALLOWED_IMPORTS)} modules")
+    logger.debug(f"Blocked imports: {len(BLOCKED_IMPORTS)} modules")
+    
     # Create restricted builtins
+    # Include commonly used safe builtins that are needed for typical Python code
     restricted_builtins = {
-        # Safe built-ins only
-        'abs': abs, 'all': all, 'any': any, 'bool': bool,
-        'dict': dict, 'enumerate': enumerate, 'filter': filter,
-        'float': float, 'int': int, 'len': len, 'list': list,
-        'map': map, 'max': max, 'min': min, 'range': range,
-        'reversed': reversed, 'round': round, 'set': set,
-        'sorted': sorted, 'str': str, 'sum': sum, 'tuple': tuple,
-        'type': type, 'zip': zip,
+        # Type checking and introspection
+        'isinstance': isinstance,
+        'issubclass': issubclass,
+        'type': type,
+        'callable': callable,
+        'hasattr': hasattr,
+        'getattr': getattr,
+        'setattr': setattr,
+        'delattr': delattr,
+        # Basic types
+        'bool': bool,
+        'int': int,
+        'float': float,
+        'str': str,
+        'dict': dict,
+        'list': list,
+        'tuple': tuple,
+        'set': set,
+        'frozenset': frozenset,
+        # Math and numeric operations
+        'abs': abs,
+        'round': round,
+        'min': min,
+        'max': max,
+        'sum': sum,
+        'pow': pow,
+        'divmod': divmod,
+        # Iteration and sequence operations
+        'len': len,
+        'range': range,
+        'enumerate': enumerate,
+        'zip': zip,
+        'reversed': reversed,
+        'sorted': sorted,
+        'all': all,
+        'any': any,
+        'filter': filter,
+        'map': map,
+        'iter': iter,
+        'next': next,
+        # Object operations
+        'vars': vars,
+        'dir': dir,
         # Restricted import
         '__import__': SecureImporter(ALLOWED_IMPORTS, BLOCKED_IMPORTS),
     }
     
+    # RestrictedPython requires guard functions to be available in globals
+    # These are injected by RestrictedPython during compilation
+    # The function names must match what RestrictedPython expects in the compiled bytecode
+    
+    # Helper function for _getitem_ - uses safer_getattr for item access
+    def guarded_getitem(obj, key):
+        """Guard function for item access (obj[key])"""
+        try:
+            # Try dictionary-style access first
+            if hasattr(obj, '__getitem__'):
+                return obj[key]
+            # Fall back to attribute access
+            return safer_getattr(obj, key, None)
+        except (KeyError, IndexError, TypeError):
+            return None
+    
+    # Helper function for _getiter_ - safe iteration
+    def guarded_getiter(iterable):
+        """Guard function for iteration (for x in iterable)"""
+        return iter(iterable)
+    
     safe_globs = {
         '__builtins__': restricted_builtins,
         # Input data available as 'input'
-        'input': input_data
+        'input': input_data,
+        # RestrictedPython guard functions
+        # These are required for RestrictedPython to work correctly
+        # The names must match what RestrictedPython injects into the compiled code
+        '_getattr_': safer_getattr,  # For attribute access (obj.attr)
+        '_getitem_': guarded_getitem,  # For item access (obj[key])
+        '_getiter_': guarded_getiter,  # For iteration (for x in iterable)
+        '_setattr_': guarded_setattr,  # For attribute assignment (obj.attr = value)
+        '_delattr_': guarded_delattr,  # For attribute deletion (del obj.attr)
+        '_iter_unpack_': guarded_iter_unpack_sequence,  # For iterable unpacking (a, b = iterable)
+        '_unpack_sequence_': guarded_unpack_sequence,  # For sequence unpacking
+        '_write_': full_write_guard,  # For write protection
     }
+    
+    logger.debug("Safe execution environment created successfully")
     return safe_globs
 

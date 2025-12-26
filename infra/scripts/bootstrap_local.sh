@@ -225,7 +225,7 @@ done
 echo ""
 
 # Start JavaScript Worker first (if available) - needed for Go Worker to connect
-LANG_WORKER_ADDR=""
+LANG_WORKER_ADDRS=""
 if [ "$SKIP_JS_WORKER" = false ]; then
     echo -e "${BLUE}Starting JavaScript Worker...${NC}"
     # Check if port is already in use
@@ -245,26 +245,13 @@ if [ "$SKIP_JS_WORKER" = false ]; then
         echo -e "${YELLOW}⚠ JavaScript Worker may have failed to start, check logs${NC}"
     else
         echo -e "${GREEN}✓ JavaScript Worker started (PID: $WORKER_JS_PID)${NC}"
-        LANG_WORKER_ADDR="localhost:$WORKER_JS_PORT"
+        if [ -n "$LANG_WORKER_ADDRS" ]; then
+            LANG_WORKER_ADDRS="$LANG_WORKER_ADDRS,js:localhost:$WORKER_JS_PORT"
+        else
+            LANG_WORKER_ADDRS="js:localhost:$WORKER_JS_PORT"
+        fi
     fi
     cd "$PROJECT_ROOT" || exit 1
-fi
-
-# Start Go Worker
-echo -e "${BLUE}Starting Go Worker...${NC}"
-REDIS_ADDR="$REDIS_ADDR" \
-COORDINATOR_ADDR="$COORDINATOR_ADDR" \
-LANG_WORKER_ADDR="$LANG_WORKER_ADDR" \
-STREAM_NAME=workflow.tasks \
-CONSUMER_GROUP=workflow-workers \
-WORKER_ID="worker-$(hostname)-$$" \
-./bin/worker > "$PROJECT_ROOT/logs/worker.log" 2>&1 &
-WORKER_PID=$!
-echo -e "${GREEN}✓ Go Worker started (PID: $WORKER_PID)${NC}"
-if [ -n "$LANG_WORKER_ADDR" ]; then
-    echo -e "${GREEN}  Language worker address: $LANG_WORKER_ADDR${NC}"
-else
-    echo -e "${YELLOW}  Warning: No language worker configured. JavaScript/Python nodes will fail.${NC}"
 fi
 
 # Start Python Worker (if available)
@@ -287,8 +274,30 @@ if [ "$SKIP_PY_WORKER" = false ]; then
         echo -e "${YELLOW}⚠ Python Worker may have failed to start, check logs${NC}"
     else
         echo -e "${GREEN}✓ Python Worker started (PID: $WORKER_PY_PID)${NC}"
+        if [ -n "$LANG_WORKER_ADDRS" ]; then
+            LANG_WORKER_ADDRS="$LANG_WORKER_ADDRS,python:localhost:$WORKER_PY_PORT"
+        else
+            LANG_WORKER_ADDRS="python:localhost:$WORKER_PY_PORT"
+        fi
     fi
     cd "$PROJECT_ROOT" || exit 1
+fi
+
+# Start Go Worker
+echo -e "${BLUE}Starting Go Worker...${NC}"
+REDIS_ADDR="$REDIS_ADDR" \
+COORDINATOR_ADDR="$COORDINATOR_ADDR" \
+LANG_WORKER_ADDRS="$LANG_WORKER_ADDRS" \
+STREAM_NAME=workflow.tasks \
+CONSUMER_GROUP=workflow-workers \
+WORKER_ID="worker-$(hostname)-$$" \
+./bin/worker > "$PROJECT_ROOT/logs/worker.log" 2>&1 &
+WORKER_PID=$!
+echo -e "${GREEN}✓ Go Worker started (PID: $WORKER_PID)${NC}"
+if [ -n "$LANG_WORKER_ADDRS" ]; then
+    echo -e "${GREEN}  Language worker addresses: $LANG_WORKER_ADDRS${NC}"
+else
+    echo -e "${YELLOW}  Warning: No language workers configured. JavaScript/Python nodes will fail.${NC}"
 fi
 
 # Start AI Service (if available)

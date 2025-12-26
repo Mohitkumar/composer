@@ -9,19 +9,38 @@ import (
 	"github.com/rs/zerolog"
 )
 
+// Helper function to get map keys for logging
+func getMapKeys(m map[string]interface{}) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	return keys
+}
+
+// Helper function to truncate string for logging
+func truncateString(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen] + "..."
+}
+
 // Router routes tasks to appropriate executors
 type Router struct {
-	executors  map[string]executors.Executor
-	langClient *LangClient
-	logger     zerolog.Logger
+	executors     map[string]executors.Executor
+	langClient    *LangClient        // Legacy single client (for backward compatibility)
+	langClientMgr *LangClientManager // New multi-client manager
+	logger        zerolog.Logger
 }
 
 // NewRouter creates a new task router
-func NewRouter(langClient *LangClient, logger zerolog.Logger) *Router {
+func NewRouter(langClient *LangClient, langClientMgr *LangClientManager, logger zerolog.Logger) *Router {
 	r := &Router{
-		executors:  make(map[string]executors.Executor),
-		langClient: langClient,
-		logger:     logger,
+		executors:     make(map[string]executors.Executor),
+		langClient:    langClient,
+		langClientMgr: langClientMgr,
+		logger:        logger,
 	}
 
 	// Register built-in executors
@@ -43,10 +62,26 @@ func (r *Router) Route(ctx context.Context, nodeType string, input json.RawMessa
 
 	// Check if it's a language executor (python, js, node, etc.)
 	if isLanguageRuntime(nodeType) {
-		if r.langClient == nil {
+		// Try to get client from manager first (new multi-client approach)
+		var langClient *LangClient
+		if r.langClientMgr != nil {
+			var err error
+			langClient, err = r.langClientMgr.GetClientForRuntime(nodeType)
+			if err != nil {
+				logger.Error().Err(err).Str("runtime", nodeType).Msg("failed to get language client from manager")
+				// Fall back to legacy single client if available
+				if r.langClient == nil {
+					return nil, fmt.Errorf("language client not configured for runtime: %s", nodeType)
+				}
+				langClient = r.langClient
+			}
+		} else if r.langClient != nil {
+			// Fall back to legacy single client
+			langClient = r.langClient
+		} else {
 			return nil, fmt.Errorf("language client not configured for runtime: %s", nodeType)
 		}
-		return r.executeLanguageTask(ctx, nodeType, input, logger)
+		return r.executeLanguageTaskWithClient(ctx, nodeType, input, langClient, logger)
 	}
 
 	// Check for built-in executor
@@ -59,8 +94,8 @@ func (r *Router) Route(ctx context.Context, nodeType string, input json.RawMessa
 	return exec.Execute(ctx, input)
 }
 
-// executeLanguageTask executes a task using a language worker via gRPC
-func (r *Router) executeLanguageTask(ctx context.Context, runtime string, input json.RawMessage, logger zerolog.Logger) (json.RawMessage, error) {
+// executeLanguageTaskWithClient executes a task using a language worker via gRPC with a specific client
+func (r *Router) executeLanguageTaskWithClient(ctx context.Context, runtime string, input json.RawMessage, langClient *LangClient, logger zerolog.Logger) (json.RawMessage, error) {
 	logger.Debug().Str("runtime", runtime).Msg("routing to language executor")
 
 	// Parse input to extract code and other parameters
@@ -69,8 +104,24 @@ func (r *Router) executeLanguageTask(ctx context.Context, runtime string, input 
 		return nil, fmt.Errorf("failed to parse language task input: %w", err)
 	}
 
-	code, _ := payload["code"].(string)
+	code, codeOk := payload["code"].(string)
 	filename, _ := payload["filename"].(string)
+
+	// Log code extraction for debugging
+	if !codeOk || code == "" {
+		logger.Error().
+			Interface("payload_keys", getMapKeys(payload)).
+			Bool("code_ok", codeOk).
+			Int("code_length", len(code)).
+			Msg("code field missing or empty in payload")
+		return nil, fmt.Errorf("code field is required and must be a non-empty string")
+	}
+
+	logger.Debug().
+		Int("code_length", len(code)).
+		Str("code_preview", truncateString(code, 200)).
+		Str("filename", filename).
+		Msg("extracted code for language executor")
 
 	// Extract input - it can be a string (JSON) or an object (after template resolution)
 	var inputJSON string
@@ -108,7 +159,7 @@ func (r *Router) executeLanguageTask(ctx context.Context, runtime string, input 
 		taskID = v
 	}
 
-	resp, err := r.langClient.ExecuteInlineCode(ctx, taskID, runtime, code, filename, inputJSON, timeout)
+	resp, err := langClient.ExecuteInlineCode(ctx, taskID, runtime, code, filename, inputJSON, timeout)
 	if err != nil {
 		return nil, fmt.Errorf("language executor failed: %w", err)
 	}

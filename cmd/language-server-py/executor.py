@@ -4,9 +4,14 @@ Code execution logic for Python language server
 
 import json
 import threading
+import logging
+import traceback
+import types
 from RestrictedPython import compile_restricted
 from sandbox import TimeoutError, create_safe_globals
 from config import DEFAULT_TIMEOUT_SECONDS, MAX_CODE_SIZE
+
+logger = logging.getLogger(__name__)
 
 
 def validate_code_size(code):
@@ -19,8 +24,13 @@ def validate_code_size(code):
     Raises:
         ValueError: If code exceeds maximum size
     """
-    if len(code) > MAX_CODE_SIZE:
-        raise ValueError(f"Code size exceeds maximum allowed size of {MAX_CODE_SIZE} bytes")
+    code_size = len(code)
+    logger.debug(f"Validating code size: {code_size} bytes (max: {MAX_CODE_SIZE})")
+    if code_size > MAX_CODE_SIZE:
+        error_msg = f"Code size ({code_size} bytes) exceeds maximum allowed size of {MAX_CODE_SIZE} bytes"
+        logger.error(error_msg)
+        raise ValueError(error_msg)
+    logger.debug(f"Code size validation passed")
 
 
 def parse_input(input_json):
@@ -37,9 +47,14 @@ def parse_input(input_json):
         ValueError: If JSON is invalid
     """
     try:
-        return json.loads(input_json or "{}")
+        logger.debug(f"Parsing input JSON (length: {len(input_json or '{}')})")
+        parsed = json.loads(input_json or "{}")
+        logger.debug(f"Input JSON parsed successfully, type: {type(parsed)}")
+        return parsed
     except json.JSONDecodeError as e:
-        raise ValueError(f"Invalid input_json: {str(e)}")
+        error_msg = f"Invalid input_json: {str(e)}"
+        logger.error(f"{error_msg} - JSON: {input_json[:200]}")
+        raise ValueError(error_msg)
 
 
 def calculate_timeout(timeout_seconds):
@@ -74,19 +89,41 @@ def execute_with_timeout(code, safe_globals, local_ns, timeout_seconds):
     
     def target():
         try:
+            logger.debug("Compiling code with RestrictedPython")
             # Compile with RestrictedPython
-            byte_code = compile_restricted(code, '<inline>', 'exec')
-            if byte_code.errors:
-                exception[0] = SyntaxError(
-                    f"RestrictedPython compilation errors: {', '.join(byte_code.errors)}"
-                )
+            # compile_restricted returns a code object directly (not a result object)
+            try:
+                compiled_code = compile_restricted(code, '<inline>', 'exec')
+            except SyntaxError as e:
+                # RestrictedPython may raise SyntaxError for invalid code
+                error_msg = f"RestrictedPython compilation failed: {str(e)}"
+                logger.error(f"Compilation failed: {error_msg}")
+                exception[0] = SyntaxError(error_msg)
+                return
+            except Exception as e:
+                # Other compilation errors
+                error_msg = f"RestrictedPython compilation error: {type(e).__name__}: {str(e)}"
+                logger.error(f"Compilation failed: {error_msg}")
+                exception[0] = SyntaxError(error_msg)
                 return
             
-            # Execute the bytecode
-            exec(byte_code.code, safe_globals, local_ns)
+            # Verify we got a code object
+            if not isinstance(compiled_code, types.CodeType):
+                error_msg = "RestrictedPython compilation did not produce valid bytecode"
+                logger.error(f"Compilation failed: {error_msg}")
+                exception[0] = SyntaxError(error_msg)
+                return
+            
+            logger.debug("Code compiled successfully, executing bytecode")
+            # Execute the bytecode directly (it's already a code object)
+            exec(compiled_code, safe_globals, local_ns)
+            logger.debug("Code execution completed successfully")
         except Exception as e:
+            logger.error(f"Error during code execution: {type(e).__name__}: {str(e)}")
+            logger.debug(f"Execution error traceback:\n{traceback.format_exc()}")
             exception[0] = e
     
+    logger.debug(f"Starting code execution thread (timeout: {timeout_seconds}s)")
     thread = threading.Thread(target=target)
     thread.daemon = True
     thread.start()
@@ -94,10 +131,15 @@ def execute_with_timeout(code, safe_globals, local_ns, timeout_seconds):
     
     if thread.is_alive():
         # Thread is still running, timeout occurred
-        raise TimeoutError(f"Execution timed out after {timeout_seconds} seconds")
+        error_msg = f"Execution timed out after {timeout_seconds} seconds"
+        logger.error(error_msg)
+        raise TimeoutError(error_msg)
     
     if exception[0]:
+        logger.error(f"Code execution raised exception: {type(exception[0]).__name__}: {str(exception[0])}")
         raise exception[0]
+    
+    logger.debug("Code execution completed without errors")
 
 
 def execute_handler_with_timeout(handler, input_data, timeout_seconds):
@@ -121,21 +163,30 @@ def execute_handler_with_timeout(handler, input_data, timeout_seconds):
     
     def call_handler():
         try:
+            logger.debug(f"Calling handler function with input type: {type(input_data)}")
             handler_result[0] = handler(input_data)
+            logger.debug(f"Handler returned successfully, result type: {type(handler_result[0])}")
         except Exception as e:
+            logger.error(f"Handler raised exception: {type(e).__name__}: {str(e)}")
+            logger.debug(f"Handler error traceback:\n{traceback.format_exc()}")
             handler_exception[0] = e
     
+    logger.debug(f"Starting handler execution thread (timeout: {timeout_seconds}s)")
     handler_thread = threading.Thread(target=call_handler)
     handler_thread.daemon = True
     handler_thread.start()
     handler_thread.join(timeout=timeout_seconds)
     
     if handler_thread.is_alive():
-        raise TimeoutError(f"Handler execution timed out after {timeout_seconds} seconds")
+        error_msg = f"Handler execution timed out after {timeout_seconds} seconds"
+        logger.error(error_msg)
+        raise TimeoutError(error_msg)
     
     if handler_exception[0]:
+        logger.error(f"Handler execution failed: {type(handler_exception[0]).__name__}: {str(handler_exception[0])}")
         raise handler_exception[0]
     
+    logger.debug("Handler execution completed successfully")
     return handler_result[0]
 
 
@@ -156,23 +207,38 @@ def execute_code(code, input_data, timeout_seconds):
         TimeoutError: If execution times out
         Exception: If execution fails
     """
+    logger.debug("Starting code execution")
+    
     # Validate code size
     validate_code_size(code)
     
     # Calculate timeout
     timeout = calculate_timeout(timeout_seconds)
+    logger.debug(f"Using timeout: {timeout}s (requested: {timeout_seconds}s)")
     
     # Create safe execution environment
+    logger.debug("Creating safe execution environment")
     safe_globals = create_safe_globals(input_data)
     local_ns = {}
     
     # Execute with timeout
+    logger.debug("Executing code with timeout")
     execute_with_timeout(code, safe_globals, local_ns, timeout)
     
     # Expect handler function
-    if "handler" not in local_ns or not callable(local_ns["handler"]):
-        raise ValueError("No handler() function defined in code")
+    logger.debug("Checking for handler function in local namespace")
+    if "handler" not in local_ns:
+        error_msg = "No handler() function defined in code"
+        logger.error(error_msg)
+        logger.debug(f"Available names in local namespace: {list(local_ns.keys())}")
+        raise ValueError(error_msg)
     
+    if not callable(local_ns["handler"]):
+        error_msg = "handler is defined but is not callable"
+        logger.error(f"{error_msg}, type: {type(local_ns['handler'])}")
+        raise ValueError(error_msg)
+    
+    logger.debug("Handler function found and validated")
     return local_ns["handler"], local_ns
 
 
@@ -190,9 +256,14 @@ def serialize_output(output):
         ValueError: If serialization fails
     """
     try:
-        return json.dumps(output, default=str)
+        logger.debug(f"Serializing output to JSON, type: {type(output)}")
+        result = json.dumps(output, default=str)
+        logger.debug(f"Output serialized successfully, length: {len(result)}")
+        return result
     except (TypeError, ValueError) as e:
-        raise ValueError(
-            f"Failed to serialize output: {str(e)}. Output must be JSON-serializable."
-        )
+        error_msg = f"Failed to serialize output: {str(e)}. Output must be JSON-serializable."
+        logger.error(error_msg)
+        logger.debug(f"Output that failed to serialize: {output}")
+        logger.debug(f"Serialization error traceback:\n{traceback.format_exc()}")
+        raise ValueError(error_msg)
 

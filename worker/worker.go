@@ -12,10 +12,11 @@ import (
 
 // Worker processes tasks from Redis stream & reports results via gRPC
 type Worker struct {
-	cfg         WorkerConfig
-	router      *Router
-	coordClient *CoordinatorClient
-	langClient  *LangClient
+	cfg           WorkerConfig
+	router        *Router
+	coordClient   *CoordinatorClient
+	langClient    *LangClient        // Legacy single client (for backward compatibility)
+	langClientMgr *LangClientManager // New multi-client manager
 }
 
 // TaskMessage is the fields we expect in Redis stream message
@@ -33,14 +34,34 @@ func NewWorker(cfg WorkerConfig) (*Worker, error) {
 		cfg.Logger = zerolog.New(nil).Level(zerolog.InfoLevel)
 	}
 
-	// Create language client if address provided
+	// Create language client manager if addresses provided
+	var langClientMgr *LangClientManager
 	var langClient *LangClient
 	var err error
-	if cfg.LangWorkerAddr != "" {
+
+	if len(cfg.LangWorkerAddrs) > 0 {
+		// New multi-client approach
+		langClientMgr, err = NewLangClientManager(cfg.LangWorkerAddrs, cfg.Logger)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create language client manager: %w", err)
+		}
+		// Extract runtime names for logging
+		runtimeNames := make([]string, 0, len(cfg.LangWorkerAddrs))
+		for runtime := range cfg.LangWorkerAddrs {
+			runtimeNames = append(runtimeNames, runtime)
+		}
+		cfg.Logger.Info().
+			Strs("runtimes", runtimeNames).
+			Msg("language client manager created with multiple runtimes")
+	} else if cfg.LangWorkerAddr != "" {
+		// Legacy single client approach (for backward compatibility)
 		langClient, err = NewLangClient(cfg.LangWorkerAddr, cfg.Logger)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create language client: %w", err)
 		}
+		cfg.Logger.Info().
+			Str("addr", cfg.LangWorkerAddr).
+			Msg("using legacy single language client")
 	}
 
 	// Create coordinator client
@@ -50,13 +71,14 @@ func NewWorker(cfg WorkerConfig) (*Worker, error) {
 	}
 
 	// Create router
-	router := NewRouter(langClient, cfg.Logger)
+	router := NewRouter(langClient, langClientMgr, cfg.Logger)
 
 	return &Worker{
-		cfg:         cfg,
-		router:      router,
-		coordClient: coordClient,
-		langClient:  langClient,
+		cfg:           cfg,
+		router:        router,
+		coordClient:   coordClient,
+		langClient:    langClient,
+		langClientMgr: langClientMgr,
 	}, nil
 }
 
@@ -70,6 +92,11 @@ func (w *Worker) Close() error {
 	}
 	if w.langClient != nil {
 		if err := w.langClient.Close(); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if w.langClientMgr != nil {
+		if err := w.langClientMgr.Close(); err != nil {
 			errs = append(errs, err)
 		}
 	}
