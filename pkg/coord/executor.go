@@ -197,19 +197,46 @@ func (c *Coordinator) HandleNodeCompleted(ctx context.Context, taskID string, ru
 	default:
 		// For CODE, HTTP, CSV, WAIT, and other executable nodes, use standard next node logic
 		// Control flow nodes (SWITCH, FORK) are handled above
-		nextNodes = wfSpec.FindNextNodes(nodeID)
 
 		// Check if this node is part of a parallel execution (a branch node)
-		// If so, check if all branches are complete for join logic
-		joinNodes, joinErr := c.checkParallelJoin(ctx, wfSpec, nodeID, runID, logger, span)
-		if joinErr != nil {
-			logger.Warn().Err(joinErr).Msg("failed to check parallel join, continuing with normal flow")
-		} else if len(joinNodes) > 0 {
-			// All parallel branches are complete, add join nodes to next nodes
-			nextNodes = append(nextNodes, joinNodes...)
-			logger.Info().
-				Int("join_nodes", len(joinNodes)).
-				Msg("parallel branches complete, adding join nodes")
+		// Branch nodes have incoming edges from a FORK node
+		var parallelNodeID string
+		for _, edge := range wfSpec.Edges {
+			if edge.To == nodeID {
+				fromNode := wfSpec.GetNodeByID(edge.From)
+				if fromNode != nil && fromNode.Type == model.NodeTypeFork {
+					parallelNodeID = edge.From
+					break
+				}
+			}
+		}
+
+		if parallelNodeID != "" {
+			// This is a branch node - only process join nodes when all branches complete
+			// Don't process regular next nodes from individual branches
+			joinNodes, joinErr := c.checkParallelJoin(ctx, wfSpec, nodeID, runID, logger, span)
+			if joinErr != nil {
+				logger.Warn().Err(joinErr).Msg("failed to check parallel join, continuing with normal flow")
+				// On error, don't process any next nodes to avoid premature execution
+				nextNodes = nil
+			} else if len(joinNodes) > 0 {
+				// All parallel branches are complete, process join nodes only
+				nextNodes = joinNodes
+				logger.Info().
+					Int("join_nodes", len(joinNodes)).
+					Msg("parallel branches complete, adding join nodes")
+			} else {
+				// Not all branches complete yet, don't process any next nodes from this branch
+				// (they will be processed when all branches complete)
+				nextNodes = nil
+				logger.Debug().
+					Str("branch_node_id", nodeID).
+					Str("parallel_node_id", parallelNodeID).
+					Msg("parallel branch completed, waiting for other branches before processing next nodes")
+			}
+		} else {
+			// Not a branch node, use standard next node logic
+			nextNodes = wfSpec.FindNextNodes(nodeID)
 		}
 	}
 
