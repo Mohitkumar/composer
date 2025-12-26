@@ -5,7 +5,7 @@ import { workflowApi, type WorkflowDefinition, type WorkflowIssueSummary } from 
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { Plus, Edit, Trash2, Play, Search, MoreVertical, AlertTriangle, Rocket, BarChart3 } from 'lucide-react';
+import { Plus, Edit, Trash2, Play, Search, MoreVertical, AlertTriangle, Rocket, BarChart3, Network } from 'lucide-react';
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -36,6 +36,7 @@ import { ScrollArea } from '@/components/ui/scroll-area';
 import { useState, useEffect, useMemo } from 'react';
 import { ExecuteWorkflowDialog } from '@/components/workflow/execute-workflow-dialog';
 import { ExecutionDetailDialog } from '@/components/execution/execution-detail-dialog';
+import { WorkflowGraphDialog } from '@/components/workflow/workflow-graph-dialog';
 import { toast } from 'sonner';
 
 export default function WorkflowsPage() {
@@ -47,6 +48,8 @@ export default function WorkflowsPage() {
   const [workflowForIssueSummary, setWorkflowForIssueSummary] = useState<WorkflowDefinition | null>(null);
   const [executionDetailDialogOpen, setExecutionDetailDialogOpen] = useState(false);
   const [executionId, setExecutionId] = useState<string | null>(null);
+  const [graphDialogOpen, setGraphDialogOpen] = useState(false);
+  const [workflowForGraph, setWorkflowForGraph] = useState<WorkflowDefinition | null>(null);
   const [page, setPage] = useState(1);
   const [searchQuery, setSearchQuery] = useState('');
   const [debouncedSearch, setDebouncedSearch] = useState('');
@@ -288,6 +291,11 @@ export default function WorkflowsPage() {
     setIssueSummaryDialogOpen(true);
   };
 
+  const handleViewGraph = (workflow: WorkflowDefinition) => {
+    setWorkflowForGraph(workflow);
+    setGraphDialogOpen(true);
+  };
+
   return (
     <>
       <Card>
@@ -427,7 +435,7 @@ export default function WorkflowsPage() {
                             </Link>
                           </Button>
                           
-                          {/* Extended menu: Deploy, Issue Summary, Delete */}
+                          {/* Extended menu: Graph, Deploy, Issue Summary, Delete */}
                           <DropdownMenu>
                             <DropdownMenuTrigger asChild>
                               <Button
@@ -440,6 +448,13 @@ export default function WorkflowsPage() {
                               </Button>
                             </DropdownMenuTrigger>
                             <DropdownMenuContent align="end">
+                              <DropdownMenuItem
+                                onClick={() => handleViewGraph(workflow)}
+                              >
+                                <Network className="mr-2 h-4 w-4" />
+                                View Graph
+                              </DropdownMenuItem>
+                              <DropdownMenuSeparator />
                               <DropdownMenuItem
                                 onClick={() => deployMutation.mutate(workflow)}
                                 disabled={deployMutation.isPending || isLatestVersionDeployed(workflow)}
@@ -613,6 +628,19 @@ export default function WorkflowsPage() {
             setExecutionDetailDialogOpen(open);
             if (!open) {
               setExecutionId(null);
+            }
+          }}
+        />
+      )}
+
+      {workflowForGraph && (
+        <WorkflowGraphDialog
+          workflowId={workflowForGraph.id}
+          open={graphDialogOpen}
+          onOpenChange={(open) => {
+            setGraphDialogOpen(open);
+            if (!open) {
+              setWorkflowForGraph(null);
             }
           }}
         />
