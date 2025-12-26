@@ -92,7 +92,7 @@ export default function NewConfigurationPage() {
         description: description || undefined,
         type,
         config_json: parsedConfig,
-        created_by: 'user', // TODO: Get from auth
+        // created_by is automatically set from JWT token on the backend
       });
       return id;
     },

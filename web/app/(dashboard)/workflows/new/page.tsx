@@ -46,7 +46,7 @@ export default function NewWorkflowPage() {
         name: data.name,
         version: 1,
         spec: data.spec, // YAML string
-        created_by: 'user', // TODO: Get from auth
+        // created_by is automatically set from JWT token on the backend
       });
       return data.id;
     },

@@ -44,13 +44,14 @@ export default function LoginPage() {
       const success = await login(username, password);
       if (success) {
         // Use window.location for a full page reload to ensure auth state is picked up
-        window.location.href = '/';
+        const returnUrl = new URLSearchParams(window.location.search).get('returnUrl');
+        window.location.href = returnUrl || '/';
       } else {
         setError('Invalid username or password');
         setLoading(false);
       }
-    } catch (err) {
-      setError('An error occurred. Please try again.');
+    } catch (err: any) {
+      setError(err.message || 'An error occurred. Please try again.');
       setLoading(false);
     }
   };

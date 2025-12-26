@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/mohitkumar/composer/pkg/auth"
 	"github.com/mohitkumar/composer/pkg/coord"
 	"github.com/mohitkumar/composer/pkg/model"
 	"gopkg.in/yaml.v3"
@@ -15,19 +16,20 @@ import (
 // handlers wraps coordinator for HTTP handlers
 type handlers struct {
 	coordinator *coord.Coordinator
+	jwtService  *auth.JWTService
+	userService *auth.UserService
 }
 
 // Workflow handlers
 
 func (h *handlers) createWorkflow(w http.ResponseWriter, r *http.Request) {
 	// Parse JSON request body
-	// Expected format: { "workflow_id": "...", "name": "...", "version": 1, "spec": "yaml string", "created_by": "..." }
+	// Expected format: { "workflow_id": "...", "name": "...", "version": 1, "spec": "yaml string" }
 	var p struct {
 		WorkflowID string `json:"workflow_id"`
 		Name       string `json:"name"`
 		Version    int    `json:"version"`
 		Spec       string `json:"spec"` // YAML string
-		CreatedBy  string `json:"created_by,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
 		w.Header().Set("Content-Type", "application/json")
@@ -62,13 +64,22 @@ func (h *handlers) createWorkflow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Get authenticated user ID from JWT token (set by middleware)
+	userID := GetUserID(r)
+	if userID == "" {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]string{"error": "user ID not found in request context"})
+		return
+	}
+
 	// Create RegisterWorkflowRequest with JSON spec (for database storage)
 	req := model.RegisterWorkflowRequest{
 		WorkflowID: p.WorkflowID,
 		Name:       p.Name,
 		Version:    p.Version,
 		Spec:       specJSON,
-		CreatedBy:  p.CreatedBy,
+		CreatedBy:  userID, // Use authenticated user ID
 	}
 
 	if err := h.coordinator.RegisterWorkflow(r.Context(), &req); err != nil {
@@ -670,6 +681,12 @@ func (h *handlers) createConfiguration(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Get authenticated user ID from JWT token (set by middleware)
+	userID := GetUserID(r)
+	if userID != "" {
+		req.CreatedBy = userID // Use authenticated user ID
+	}
+
 	if err := h.coordinator.CreateConfiguration(r.Context(), &req); err != nil {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusInternalServerError)
@@ -737,4 +754,64 @@ func (h *handlers) getWorkflowIssueSummary(w http.ResponseWriter, r *http.Reques
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(summary)
+}
+
+// Auth handlers
+
+func (h *handlers) login(w http.ResponseWriter, r *http.Request) {
+	var req model.LoginRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "invalid request body"})
+		return
+	}
+
+	if req.Username == "" || req.Password == "" {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "username and password are required"})
+		return
+	}
+
+	// Authenticate user
+	user, err := h.userService.Authenticate(r.Context(), req.Username, req.Password)
+	if err != nil {
+		if err == auth.ErrUserNotFound || err == auth.ErrInvalidPassword {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusUnauthorized)
+			json.NewEncoder(w).Encode(map[string]string{"error": "invalid username or password"})
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": "authentication failed"})
+		return
+	}
+
+	// Generate JWT token
+	token, err := h.jwtService.GenerateToken(user.ID, user.Username)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": "failed to generate token"})
+		return
+	}
+
+	response := model.LoginResponse{
+		Token: token,
+		User:  *user,
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(response)
+}
+
+func (h *handlers) logout(w http.ResponseWriter, r *http.Request) {
+	// For JWT-based auth, logout is handled client-side by removing the token
+	// This endpoint exists for consistency and potential future token blacklisting
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]string{"message": "logged out successfully"})
 }

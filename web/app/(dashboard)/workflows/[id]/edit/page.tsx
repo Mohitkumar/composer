@@ -56,7 +56,7 @@ export default function EditWorkflowPage() {
         name: data.name,
         version: currentWorkflow.version,
         spec: data.spec, // YAML string
-        created_by: currentWorkflow.created_by || 'user',
+        // created_by is automatically set from JWT token on the backend
       });
 
       // Update name if changed (only if not creating new version)

@@ -115,8 +115,9 @@ func generateConfig() *coord.Config {
 			MaxConnReleaseTimeout: time.Duration(viper.GetInt("store.max-conn-release-timeout")) * time.Second,
 		},
 		APIConfig: api.APIConfig{
-			HTTPPort: viper.GetInt("api.http_port"),
-			GRPCPort: viper.GetInt("api.grpc_port"),
+			HTTPPort:  viper.GetInt("api.http_port"),
+			GRPCPort:  viper.GetInt("api.grpc_port"),
+			JWTSecret: viper.GetString("api.jwt_secret"),
 		},
 		DisableObservability: viper.GetBool("disable-observability"),
 		OutboxConfig: coord.OutboxConfig{

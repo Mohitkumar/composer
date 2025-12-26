@@ -36,6 +36,19 @@ apiClient.interceptors.response.use(
     if (error.response) {
       // Server responded with error status
       console.error('[API Error]', error.response.status, error.response.data);
+      
+      // Handle 401 Unauthorized - redirect to login
+      if (error.response.status === 401 && typeof window !== 'undefined') {
+        // Clear auth token
+        localStorage.removeItem('auth_token');
+        localStorage.removeItem('auth_user');
+        
+        // Redirect to login if not already there
+        if (window.location.pathname !== '/login') {
+          window.location.href = '/login';
+        }
+      }
+      
       return Promise.reject(
         new Error(error.response.data?.error || error.response.data?.message || `Request failed with status ${error.response.status}`)
       );
@@ -181,12 +194,12 @@ export const workflowApi = {
   create: async (data: CreateWorkflowRequest): Promise<void> => {
     // Send as JSON with spec as YAML string
     // The data.spec is already a YAML string, send it as-is in JSON body
+    // Note: created_by is automatically set from JWT token on the backend
     await apiClient.post('/workflows', {
       workflow_id: data.workflow_id,
       name: data.name,
       version: data.version,
       spec: data.spec, // YAML string
-      ...(data.created_by ? { created_by: data.created_by } : {}),
     });
   },
 
@@ -428,7 +441,10 @@ export const configurationApi = {
   },
 
   create: async (data: CreateConfigurationRequest): Promise<void> => {
-    await apiClient.post('/configurations', data);
+    // Note: created_by is automatically set from JWT token on the backend
+    // Remove it from the request if present
+    const { created_by, ...requestData } = data;
+    await apiClient.post('/configurations', requestData);
   },
 
   update: async (id: string, data: UpdateConfigurationRequest): Promise<void> => {
