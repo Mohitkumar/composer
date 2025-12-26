@@ -1,15 +1,33 @@
-# Comprehensive Workflow Example
-# This workflow demonstrates:
-# - Python tasks that process and add data to output
-# - SWITCH node with conditional branching based on previous task outputs
-# - PARALLEL/FORK-JOIN nodes for concurrent execution
-# - Passing outputs between nodes using template variables
-
+edges:
+  - from: init_data
+    to: increment_counter
+  - from: increment_counter
+    to: check_counter
+  - condition: "{{tasks.increment_counter.output.counter >= 5}}"
+    from: check_counter
+    to: process_high
+  - condition: "{{tasks.increment_counter.output.counter < 5}}"
+    from: check_counter
+    to: process_low
+  - from: process_high
+    to: fork_parallel
+  - from: fork_parallel
+    to: calc_sum
+  - from: fork_parallel
+    to: calc_product
+  - from: fork_parallel
+    to: calc_difference
+  - from: calc_sum
+    to: aggregate_results
+  - from: calc_product
+    to: aggregate_results
+  - from: calc_difference
+    to: aggregate_results
+  - from: aggregate_results
+    to: final_summary
 nodes:
-  # Initial task: Process input data
   - name: Initialize Data
     node_id: init_data
-    type: CODE
     runtime: python
     spec:
       code: |
@@ -30,19 +48,18 @@ nodes:
             # Add initial processing
             result = {
                 "initial_value": data.get("value", 0),
-                "counter": 1,
+                "counter": data.get("value", 0),
                 "timestamp": datetime.now().isoformat(),
                 "processed_by": "init_data",
                 "message": "Data initialized successfully"
             }
             
             return result
+      input: "{{input}}"
       timeout: 30
-
-  # Increment counter task
+    type: CODE
   - name: Increment Counter
     node_id: increment_counter
-    type: CODE
     runtime: python
     spec:
       code: |
@@ -76,18 +93,13 @@ nodes:
             return result
       input: "{{tasks.init_data.output}}"
       timeout: 30
-
-  # SWITCH node: Branch based on counter value
-  # Note: SWITCH nodes don't execute code - they evaluate edge conditions
+    type: CODE
   - name: Check Counter Value
     node_id: check_counter
-    type: SWITCH
     spec: {}
-
-  # Branch 1: Counter is high (>= 5)
+    type: SWITCH
   - name: Process High Counter
     node_id: process_high
-    type: CODE
     runtime: python
     spec:
       code: |
@@ -122,11 +134,9 @@ nodes:
             return result
       input: "{{tasks.check_counter.output}}"
       timeout: 30
-
-  # Branch 2: Counter is low (< 5)
+    type: CODE
   - name: Process Low Counter
     node_id: process_low
-    type: CODE
     runtime: python
     spec:
       code: |
@@ -161,21 +171,16 @@ nodes:
             return result
       input: "{{tasks.check_counter.output}}"
       timeout: 30
-
-  # PARALLEL/FORK node: Fork into multiple parallel branches
-  # Note: FORK nodes don't execute code - they fork execution immediately
+    type: CODE
   - name: Fork Parallel Processing
     node_id: fork_parallel
-    type: FORK
     spec: {}
-
-  # Parallel Branch 1: Calculate sum
+    type: FORK
   - name: Calculate Sum
     node_id: calc_sum
-    type: CODE
     runtime: python
     spec:
-      code: |
+      code: >
         def handler(input):
             """
             Parallel branch 1: Calculate sum of values.
@@ -203,14 +208,12 @@ nodes:
             return result
       input: "{{tasks.process_high.output}}"
       timeout: 30
-
-  # Parallel Branch 2: Calculate product
+    type: CODE
   - name: Calculate Product
     node_id: calc_product
-    type: CODE
     runtime: python
     spec:
-      code: |
+      code: >
         def handler(input):
             """
             Parallel branch 2: Calculate product of values.
@@ -238,14 +241,12 @@ nodes:
             return result
       input: "{{tasks.process_high.output}}"
       timeout: 30
-
-  # Parallel Branch 3: Calculate difference
+    type: CODE
   - name: Calculate Difference
     node_id: calc_difference
-    type: CODE
     runtime: python
     spec:
-      code: |
+      code: >
         def handler(input):
             """
             Parallel branch 3: Calculate difference of values.
@@ -273,14 +274,12 @@ nodes:
             return result
       input: "{{tasks.process_high.output}}"
       timeout: 30
-
-  # JOIN node: Aggregate results from all parallel branches
+    type: CODE
   - name: Aggregate Results
     node_id: aggregate_results
-    type: CODE
     runtime: python
     spec:
-      code: |
+      code: >
         def handler(input):
             """
             Aggregate results from all parallel branches.
@@ -321,14 +320,12 @@ nodes:
           "original_data": {{tasks.process_high.output}}
         }
       timeout: 30
-
-  # Final task: Generate summary
+    type: CODE
   - name: Generate Final Summary
     node_id: final_summary
-    type: CODE
     runtime: python
     spec:
-      code: |
+      code: >
         def handler(input):
             """
             Generate final summary of the entire workflow execution.
@@ -372,55 +369,4 @@ nodes:
             return summary
       input: "{{tasks.aggregate_results.output}}"
       timeout: 30
-
-edges:
-  # Linear flow: init -> increment
-  - from: init_data
-    to: increment_counter
-
-  # Linear flow: increment -> switch
-  - from: increment_counter
-    to: check_counter
-
-  # SWITCH conditions: Branch based on counter value
-  # High branch: counter >= 5
-  - from: check_counter
-    to: process_high
-    condition: "tasks.increment_counter.output.counter >= 5"
-
-  # Low branch: counter < 5
-  - from: check_counter
-    to: process_low
-    condition: "tasks.increment_counter.output.counter < 5"
-
-  # After switch, go to parallel fork
-  # Note: In this example, only the high branch continues to parallel processing
-  # You can modify to have both branches merge if needed
-  - from: process_high
-    to: fork_parallel
-
-  # PARALLEL fork: All three branches start simultaneously
-  - from: fork_parallel
-    to: calc_sum
-
-  - from: fork_parallel
-    to: calc_product
-
-  - from: fork_parallel
-    to: calc_difference
-
-  # JOIN: All parallel branches must complete before aggregate_results runs
-  # (This is detected automatically when all branches have edges to the same node)
-  - from: calc_sum
-    to: aggregate_results
-
-  - from: calc_product
-    to: aggregate_results
-
-  - from: calc_difference
-    to: aggregate_results
-
-  # Final step
-  - from: aggregate_results
-    to: final_summary
-
+    type: CODE
