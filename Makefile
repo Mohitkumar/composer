@@ -1,4 +1,4 @@
-.PHONY: help build build-coordinator build-worker build-worker-js build-worker-py proto proto-go proto-py proto-js clean test docker-build docker-up docker-down install-deps run-local
+.PHONY: help build build-coordinator build-worker build-worker-js build-worker-py build-web dev-web proto proto-go proto-py proto-js clean test docker-build docker-up docker-down install-deps run-local
 
 # Variables
 GO_CMD := go
@@ -7,6 +7,8 @@ PROTO_DIR := pkg/api/proto
 PROTO_GO_OUT := pkg/api/proto/gen/go
 PROTO_PY_OUT := cmd/language-server-py
 PROTO_JS_OUT := cmd/language-server-js
+DOCKER_COMPOSE_FILE := infra/docker/docker-compose.yml
+WEB_DIR := web
 
 # Go binaries
 COORDINATOR_BIN := bin/coordinator
@@ -18,7 +20,7 @@ help: ## Show this help message
 	@echo 'Available targets:'
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-15s %s\n", $$1, $$2}'
 
-build: proto-go build-coordinator build-worker build-language-server-js build-language-server-py ## Build all binaries (coordinator, worker, and language workers)
+build: proto-go build-coordinator build-worker build-language-server-js build-language-server-py build-web ## Build all binaries (coordinator, worker, language workers, and web UI)
 
 build-coordinator: ## Build coordinator binary
 	@echo "Building coordinator..."
@@ -39,6 +41,23 @@ build-language-server-py: proto-py ## Build Python language worker
 	@echo "Building Python language worker..."
 	@cd cmd/language-server-py && uv sync
 	@echo "Python language server dependencies installed"
+
+build-web: ## Build web UI (Next.js) - installs deps if needed
+	@echo "Building web UI..."
+	@if [ ! -d "$(WEB_DIR)/node_modules" ]; then \
+		echo "Installing web UI dependencies first..."; \
+		cd $(WEB_DIR) && npm install; \
+	fi
+	@cd $(WEB_DIR) && npm run build
+	@echo "Web UI built successfully"
+
+dev-web: ## Start web UI development server
+	@echo "Starting web UI development server..."
+	@if [ ! -d "$(WEB_DIR)/node_modules" ]; then \
+		echo "Installing web UI dependencies first..."; \
+		cd $(WEB_DIR) && npm install; \
+	fi
+	@cd $(WEB_DIR) && npm run dev
 
 proto: proto-go proto-py proto-js ## Generate all protobuf files
 
@@ -75,10 +94,12 @@ proto-js: ## Generate JavaScript protobuf files (runtime, no generation needed)
 install-deps: ## Install dependencies for all projects
 	@echo "Installing Go dependencies..."
 	$(GO_CMD) mod download
-	@echo "Installing Node.js dependencies..."
+	@echo "Installing JavaScript language server dependencies..."
 	cd cmd/language-server-js && npm install
 	@echo "Installing Python dependencies..."
 	cd cmd/language-server-py && uv sync
+	@echo "Installing web UI dependencies..."
+	cd $(WEB_DIR) && npm install
 	@echo "All dependencies installed"
 
 clean: ## Clean build artifacts
@@ -88,6 +109,9 @@ clean: ## Clean build artifacts
 	find $(PROTO_PY_OUT) -name "*_pb2.py" -delete
 	find $(PROTO_PY_OUT) -name "*_pb2_grpc.py" -delete
 	rm -rf cmd/language-server-js/node_modules
+	rm -rf $(WEB_DIR)/.next
+	rm -rf $(WEB_DIR)/node_modules
+	@echo "Clean complete"
 test: ## Run unit tests
 	$(GO_CMD) test ./...
 
@@ -103,18 +127,18 @@ test-e2e: ## Run end-to-end tests (requires Docker for Testcontainers)
 
 docker-build: ## Build Docker images
 	@echo "Building Docker images..."
-	docker-compose build
+	@cd infra/docker && docker-compose -f docker-compose.yml build
 
 docker-up: ## Start all services with docker-compose
 	@echo "Starting services..."
-	docker-compose up -d
+	@cd infra/docker && docker-compose -f docker-compose.yml up -d
 
 docker-down: ## Stop all services
 	@echo "Stopping services..."
-	docker-compose down
+	@cd infra/docker && docker-compose -f docker-compose.yml down
 
 docker-logs: ## Show docker-compose logs
-	docker-compose logs -f
+	@cd infra/docker && docker-compose -f docker-compose.yml logs -f
 
 run-local: ## Run the project locally using bootstrap script
 	@echo "Running local bootstrap script..."
