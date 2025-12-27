@@ -7,7 +7,6 @@ echo "Running initial database migrations..."
 
 # Run migrations in order using psql -f
 psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" -f /migrations/V001__init.sql
-psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" -f /migrations/V004__insert_sample_templates.sql
 
 echo "Initial migrations completed successfully!"
 

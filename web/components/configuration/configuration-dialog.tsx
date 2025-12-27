@@ -27,7 +27,6 @@ import { toast } from 'sonner';
 import { ScrollArea } from '@/components/ui/scroll-area';
 
 const CONFIG_TYPES = [
-  { value: 's3', label: 'S3' },
   { value: 'http', label: 'HTTP' },
   { value: 'database', label: 'Database' },
   { value: 'api_key', label: 'API Key' },
@@ -37,12 +36,6 @@ const CONFIG_TYPES = [
 
 // Default templates for different config types
 const CONFIG_TEMPLATES: Record<string, Record<string, any>> = {
-  s3: {
-    bucket: '',
-    region: 'us-east-1',
-    access_key_id: '',
-    secret_access_key: '',
-  },
   http: {
     base_url: '',
     headers: {},
@@ -264,7 +257,7 @@ export function ConfigurationDialog({
                     id="name"
                     value={name}
                     onChange={(e) => setName(e.target.value)}
-                    placeholder="My S3 Configuration"
+                    placeholder="My Configuration"
                     disabled={isSaving}
                   />
                 </div>

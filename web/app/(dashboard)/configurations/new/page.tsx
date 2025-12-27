@@ -20,7 +20,6 @@ import type { Monaco } from '@monaco-editor/react';
 import { toast } from 'sonner';
 
 const CONFIG_TYPES = [
-  { value: 's3', label: 'S3' },
   { value: 'http', label: 'HTTP' },
   { value: 'database', label: 'Database' },
   { value: 'api_key', label: 'API Key' },
@@ -30,12 +29,6 @@ const CONFIG_TYPES = [
 
 // Default templates for different config types
 const CONFIG_TEMPLATES: Record<string, Record<string, any>> = {
-  s3: {
-    bucket: '',
-    region: 'us-east-1',
-    access_key_id: '',
-    secret_access_key: '',
-  },
   http: {
     base_url: '',
     headers: {},
@@ -171,7 +164,7 @@ export default function NewConfigurationPage() {
               id="name"
               value={name}
               onChange={(e) => setName(e.target.value)}
-              placeholder="My S3 Configuration"
+              placeholder="My Configuration"
             />
           </div>
           <div className="space-y-2">

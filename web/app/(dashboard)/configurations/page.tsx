@@ -152,7 +152,7 @@ export default function ConfigurationsPage() {
       <Card>
         <PageHeader
           title="Configurations"
-          description={`${uniqueConfigs.length} configuration${uniqueConfigs.length !== 1 ? 's' : ''} total • Manage reusable configuration templates for S3, HTTP, databases, and more`}
+          description={`${uniqueConfigs.length} configuration${uniqueConfigs.length !== 1 ? 's' : ''} total • Manage reusable configuration templates for HTTP, databases, and more`}
           action={
             <Button size="sm" className="btn-small" onClick={handleCreate}>
               <Plus className="mr-1.5 h-3.5 w-3.5" />

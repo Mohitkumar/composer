@@ -120,7 +120,7 @@ export default function EditConfigurationPage() {
               id="name"
               value={name}
               onChange={(e) => setName(e.target.value)}
-              placeholder="My S3 Configuration"
+              placeholder="My Configuration"
             />
           </div>
           <div className="space-y-2">

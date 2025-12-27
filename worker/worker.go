@@ -24,7 +24,7 @@ type TaskMessage struct {
 	TaskID   string          `json:"task_id"` // task_instance id
 	RunID    string          `json:"run_id"`
 	NodeID   string          `json:"node_id"`
-	NodeType string          `json:"node_type"` // e.g., "http", "python", "js", "s3", "csv"
+	NodeType string          `json:"node_type"` // e.g., "http", "python", "js"
 	Input    json.RawMessage `json:"input"`
 }
 

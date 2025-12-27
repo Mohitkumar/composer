@@ -27,7 +27,6 @@ interface WorkflowGraphProps {
 const nodeTypeColors: Record<string, { bg: string; border: string; text: string }> = {
   CODE: { bg: 'bg-blue-50', border: 'border-blue-300', text: 'text-blue-700' },
   HTTP: { bg: 'bg-green-50', border: 'border-green-300', text: 'text-green-700' },
-  CSV: { bg: 'bg-purple-50', border: 'border-purple-300', text: 'text-purple-700' },
   SWITCH: { bg: 'bg-yellow-50', border: 'border-yellow-300', text: 'text-yellow-700' },
   FORK: { bg: 'bg-orange-50', border: 'border-orange-300', text: 'text-orange-700' },
   JOIN: { bg: 'bg-pink-50', border: 'border-pink-300', text: 'text-pink-700' },
@@ -247,7 +246,6 @@ export function WorkflowGraph({ spec }: WorkflowGraphProps) {
     const colorMap: Record<string, string> = {
       CODE: '#3b82f6',
       HTTP: '#10b981',
-      CSV: '#8b5cf6',
       SWITCH: '#eab308',
       FORK: '#f97316',
       JOIN: '#ec4899',

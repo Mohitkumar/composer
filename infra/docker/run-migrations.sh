@@ -19,11 +19,8 @@ if ! docker ps | grep -q "$POSTGRES_CONTAINER"; then
 fi
 
 # Run migrations in order using psql
-echo "Running V001__init.sql..."
+echo "Running V001__init.sql (includes all schema, users, foreign keys, and sample templates)..."
 docker exec "$POSTGRES_CONTAINER" psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -f /migrations/V001__init.sql
-
-echo "Running V004__insert_sample_templates.sql..."
-docker exec "$POSTGRES_CONTAINER" psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -f /migrations/V004__insert_sample_templates.sql
 
 echo "Migrations completed successfully!"
 

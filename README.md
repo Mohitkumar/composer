@@ -859,7 +859,7 @@ The following sequence diagram illustrates the complete flow of a workflow execu
 5. **Task Consumption**: Workers consume messages from Redis Streams using consumer groups
 6. **Lease Acquisition**: Worker requests lease from Coordinator via gRPC to prevent duplicate execution
 7. **Atomic Lease Update**: Coordinator atomically updates task state from PENDING to RUNNING
-8. **Task Execution**: Worker executes the task (HTTP, CSV, or CODE)
+8. **Task Execution**: Worker executes the task (HTTP or CODE)
 9. **Language Server Call**: For CODE nodes, worker calls appropriate language server (Python/JavaScript) via gRPC
 10. **Result Reporting**: Worker reports execution result back to Coordinator
 11. **State Update**: Coordinator updates task state to COMPLETED and clears lease

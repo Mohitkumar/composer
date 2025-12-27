@@ -62,8 +62,6 @@ export function NodeTemplateDialog({
                 <SelectItem value="python">Python</SelectItem>
                 <SelectItem value="go">Go</SelectItem>
                 <SelectItem value="sql">SQL</SelectItem>
-                <SelectItem value="s3">S3</SelectItem>
-                <SelectItem value="csv">CSV</SelectItem>
               </SelectContent>
             </Select>
           </div>

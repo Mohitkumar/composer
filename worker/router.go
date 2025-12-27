@@ -43,8 +43,6 @@ func NewRouter(langClientMgr *LangClientManager, logger zerolog.Logger) *Router 
 
 	// Register built-in executors
 	r.RegisterExecutor(executors.NewHTTPExecutor())
-	r.RegisterExecutor(executors.NewS3Executor())
-	r.RegisterExecutor(executors.NewCSVExecutor())
 
 	return r
 }
@@ -57,7 +55,7 @@ func (r *Router) RegisterExecutor(exec executors.Executor) {
 // Route routes a task to the appropriate executor based on node type
 // nodeType can be:
 // - For CODE nodes: runtime (python, js, node) - routes to language executor
-// - For other nodes: type (HTTP, CSV) - routes to built-in executor
+// - For other nodes: type (HTTP) - routes to built-in executor
 // - Control flow nodes (SWITCH, PARALLEL/FORK, JOIN) are handled by coordinator, not worker
 func (r *Router) Route(ctx context.Context, nodeType string, input json.RawMessage) (json.RawMessage, error) {
 	logger := r.logger.With().Str("node_type", nodeType).Logger()
@@ -75,7 +73,7 @@ func (r *Router) Route(ctx context.Context, nodeType string, input json.RawMessa
 		return r.executeLanguageTaskWithClient(ctx, nodeType, input, langClient, logger)
 	}
 
-	// Check for built-in executor (HTTP, CSV, etc.)
+	// Check for built-in executor (HTTP, etc.)
 	exec, exists := r.executors[nodeType]
 	if !exists {
 		return nil, fmt.Errorf("no executor found for node type: %s", nodeType)

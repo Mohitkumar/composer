@@ -31,8 +31,6 @@ const (
 	NodeTypeCode NodeType = "CODE"
 	// HTTP - Execute HTTP request
 	NodeTypeHTTP NodeType = "HTTP"
-	// CSV - Process CSV data
-	NodeTypeCSV NodeType = "CSV"
 	// SWITCH - Conditional branching based on conditions
 	NodeTypeSwitch NodeType = "SWITCH"
 	// FORK - Fork execution into parallel branches

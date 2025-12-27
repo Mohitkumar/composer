@@ -10,7 +10,7 @@ type Configuration struct {
 	ID          string         `json:"id"`
 	Name        string         `json:"name"`
 	Description sql.NullString `json:"description,omitempty"`
-	Type        string         `json:"type"` // s3, http, database, api_key, etc.
+	Type        string         `json:"type"` // http, database, api_key, etc.
 	ConfigJSON  []byte         `json:"config_json"`
 	CreatedBy   sql.NullString `json:"created_by,omitempty"`
 	CreatedAt   time.Time      `json:"created_at"`

@@ -195,7 +195,7 @@ func (c *Coordinator) HandleNodeCompleted(ctx context.Context, taskID string, ru
 			Int("forked_branches", len(nextNodes)).
 			Msg("parallel node forking into branches")
 	default:
-		// For CODE, HTTP, CSV, WAIT, and other executable nodes, use standard next node logic
+		// For CODE, HTTP, WAIT, and other executable nodes, use standard next node logic
 		// Control flow nodes (SWITCH, FORK) are handled above
 
 		// Check if this node is part of a parallel execution (a branch node)

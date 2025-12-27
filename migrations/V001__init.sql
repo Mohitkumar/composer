@@ -1,5 +1,9 @@
--- Initial database schema migration
--- This migration includes all schema changes merged from V001-V008
+-- Complete database schema migration
+-- This migration includes all schema changes and initial data
+
+-- ============================================================================
+-- SECTION 1: Core Schema Tables
+-- ============================================================================
 
 -- Workflow definitions table
 -- Note: id is TEXT (workflow_id), not serial, to allow custom workflow IDs
@@ -145,7 +149,7 @@ CREATE TABLE IF NOT EXISTS configurations (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL UNIQUE,
     description TEXT,
-    type TEXT NOT NULL, -- 's3', 'http', 'database', 'api_key', etc.
+    type TEXT NOT NULL, -- 'http', 'database', 'api_key', etc.
     config_json JSONB NOT NULL, -- Configuration data (credentials, endpoints, etc.)
     created_by TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -154,3 +158,254 @@ CREATE TABLE IF NOT EXISTS configurations (
 
 CREATE INDEX IF NOT EXISTS idx_configurations_type ON configurations(type);
 CREATE INDEX IF NOT EXISTS idx_configurations_created_by ON configurations(created_by);
+
+-- ============================================================================
+-- SECTION 2: Users and Authentication
+-- ============================================================================
+
+-- Users table for authentication
+CREATE TABLE IF NOT EXISTS users (
+    id TEXT PRIMARY KEY,
+    username TEXT NOT NULL UNIQUE,
+    email TEXT,
+    password_hash TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    last_login_at TIMESTAMPTZ
+);
+
+CREATE INDEX IF NOT EXISTS idx_users_username ON users(username);
+CREATE INDEX IF NOT EXISTS idx_users_email ON users(email) WHERE email IS NOT NULL;
+
+-- Insert a default admin user (password: admin123)
+-- Password hash is bcrypt hash of "admin123" with cost 10
+-- You should change this password after first login
+INSERT INTO users (id, username, email, password_hash) 
+VALUES (
+    'admin',
+    'admin',
+    'admin@example.com',
+    '$2a$10$PjMH8x54x3Ersl57dyiAQ.2n6KpsXtv6sp3GR6U73C2d/.5xwoytu'
+) ON CONFLICT (username) DO NOTHING;
+
+-- ============================================================================
+-- SECTION 3: Foreign Key Constraints
+-- ============================================================================
+
+-- Add foreign key relationship between workflow_definitions and users
+-- First, update any existing workflows with invalid created_by values to use the admin user
+UPDATE workflow_definitions 
+SET created_by = 'admin' 
+WHERE created_by IS NULL 
+   OR created_by NOT IN (SELECT id FROM users);
+
+-- Add foreign key constraint
+ALTER TABLE workflow_definitions
+ADD CONSTRAINT fk_workflow_definitions_created_by 
+FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE RESTRICT;
+
+-- Add index for better query performance
+CREATE INDEX IF NOT EXISTS idx_workflow_definitions_created_by ON workflow_definitions(created_by);
+
+-- Add foreign key relationship between configurations and users
+-- First, update any existing configurations with invalid created_by values to use the admin user
+UPDATE configurations 
+SET created_by = 'admin' 
+WHERE created_by IS NULL 
+   OR created_by NOT IN (SELECT id FROM users);
+
+-- Add foreign key constraint
+ALTER TABLE configurations
+ADD CONSTRAINT fk_configurations_created_by 
+FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE RESTRICT;
+
+-- Add index for better query performance
+CREATE INDEX IF NOT EXISTS idx_configurations_created_by ON configurations(created_by);
+
+-- ============================================================================
+-- SECTION 4: Sample Templates and Initial Data
+-- ============================================================================
+
+-- Insert sample node templates
+
+-- HTTP Node Templates
+INSERT INTO node_templates (id, name, description, runtime, node_type, spec_json, category, tags) VALUES
+('http-get', 'HTTP GET Request', 'Basic HTTP GET request to fetch data from an API endpoint', 'http', 'TASK', 
+ '{"url": "https://api.example.com/data", "method": "GET", "headers": {}, "timeout_seconds": 30}'::jsonb,
+ 'http', ARRAY['http', 'api', 'get', 'fetch']),
+
+('http-post', 'HTTP POST Request', 'HTTP POST request to send data to an API endpoint', 'http', 'TASK',
+ '{"url": "https://api.example.com/data", "method": "POST", "headers": {"Content-Type": "application/json"}, "body": "{}", "timeout_seconds": 30}'::jsonb,
+ 'http', ARRAY['http', 'api', 'post', 'send']),
+
+('http-put', 'HTTP PUT Request', 'HTTP PUT request to update data via API', 'http', 'TASK',
+ '{"url": "https://api.example.com/data/{{input.id}}", "method": "PUT", "headers": {"Content-Type": "application/json"}, "body": "{{input.data}}", "timeout_seconds": 30}'::jsonb,
+ 'http', ARRAY['http', 'api', 'put', 'update']),
+
+-- JavaScript Node Templates
+('js-process', 'JavaScript Processor', 'Process input data using JavaScript', 'javascript', 'TASK',
+ '{"code": "function handler(input) {\n  // Process the input data\n  const result = {\n    processed: true,\n    data: input,\n    timestamp: new Date().toISOString()\n  };\n  return result;\n}", "timeout": 60}'::jsonb,
+ 'code', ARRAY['javascript', 'js', 'process', 'transform']),
+
+('js-transform', 'JavaScript Data Transform', 'Transform and reshape data using JavaScript', 'javascript', 'TASK',
+ '{"code": "function handler(input) {\n  // Transform input data\n  if (Array.isArray(input)) {\n    return input.map(item => ({\n      ...item,\n      transformed: true\n    }));\n  }\n  return { ...input, transformed: true };\n}", "timeout": 60}'::jsonb,
+ 'code', ARRAY['javascript', 'js', 'transform', 'map']),
+
+-- Python Node Templates
+('py-process', 'Python Processor', 'Process input data using Python', 'python', 'TASK',
+ '{"code": "def handler(input):\n    # Process the input data\n    result = {\n        \"processed\": True,\n        \"data\": input,\n        \"timestamp\": __import__(\"datetime\").datetime.now().isoformat()\n    }\n    return result", "timeout": 60}'::jsonb,
+ 'code', ARRAY['python', 'py', 'process', 'transform']),
+
+('py-calculate', 'Python Calculator', 'Perform calculations using Python', 'python', 'TASK',
+ '{"code": "def handler(input):\n    # Perform calculations\n    if isinstance(input, dict) and \"a\" in input and \"b\" in input:\n        return {\n            \"sum\": input[\"a\"] + input[\"b\"],\n            \"product\": input[\"a\"] * input[\"b\"],\n            \"difference\": input[\"a\"] - input[\"b\"]\n        }\n    return {\"error\": \"Invalid input\"}", "timeout": 60}'::jsonb,
+ 'code', ARRAY['python', 'py', 'calculate', 'math']),
+
+-- SQL Node Templates
+('sql-select', 'SQL SELECT Query', 'Execute a SELECT query to fetch data from database', 'sql', 'TASK',
+ '{"query": "SELECT * FROM users WHERE status = ? LIMIT 100", "parameters": ["active"], "connection_string": "postgresql://user:pass@localhost:5432/dbname"}'::jsonb,
+ 'database', ARRAY['sql', 'database', 'select', 'query']),
+
+('sql-insert', 'SQL INSERT Query', 'Insert data into database table', 'sql', 'TASK',
+ '{"query": "INSERT INTO users (name, email, status) VALUES (?, ?, ?) RETURNING id", "parameters": ["{{input.name}}", "{{input.email}}", "active"], "connection_string": "postgresql://user:pass@localhost:5432/dbname"}'::jsonb,
+ 'database', ARRAY['sql', 'database', 'insert', 'create']),
+
+ON CONFLICT (id) DO NOTHING;
+
+-- Insert sample workflow templates
+
+INSERT INTO workflow_templates (id, name, description, spec_json, category, tags) VALUES
+('simple-api-pipeline', 'Simple API Pipeline', 'A basic workflow that fetches data from an API and processes it',
+ '{
+   "nodes": [
+     {
+       "node_id": "fetch_data",
+       "name": "Fetch Data",
+       "type": "TASK",
+       "runtime": "http",
+       "spec": {
+         "url": "https://api.example.com/data",
+         "method": "GET",
+         "timeout_seconds": 30
+       }
+     },
+     {
+       "node_id": "process_data",
+       "name": "Process Data",
+       "type": "TASK",
+       "runtime": "javascript",
+       "spec": {
+         "code": "function handler(input) {\n  const data = input || {};\n  return {\n    processed: true,\n    result: data,\n    timestamp: new Date().toISOString()\n  };\n}",
+         "timeout": 60
+       }
+     }
+   ],
+   "edges": [
+     {
+       "from": "fetch_data",
+       "to": "process_data"
+     }
+   ]
+ }'::jsonb,
+ 'pipeline', ARRAY['api', 'pipeline', 'simple', 'http', 'javascript']),
+
+('data-transform-pipeline', 'Data Transform Pipeline', 'Fetch data, transform it, and store results',
+ '{
+   "nodes": [
+     {
+       "node_id": "fetch",
+       "name": "Fetch Data",
+       "type": "TASK",
+       "runtime": "http",
+       "spec": {
+         "url": "https://api.example.com/source",
+         "method": "GET",
+         "timeout_seconds": 30
+       }
+     },
+     {
+       "node_id": "transform",
+       "name": "Transform",
+       "type": "TASK",
+       "runtime": "javascript",
+       "spec": {
+         "code": "function handler(input) {\n  if (Array.isArray(input)) {\n    return input.map(item => ({\n      ...item,\n      transformed: true,\n      processed_at: new Date().toISOString()\n    }));\n  }\n  return { ...input, transformed: true };\n}",
+         "timeout": 60
+       }
+     },
+     {
+       "node_id": "store",
+       "name": "Store Result",
+       "type": "TASK",
+       "runtime": "http",
+       "spec": {
+         "url": "https://api.example.com/results",
+         "method": "POST",
+         "headers": {"Content-Type": "application/json"},
+         "body": "{{tasks.transform.output}}",
+         "timeout_seconds": 30
+       }
+     }
+   ],
+   "edges": [
+     {
+       "from": "fetch",
+       "to": "transform"
+     },
+     {
+       "from": "transform",
+       "to": "store"
+     }
+   ]
+ }'::jsonb,
+ 'pipeline', ARRAY['transform', 'pipeline', 'etl', 'http', 'javascript']),
+
+('parallel-processing', 'Parallel Processing', 'Process multiple data sources in parallel',
+ '{
+   "nodes": [
+     {
+       "node_id": "fetch_source1",
+       "name": "Fetch Source 1",
+       "type": "TASK",
+       "runtime": "http",
+       "spec": {
+         "url": "https://api.example.com/source1",
+         "method": "GET",
+         "timeout_seconds": 30
+       }
+     },
+     {
+       "node_id": "fetch_source2",
+       "name": "Fetch Source 2",
+       "type": "TASK",
+       "runtime": "http",
+       "spec": {
+         "url": "https://api.example.com/source2",
+         "method": "GET",
+         "timeout_seconds": 30
+       }
+     },
+     {
+       "node_id": "merge",
+       "name": "Merge Results",
+       "type": "TASK",
+       "runtime": "javascript",
+       "spec": {
+         "code": "function handler(input) {\n  return {\n    source1: input.source1 || null,\n    source2: input.source2 || null,\n    merged_at: new Date().toISOString()\n  };\n}",
+         "timeout": 60
+       }
+     }
+   ],
+   "edges": [
+     {
+       "from": "fetch_source1",
+       "to": "merge"
+     },
+     {
+       "from": "fetch_source2",
+       "to": "merge"
+     }
+   ]
+ }'::jsonb,
+ 'parallel', ARRAY['parallel', 'merge', 'http', 'javascript']),
+
+ON CONFLICT (id) DO NOTHING;

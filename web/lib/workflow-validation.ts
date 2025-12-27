@@ -7,7 +7,7 @@ export interface ValidationResult {
 }
 
 // Valid node types
-export const VALID_NODE_TYPES = ["CODE", "HTTP", "CSV", "SWITCH", "FORK", "JOIN", "WAIT"];
+export const VALID_NODE_TYPES = ["CODE", "HTTP", "SWITCH", "FORK", "JOIN", "WAIT"];
 
 // Valid runtimes (only for CODE type nodes)
 export const VALID_RUNTIMES = ["python", "javascript", "js", "node", "go"];

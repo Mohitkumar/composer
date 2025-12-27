@@ -20,14 +20,14 @@ type WorkflowDefinitionSpec struct {
 type Node struct {
 	NodeID  string          `json:"node_id"`
 	Name    string          `json:"name"`
-	Type    NodeType        `json:"type"`              // CODE, HTTP, CSV, SWITCH, FORK, JOIN, etc
+	Type    NodeType        `json:"type"`              // CODE, HTTP, SWITCH, FORK, JOIN, etc
 	Runtime *string         `json:"runtime,omitempty"` // Optional: python/js/node (only for CODE type nodes)
 	Spec    json.RawMessage `json:"spec"`              // task implementation definition (http spec, code reference etc)
 }
 
 // GetNodeTypeForRouting returns the node type string to use for routing to executors
 // For CODE nodes, returns the runtime (python/js/node)
-// For other nodes, returns the type string (HTTP/CSV/SWITCH/etc)
+// For other nodes, returns the type string (HTTP/SWITCH/etc)
 func (n *Node) GetNodeTypeForRouting() string {
 	if n.Type == NodeTypeCode {
 		// For CODE nodes, use runtime
