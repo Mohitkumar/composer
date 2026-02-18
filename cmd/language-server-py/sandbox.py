@@ -83,17 +83,25 @@ def create_safe_globals(input_data):
     logger.debug(f"Blocked imports: {len(BLOCKED_IMPORTS)} modules")
     
     # Create restricted builtins
-    # Include commonly used safe builtins that are needed for typical Python code
+    # SECURITY: Do NOT expose raw getattr/setattr/delattr — RestrictedPython
+    # provides guarded versions (_getattr_, _setattr_, _delattr_) that prevent
+    # access to dunder attributes and sandbox escape via MRO walking.
+    # SECURITY: Do NOT expose type (3-arg form creates classes), vars (exposes
+    # __dict__), or dir (enables introspection of restricted objects).
+
+    def _safe_type_check(obj, bases=None, dict_=None):
+        """Single-argument type() for type checking only."""
+        if bases is not None or dict_ is not None:
+            raise TypeError("dynamic class creation is not allowed")
+        return type(obj)
+
     restricted_builtins = {
-        # Type checking and introspection
+        # Type checking (safe single-arg wrapper only)
         'isinstance': isinstance,
         'issubclass': issubclass,
-        'type': type,
+        'type': _safe_type_check,
         'callable': callable,
         'hasattr': hasattr,
-        'getattr': getattr,
-        'setattr': setattr,
-        'delattr': delattr,
         # Basic types
         'bool': bool,
         'int': int,
@@ -125,9 +133,6 @@ def create_safe_globals(input_data):
         'map': map,
         'iter': iter,
         'next': next,
-        # Object operations
-        'vars': vars,
-        'dir': dir,
         # Restricted import
         '__import__': SecureImporter(ALLOWED_IMPORTS, BLOCKED_IMPORTS),
     }
@@ -139,14 +144,9 @@ def create_safe_globals(input_data):
     # Helper function for _getitem_ - uses safer_getattr for item access
     def guarded_getitem(obj, key):
         """Guard function for item access (obj[key])"""
-        try:
-            # Try dictionary-style access first
-            if hasattr(obj, '__getitem__'):
-                return obj[key]
-            # Fall back to attribute access
-            return safer_getattr(obj, key, None)
-        except (KeyError, IndexError, TypeError):
-            return None
+        if hasattr(obj, '__getitem__'):
+            return obj[key]  # Let KeyError/IndexError/TypeError propagate
+        return safer_getattr(obj, key)
     
     # Helper function for _getiter_ - safe iteration
     def guarded_getiter(iterable):

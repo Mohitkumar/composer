@@ -8,6 +8,12 @@ DEFAULT_TIMEOUT_SECONDS = 30
 # Maximum code size: 1MB (prevent DoS)
 MAX_CODE_SIZE = 1024 * 1024
 
+# Maximum memory per sandbox process: 256MB
+MAX_MEMORY_BYTES = 256 * 1024 * 1024
+
+# gRPC server max worker threads
+MAX_WORKERS = 10
+
 # Default server port
 DEFAULT_PORT = 50051
 

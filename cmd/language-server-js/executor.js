@@ -1,39 +1,12 @@
 /**
- * Code execution logic for JavaScript language server
+ * Code execution logic for JavaScript language server.
+ *
+ * Uses isolated-vm for true V8 isolate-level sandboxing with hard memory
+ * limits and timeout enforcement.
  */
 
-import { createSandbox } from './sandbox.js';
+import { runInIsolate } from './sandbox.js';
 import { DEFAULT_TIMEOUT_MS, MAX_CODE_SIZE } from './config.js';
-
-/**
- * Wrap user code with handler validation and execution
- * @param {string} code - User-provided code
- * @returns {string} Wrapped code ready for execution
- */
-function wrapCode(code) {
-  return `
-    ${code}
-    
-    // Log input for debugging
-    console.log('Input received in handler:', JSON.stringify(input, null, 2));
-    console.log('Input type:', typeof input);
-    
-    // Ensure handler function exists
-    if (typeof handler !== 'function') {
-      throw new Error('handler function is not defined or is not a function');
-    }
-    
-    console.log('Handler function found, calling handler(input)...');
-    
-    // Execute handler with input
-    const result = handler(input);
-    
-    console.log('Handler returned result:', typeof result);
-    console.log('Result preview:', JSON.stringify(result, null, 2).substring(0, 200));
-    
-    result;
-  `;
-}
 
 /**
  * Validate and parse input JSON
@@ -61,7 +34,7 @@ function validateCodeSize(code) {
 }
 
 /**
- * Calculate timeout in milliseconds
+ * Calculate timeout in milliseconds, capped at DEFAULT_TIMEOUT_MS.
  * @param {number} timeoutSeconds - Timeout in seconds from request
  * @returns {number} Timeout in milliseconds
  */
@@ -71,32 +44,17 @@ function calculateTimeout(timeoutSeconds) {
 }
 
 /**
- * Execute JavaScript code in a secure sandbox
- * @param {string} code - User code to execute
- * @param {*} input - Input data for the handler
+ * Execute JavaScript code in a secure isolate.
+ * @param {string} code  - User code (must define a `handler` function)
+ * @param {*}      input - Input data for the handler
  * @param {number} timeoutSeconds - Timeout in seconds
- * @returns {*} Execution result
+ * @returns {*} Execution result from handler(input)
  * @throws {Error} If execution fails or times out
  */
 function executeCode(code, input, timeoutSeconds) {
-  // Validate code size
   validateCodeSize(code);
-  
-  // Calculate timeout
   const timeoutMs = calculateTimeout(timeoutSeconds);
-  
-  // Create secure sandbox
-  const vm = createSandbox(timeoutMs, input);
-  
-  // Wrap code with handler validation
-  const wrappedCode = wrapCode(code);
-  
-  
-  // Execute in sandbox
-  const output = vm.run(wrappedCode);
-  
-  
-  return output;
+  return runInIsolate(code, input, timeoutMs);
 }
 
 /**
@@ -120,11 +78,14 @@ function serializeOutput(output) {
  * @returns {string} Formatted error message
  */
 function formatError(error, timeoutSeconds) {
-  const errorMsg = error.toString();
-  if (errorMsg.includes('Script execution timed out') || errorMsg.includes('timeout')) {
+  const msg = error.message || error.toString();
+  if (msg.includes('Script execution timed out') || msg.includes('timed out')) {
     return `Execution timed out after ${timeoutSeconds} seconds`;
   }
-  return errorMsg;
+  if (msg.includes('exceeded the memory limit') || msg.includes('Array buffer allocation failed')) {
+    return 'Code exceeded memory limit';
+  }
+  return msg;
 }
 
 export {
@@ -133,4 +94,3 @@ export {
   serializeOutput,
   formatError
 };
-

@@ -1,81 +1,72 @@
 /**
- * Secure sandbox creation and management for JavaScript code execution
+ * Secure sandbox creation and management for JavaScript code execution.
+ *
+ * Uses isolated-vm (V8 isolates) instead of the deprecated vm2 library.
+ * Each execution gets its own V8 isolate with hard memory limits and
+ * no access to the host process, filesystem, network, or Node.js APIs.
  */
 
-import { VM } from 'vm2';
+import ivm from 'isolated-vm';
+import { DEFAULT_MEMORY_LIMIT_MB } from './config.js';
 
 /**
- * Create a secure VM sandbox for executing user code
+ * Execute code inside an isolated V8 isolate.
+ *
+ * @param {string} code  - User code (must define a `handler` function)
+ * @param {*}      input - Input data (JSON-serializable) passed to handler()
  * @param {number} timeoutMs - Execution timeout in milliseconds
- * @param {*} input - Input data to make available in the sandbox
- * @returns {VM} Configured VM instance
+ * @returns {*} The JSON-round-tripped return value of handler(input)
  */
-function createSandbox(timeoutMs, input) {
-  return new VM({
-    timeout: timeoutMs,
-    sandbox: {
-      // Input data for the handler
-      input: input,
-      // Only provide safe built-ins
-      console: {
-        log: (...args) => {
-          // Log to stdout so it can be captured
-          console.log('[JS Code]', ...args);
-        },
-        error: (...args) => {
-          // Log to stderr so it can be captured
-          console.error('[JS Code]', ...args);
-        },
-        warn: (...args) => {
-          console.warn('[JS Code]', ...args);
-        },
-        info: (...args) => {
-          console.info('[JS Code]', ...args);
-        }
-      },
-      // JSON utilities are safe
-      JSON: JSON,
-      // Math is safe
-      Math: Math,
-      // Date is safe (read-only access)
-      Date: Date,
-      // Number, String, Boolean constructors are safe
-      Number: Number,
-      String: String,
-      Boolean: Boolean,
-      Array: Array,
-      Object: Object,
-      // RegExp is safe
-      RegExp: RegExp,
-      // Error constructors are safe
-      Error: Error,
-      TypeError: TypeError,
-      RangeError: RangeError,
-      // Promise is safe
-      Promise: Promise,
-      // setTimeout/setInterval with limited functionality
-      setTimeout: (fn, delay) => {
-        // Only allow reasonable delays (max 1 second)
-        const safeDelay = Math.min(Math.max(0, delay || 0), 1000);
-        return setTimeout(fn, safeDelay);
-      },
-      clearTimeout: clearTimeout,
-      setInterval: (fn, delay) => {
-        const safeDelay = Math.min(Math.max(0, delay || 0), 1000);
-        return setInterval(fn, safeDelay);
-      },
-      clearInterval: clearInterval
-    },
-    // Disable all Node.js built-in modules for security
-    // User code cannot access: fs, child_process, http, https, net, etc.
-    // Only allow safe operations
-    eval: false, // Disable eval
-    wasm: false, // Disable WebAssembly
-    fixAsync: true // Fix async/await in sandbox
-  });
+function runInIsolate(code, input, timeoutMs) {
+  // Create an isolate with a hard memory ceiling
+  const isolate = new ivm.Isolate({ memoryLimit: DEFAULT_MEMORY_LIMIT_MB });
+
+  try {
+    const context = isolate.createContextSync();
+    const jail = context.global;
+
+    // Provide a minimal console.log that captures output (no host object leaks)
+    const logs = [];
+    jail.setSync('_log', new ivm.Callback((...args) => {
+      logs.push(args.map(String).join(' '));
+    }));
+
+    // Inject a frozen copy of the input as a JSON string — the user code
+    // parses it inside the isolate so no host references leak in.
+    jail.setSync('_inputJSON', JSON.stringify(input));
+
+    // Bootstrap: set up console, parse input, and define `input` global
+    const bootstrap = `
+      const console = {
+        log:   (...a) => _log(...a),
+        error: (...a) => _log('[error]', ...a),
+        warn:  (...a) => _log('[warn]', ...a),
+        info:  (...a) => _log(...a),
+      };
+      const input = JSON.parse(_inputJSON);
+    `;
+
+    // Compile and run bootstrap + user code + handler invocation
+    const fullScript = `
+      ${bootstrap}
+      ${code}
+
+      if (typeof handler !== 'function') {
+        throw new Error('handler function is not defined or is not a function');
+      }
+      const _result = handler(input);
+      JSON.stringify(_result);
+    `;
+
+    const script = isolate.compileScriptSync(fullScript);
+    const resultJSON = script.runSync(context, { timeout: timeoutMs });
+
+    // resultJSON is a string (JSON.stringify ran inside the isolate)
+    return JSON.parse(resultJSON);
+  } finally {
+    // Tear down the isolate immediately to free memory
+    isolate.dispose();
+  }
 }
 
-export {
-  createSandbox
-};
-
+export { runInIsolate };
