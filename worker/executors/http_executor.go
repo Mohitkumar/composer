@@ -20,7 +20,7 @@ func NewHTTPExecutor() *HTTPExecutor {
 
 // Type returns the executor type
 func (e *HTTPExecutor) Type() string {
-	return "http"
+	return "HTTP"
 }
 
 // Execute executes an HTTP request based on input JSON

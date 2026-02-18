@@ -100,7 +100,7 @@ func TestIntegrationWorkflowExecution(t *testing.T) {
 		Name:       workflowName,
 		Version:    workflowVersion,
 		Spec:       specJSON,
-		CreatedBy:  "integration-test",
+		CreatedBy:  "admin",
 	}
 	err = coordinator.RegisterWorkflow(ctx, registerPayload)
 	if err != nil {

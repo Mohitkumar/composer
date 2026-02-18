@@ -35,6 +35,7 @@ CREATE TABLE IF NOT EXISTS workflow_runs(
     status TEXT NOT NULL DEFAULT 'PENDING',
     input_json JSONB,
     context_json JSONB,
+    error_json JSONB,
     deleted_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),

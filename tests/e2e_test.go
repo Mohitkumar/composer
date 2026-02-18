@@ -231,8 +231,7 @@ func TestEndToEndWorkflowExecution(t *testing.T) {
 		"workflow_id": workflowID,
 		"name":        workflowName,
 		"version":     workflowVersion,
-		"spec":        json.RawMessage(specJSON),
-		"created_by":  "integration-test",
+		"spec":        string(specJSON),
 	}
 	registerBody, _ := json.Marshal(registerReq)
 	resp, err := authPost(httpAddr+"/api/v1/workflows", "application/json", bytes.NewReader(registerBody), token)
@@ -487,8 +486,7 @@ func TestEndToEndParameterResolutionAndLease(t *testing.T) {
 		"workflow_id": workflowID,
 		"name":        workflowName,
 		"version":     workflowVersion,
-		"spec":        json.RawMessage(specJSON),
-		"created_by":  "e2e-test",
+		"spec":        string(specJSON),
 	}
 	registerBody, _ := json.Marshal(registerReq)
 	resp, err := authPost(httpAddr+"/api/v1/workflows", "application/json", bytes.NewReader(registerBody), token)
@@ -530,7 +528,7 @@ func TestEndToEndParameterResolutionAndLease(t *testing.T) {
 	maxWait := 30 * time.Second
 	startTime := time.Now()
 	for time.Since(startTime) < maxWait {
-		resp, err := http.Get(httpAddr + "/api/v1/workflows/" + workflowID + "/status?run_id=" + runID)
+		resp, err := authGet(httpAddr+"/api/v1/workflows/"+workflowID+"/status?run_id="+runID, token)
 		if err != nil {
 			time.Sleep(200 * time.Millisecond)
 			continue
