@@ -2,6 +2,7 @@ package coord
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/mohitkumar/composer/pkg/db"
 	"github.com/mohitkumar/composer/pkg/intelligence"
@@ -26,7 +27,10 @@ type Coordinator struct {
 
 func NewCoordinator(config *Config, logger *zerolog.Logger) (*Coordinator, error) {
 	// Create Redis stream
-	redisStream := redisq.NewRedisStream(&config.RedisConfig)
+	redisStream, err := redisq.NewRedisStream(&config.RedisConfig)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create redis stream: %w", err)
+	}
 
 	// Create database connection pool
 	dbPool, err := db.NewPool(context.Background(), &config.DBConfig, *logger)
@@ -56,7 +60,7 @@ func NewCoordinator(config *Config, logger *zerolog.Logger) (*Coordinator, error
 	}
 
 	// Create intelligence client
-	intelligenceClient := intelligence.NewClient(config.IntelligenceConfig, *logger)
+	intelligenceClient := intelligence.NewClient(config.IntelligenceConfig, config.EnableIntelligence, *logger)
 
 	coordinator := &Coordinator{
 		Config:       config,

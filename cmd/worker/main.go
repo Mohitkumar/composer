@@ -129,7 +129,10 @@ func main() {
 		Password: "",
 		DB:       0,
 	}
-	redisStream := redisq.NewRedisStream(redisConfig)
+	redisStream, err := redisq.NewRedisStream(redisConfig)
+	if err != nil {
+		logger.Fatal().Err(err).Msg("failed to create redis stream")
+	}
 	defer redisStream.Close()
 
 	// Create worker

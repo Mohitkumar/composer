@@ -14,6 +14,7 @@ import (
 	"github.com/mohitkumar/composer/pkg/api"
 	grpcapi "github.com/mohitkumar/composer/pkg/api/grpc"
 	httpapi "github.com/mohitkumar/composer/pkg/api/http"
+	"github.com/mohitkumar/composer/pkg/auth"
 	"github.com/mohitkumar/composer/pkg/coord"
 	"github.com/mohitkumar/composer/pkg/db"
 	"github.com/mohitkumar/composer/pkg/model"
@@ -22,6 +23,40 @@ import (
 	"github.com/mohitkumar/composer/worker"
 	"github.com/rs/zerolog"
 )
+
+const testJWTSecret = "test-secret-key"
+
+// generateTestToken creates a JWT token for the admin user for testing
+func generateTestToken(t *testing.T) string {
+	t.Helper()
+	jwtService := auth.NewJWTService(testJWTSecret, 24*time.Hour)
+	token, err := jwtService.GenerateToken("admin", "admin")
+	if err != nil {
+		t.Fatalf("Failed to generate test JWT token: %v", err)
+	}
+	return token
+}
+
+// authPost makes an authenticated POST request with Bearer token
+func authPost(url, contentType string, body *bytes.Reader, token string) (*http.Response, error) {
+	req, err := http.NewRequest("POST", url, body)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", contentType)
+	req.Header.Set("Authorization", "Bearer "+token)
+	return http.DefaultClient.Do(req)
+}
+
+// authGet makes an authenticated GET request with Bearer token
+func authGet(url, token string) (*http.Response, error) {
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	return http.DefaultClient.Do(req)
+}
 
 // TestEndToEndWorkflowExecution tests the complete workflow lifecycle:
 // 1. Start coordinator with HTTP and gRPC servers
@@ -49,7 +84,7 @@ func TestEndToEndWorkflowExecution(t *testing.T) {
 	// Setup coordinator
 	coordLogger := zerolog.New(infra.Logger).With().Str("component", "coordinator").Logger()
 	coordConfig := &coord.Config{
-		DBConfig: db.Config{URL: infra.DBURL},
+		DBConfig:    db.Config{URL: infra.DBURL},
 		RedisConfig: redisq.RedisConfig{Addrs: []string{infra.RedisAddr}},
 	}
 	coordinator, err := coord.NewCoordinator(coordConfig, &coordLogger)
@@ -76,11 +111,13 @@ func TestEndToEndWorkflowExecution(t *testing.T) {
 	// Start HTTP server
 	httpPort := 18080 // Use non-standard port for tests
 	httpConfig := &api.APIConfig{
-		HTTPPort: httpPort,
-		GRPCPort: 15051,
+		HTTPPort:  httpPort,
+		GRPCPort:  15051,
+		JWTSecret: testJWTSecret,
 	}
 	httpServer := httpapi.NewServer(httpConfig, coordinator)
 	httpAddr := fmt.Sprintf("http://localhost:%d", httpPort)
+	token := generateTestToken(t)
 
 	httpCtx, httpCancel := context.WithCancel(ctx)
 	defer httpCancel()
@@ -113,7 +150,6 @@ func TestEndToEndWorkflowExecution(t *testing.T) {
 	workerConfig := worker.WorkerConfig{
 		Redis:           infra.RedisStream,
 		CoordinatorAddr: grpcAddr,
-		LangWorkerAddr:  "", // No language worker for this test
 		StreamName:      "workflow.tasks",
 		ConsumerGroup:   "test-workers",
 		ConsumerName:    "test-worker-1",
@@ -148,10 +184,9 @@ func TestEndToEndWorkflowExecution(t *testing.T) {
 	workflowSpec := model.WorkflowDefinitionSpec{
 		Nodes: []model.Node{
 			{
-				NodeID:  "fetch_data",
-				Name:    "Fetch Data",
-				Type:    model.NodeTypeTask,
-				Runtime: "http",
+				NodeID: "fetch_data",
+				Name:   "Fetch Data",
+				Type:   model.NodeTypeHTTP,
 				Spec: json.RawMessage(`{
 					"url": "https://httpbin.org/json",
 					"method": "GET",
@@ -159,10 +194,9 @@ func TestEndToEndWorkflowExecution(t *testing.T) {
 				}`),
 			},
 			{
-				NodeID:  "process_data",
-				Name:    "Process Data",
-				Type:    model.NodeTypeTask,
-				Runtime: "http",
+				NodeID: "process_data",
+				Name:   "Process Data",
+				Type:   model.NodeTypeHTTP,
 				Spec: json.RawMessage(`{
 					"url": "https://httpbin.org/post",
 					"method": "POST",
@@ -170,10 +204,9 @@ func TestEndToEndWorkflowExecution(t *testing.T) {
 				}`),
 			},
 			{
-				NodeID:  "store_result",
-				Name:    "Store Result",
-				Type:    model.NodeTypeTask,
-				Runtime: "http",
+				NodeID: "store_result",
+				Name:   "Store Result",
+				Type:   model.NodeTypeHTTP,
 				Spec: json.RawMessage(`{
 					"url": "https://httpbin.org/post",
 					"method": "POST",
@@ -198,11 +231,10 @@ func TestEndToEndWorkflowExecution(t *testing.T) {
 		"workflow_id": workflowID,
 		"name":        workflowName,
 		"version":     workflowVersion,
-		"spec":        json.RawMessage(specJSON),
-		"created_by":  "integration-test",
+		"spec":        string(specJSON),
 	}
 	registerBody, _ := json.Marshal(registerReq)
-	resp, err := http.Post(httpAddr+"/api/v1/workflows", "application/json", bytes.NewReader(registerBody))
+	resp, err := authPost(httpAddr+"/api/v1/workflows", "application/json", bytes.NewReader(registerBody), token)
 	if err != nil {
 		t.Fatalf("Failed to register workflow: %v", err)
 	}
@@ -219,14 +251,14 @@ func TestEndToEndWorkflowExecution(t *testing.T) {
 		"started_by":       "integration-test",
 	}
 	executeBody, _ := json.Marshal(executeReq)
-	resp, err = http.Post(httpAddr+"/api/v1/workflows/"+workflowID+"/execute", "application/json", bytes.NewReader(executeBody))
+	resp, err = authPost(httpAddr+"/api/v1/workflows/"+workflowID+"/execute", "application/json", bytes.NewReader(executeBody), token)
 	if err != nil {
 		t.Fatalf("Failed to start workflow: %v", err)
 	}
 	if resp.StatusCode != http.StatusAccepted {
 		t.Fatalf("Expected status 202, got %d", resp.StatusCode)
 	}
-	
+
 	// Read run_id from response
 	var executeResp map[string]string
 	if err := json.NewDecoder(resp.Body).Decode(&executeResp); err != nil {
@@ -248,7 +280,7 @@ func TestEndToEndWorkflowExecution(t *testing.T) {
 	startTime := time.Now()
 	for time.Since(startTime) < maxWait {
 		// Use workflow status endpoint with run_id query parameter
-		resp, err := http.Get(httpAddr + "/api/v1/workflows/" + workflowID + "/status?run_id=" + runID)
+		resp, err := authGet(httpAddr+"/api/v1/workflows/"+workflowID+"/status?run_id="+runID, token)
 		if err != nil {
 			t.Logf("Failed to get status: %v", err)
 			time.Sleep(500 * time.Millisecond)
@@ -315,7 +347,7 @@ func TestEndToEndParameterResolutionAndLease(t *testing.T) {
 
 	coordLogger := zerolog.New(infra.Logger).With().Str("component", "coordinator").Logger()
 	coordConfig := &coord.Config{
-		DBConfig: db.Config{URL: infra.DBURL},
+		DBConfig:    db.Config{URL: infra.DBURL},
 		RedisConfig: redisq.RedisConfig{Addrs: []string{infra.RedisAddr}},
 	}
 	coordinator, err := coord.NewCoordinator(coordConfig, &coordLogger)
@@ -338,11 +370,13 @@ func TestEndToEndParameterResolutionAndLease(t *testing.T) {
 
 	httpPort := 18081
 	httpConfig := &api.APIConfig{
-		HTTPPort: httpPort,
-		GRPCPort: 15052,
+		HTTPPort:  httpPort,
+		GRPCPort:  15052,
+		JWTSecret: testJWTSecret,
 	}
 	httpServer := httpapi.NewServer(httpConfig, coordinator)
 	httpAddr := fmt.Sprintf("http://localhost:%d", httpPort)
+	token := generateTestToken(t)
 	httpCtx, httpCancel := context.WithCancel(ctx)
 	defer httpCancel()
 	go func() {
@@ -387,7 +421,6 @@ func TestEndToEndParameterResolutionAndLease(t *testing.T) {
 	workerConfig := worker.WorkerConfig{
 		Redis:           infra.RedisStream,
 		CoordinatorAddr: grpcAddr,
-		LangWorkerAddr:  "",
 		StreamName:      "workflow.tasks",
 		ConsumerGroup:   "lease-workers",
 		ConsumerName:    "lease-worker-1",
@@ -414,10 +447,9 @@ func TestEndToEndParameterResolutionAndLease(t *testing.T) {
 	workflowSpec := model.WorkflowDefinitionSpec{
 		Nodes: []model.Node{
 			{
-				NodeID:  "fetch_data",
-				Name:    "Fetch",
-				Type:    model.NodeTypeTask,
-				Runtime: "http",
+				NodeID: "fetch_data",
+				Name:   "Fetch",
+				Type:   model.NodeTypeHTTP,
 				Spec: json.RawMessage(fmt.Sprintf(`{
 					"url": "%s/step1",
 					"method": "GET",
@@ -425,10 +457,9 @@ func TestEndToEndParameterResolutionAndLease(t *testing.T) {
 				}`, testServer.URL)),
 			},
 			{
-				NodeID:  "use_data",
-				Name:    "UseData",
-				Type:    model.NodeTypeTask,
-				Runtime: "http",
+				NodeID: "use_data",
+				Name:   "UseData",
+				Type:   model.NodeTypeHTTP,
 				Spec: json.RawMessage(fmt.Sprintf(`{
 					"url": "%s/step2",
 					"method": "POST",
@@ -455,11 +486,10 @@ func TestEndToEndParameterResolutionAndLease(t *testing.T) {
 		"workflow_id": workflowID,
 		"name":        workflowName,
 		"version":     workflowVersion,
-		"spec":        json.RawMessage(specJSON),
-		"created_by":  "e2e-test",
+		"spec":        string(specJSON),
 	}
 	registerBody, _ := json.Marshal(registerReq)
-	resp, err := http.Post(httpAddr+"/api/v1/workflows", "application/json", bytes.NewReader(registerBody))
+	resp, err := authPost(httpAddr+"/api/v1/workflows", "application/json", bytes.NewReader(registerBody), token)
 	if err != nil {
 		t.Fatalf("Failed to register workflow: %v", err)
 	}
@@ -475,14 +505,14 @@ func TestEndToEndParameterResolutionAndLease(t *testing.T) {
 		"started_by":       "e2e-test",
 	}
 	executeBody, _ := json.Marshal(executeReq)
-	resp, err = http.Post(httpAddr+"/api/v1/workflows/"+workflowID+"/execute", "application/json", bytes.NewReader(executeBody))
+	resp, err = authPost(httpAddr+"/api/v1/workflows/"+workflowID+"/execute", "application/json", bytes.NewReader(executeBody), token)
 	if err != nil {
 		t.Fatalf("Failed to start workflow: %v", err)
 	}
 	if resp.StatusCode != http.StatusAccepted {
 		t.Fatalf("Expected status 202, got %d", resp.StatusCode)
 	}
-	
+
 	// Read run_id from response
 	var executeResp map[string]string
 	if err := json.NewDecoder(resp.Body).Decode(&executeResp); err != nil {
@@ -498,7 +528,7 @@ func TestEndToEndParameterResolutionAndLease(t *testing.T) {
 	maxWait := 30 * time.Second
 	startTime := time.Now()
 	for time.Since(startTime) < maxWait {
-		resp, err := http.Get(httpAddr + "/api/v1/workflows/" + workflowID + "/status?run_id=" + runID)
+		resp, err := authGet(httpAddr+"/api/v1/workflows/"+workflowID+"/status?run_id="+runID, token)
 		if err != nil {
 			time.Sleep(200 * time.Millisecond)
 			continue

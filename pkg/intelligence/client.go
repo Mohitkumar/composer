@@ -19,13 +19,14 @@ type Config struct {
 
 // Client provides methods to interact with the AI intelligence agent
 type Client struct {
-	config Config
-	logger zerolog.Logger
-	client *http.Client
+	config  Config
+	logger  zerolog.Logger
+	client  *http.Client
+	enabled bool
 }
 
 // NewClient creates a new intelligence client
-func NewClient(config Config, logger zerolog.Logger) *Client {
+func NewClient(config Config, eanbleIntelligence bool, logger zerolog.Logger) *Client {
 	timeout := config.Timeout
 	if timeout == 0 {
 		timeout = 30 * time.Second
@@ -37,6 +38,7 @@ func NewClient(config Config, logger zerolog.Logger) *Client {
 		client: &http.Client{
 			Timeout: timeout,
 		},
+		enabled: eanbleIntelligence,
 	}
 }
 
@@ -107,5 +109,5 @@ func (c *Client) SummarizeErrors(ctx context.Context, workflowID string, errors 
 
 // IsConfigured returns true if the AI agent URL is configured
 func (c *Client) IsConfigured() bool {
-	return c.config.AgentURL != ""
+	return c.enabled && c.config.AgentURL != ""
 }

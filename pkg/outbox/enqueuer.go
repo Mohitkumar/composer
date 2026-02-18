@@ -61,6 +61,13 @@ func (o *OutboxEnqueuer) Run(ctx context.Context) {
 		workerChan <- struct{}{}
 	}
 
+	// Start periodic cleanup and recovery in background
+	o.wg.Add(1)
+	go func() {
+		defer o.wg.Done()
+		o.maintenanceLoop(ctx)
+	}()
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -106,6 +113,52 @@ func (o *OutboxEnqueuer) shutdown() {
 // Stop stops the enqueuer loop.
 func (o *OutboxEnqueuer) Stop() {
 	close(o.quit)
+}
+
+// maintenanceLoop periodically cleans up SENT rows and recovers stale IN_FLIGHT rows.
+func (o *OutboxEnqueuer) maintenanceLoop(ctx context.Context) {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-o.quit:
+			return
+		case <-ticker.C:
+			o.cleanupSentRows(ctx)
+			o.recoverStaleInFlight(ctx)
+		}
+	}
+}
+
+// cleanupSentRows deletes outbox rows that have been successfully sent.
+func (o *OutboxEnqueuer) cleanupSentRows(ctx context.Context) {
+	result, err := o.cfg.DB.Exec(ctx,
+		`DELETE FROM outbox WHERE status = 'SENT' AND sent_at < NOW() - INTERVAL '5 minutes'`)
+	if err != nil {
+		o.cfg.Logger.Error().Err(err).Msg("failed to cleanup sent outbox rows")
+		return
+	}
+	if result.RowsAffected() > 0 {
+		o.cfg.Logger.Debug().Int64("deleted", result.RowsAffected()).Msg("cleaned up sent outbox rows")
+	}
+}
+
+// recoverStaleInFlight resets IN_FLIGHT rows that have been stuck for too long
+// (e.g., the enqueuer crashed after marking IN_FLIGHT but before completing processing).
+func (o *OutboxEnqueuer) recoverStaleInFlight(ctx context.Context) {
+	result, err := o.cfg.DB.Exec(ctx,
+		`UPDATE outbox SET status = 'RETRY', updated_at = NOW(), next_attempt_at = NOW()
+		 WHERE status = 'IN_FLIGHT' AND updated_at < NOW() - INTERVAL '2 minutes'`)
+	if err != nil {
+		o.cfg.Logger.Error().Err(err).Msg("failed to recover stale IN_FLIGHT outbox rows")
+		return
+	}
+	if result.RowsAffected() > 0 {
+		o.cfg.Logger.Warn().Int64("recovered", result.RowsAffected()).Msg("recovered stale IN_FLIGHT outbox rows")
+	}
 }
 
 // processBatch picks a batch of outbox rows with FOR UPDATE SKIP LOCKED, marks them IN_FLIGHT,
@@ -189,7 +242,7 @@ FOR UPDATE SKIP LOCKED
 	return nil
 }
 
-// processRow pushes a single outbox row to Redis and updates DB accordingly (success -> SENT, failure -> schedule retry or DLQ).
+// processRow pushes a single outbox row to Redis and updates DB accordingly (success -> delete, failure -> schedule retry or DLQ).
 func (o *OutboxEnqueuer) processRow(ctx context.Context, r outboxRow) error {
 	// parse payload to fetch stream override or payload map
 	var payloadMap map[string]interface{}
@@ -210,10 +263,12 @@ func (o *OutboxEnqueuer) processRow(ctx context.Context, r outboxRow) error {
 
 	_, err := o.cfg.Redis.XAdd(ctx, stream, payloadMap)
 	if err == nil {
-		_, uerr := o.cfg.DB.Exec(ctx, `UPDATE outbox SET status='SENT', sent_at=NOW(), updated_at=NOW() WHERE id=$1`, r.ID)
+		// Successfully sent — delete the outbox row to prevent table bloat
+		_, uerr := o.cfg.DB.Exec(ctx, `DELETE FROM outbox WHERE id=$1`, r.ID)
 		if uerr != nil {
-			o.cfg.Logger.Error().Err(uerr).Str("outbox_id", r.ID).Msg("failed mark SENT after xadd success")
-			return uerr
+			// Fallback: mark as SENT so the maintenance loop can clean it up later
+			o.cfg.Logger.Error().Err(uerr).Str("outbox_id", r.ID).Msg("failed to delete outbox row after send, marking SENT")
+			_, _ = o.cfg.DB.Exec(ctx, `UPDATE outbox SET status='SENT', sent_at=NOW(), updated_at=NOW() WHERE id=$1`, r.ID)
 		}
 		return nil
 	}
@@ -260,7 +315,7 @@ func computeBackoffDuration(baseSeconds, attempt int) time.Duration {
 	}
 	// exponential factor
 	exp := float64(baseSeconds) * math.Pow(2, float64(attempt-1))
-	// full jitter
-	jitter := rand.Float64() * exp
+	// full jitter with guaranteed minimum of baseSeconds
+	jitter := float64(baseSeconds) + rand.Float64()*exp
 	return time.Duration(int64(jitter)) * time.Second
 }

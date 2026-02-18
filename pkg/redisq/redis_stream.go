@@ -2,6 +2,7 @@ package redisq
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/redis/go-redis/v9"
 )
@@ -13,7 +14,8 @@ type RedisStream struct {
 
 // NewRedisStream creates a new RedisStream instance with the given config.
 // It also accepts an optional existing redis.Client for reuse.
-func NewRedisStream(config *RedisConfig, client ...*redis.Client) *RedisStream {
+// Returns an error if the connection cannot be established (instead of panicking).
+func NewRedisStream(config *RedisConfig, client ...*redis.Client) (*RedisStream, error) {
 	var rdb *redis.Client
 	if len(client) > 0 && client[0] != nil {
 		rdb = client[0]
@@ -33,9 +35,10 @@ func NewRedisStream(config *RedisConfig, client ...*redis.Client) *RedisStream {
 
 	// Test connection
 	if err := rs.client.Ping(context.Background()).Err(); err != nil {
-		panic(err)
+		rdb.Close()
+		return nil, fmt.Errorf("failed to connect to redis at %s: %w", config.Addrs[0], err)
 	}
-	return rs
+	return rs, nil
 }
 
 // Publish publishes a message to a Redis pub/sub channel
@@ -77,6 +80,13 @@ func (r *RedisStream) XAck(ctx context.Context, stream, group string, ids ...str
 // XGroupCreateMkStream creates a consumer group for a stream
 func (r *RedisStream) XGroupCreateMkStream(ctx context.Context, stream, group, start string) error {
 	return r.client.XGroupCreateMkStream(ctx, stream, group, start).Err()
+}
+
+// XAutoClaim claims pending messages that have been idle for longer than minIdleTime.
+// Returns claimed messages and the new start ID for the next call.
+func (r *RedisStream) XAutoClaim(ctx context.Context, args *redis.XAutoClaimArgs) ([]redis.XMessage, string, error) {
+	msgs, start, err := r.client.XAutoClaim(ctx, args).Result()
+	return msgs, start, err
 }
 
 // Client returns the underlying Redis client (for advanced use cases)

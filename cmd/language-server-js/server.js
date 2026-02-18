@@ -75,10 +75,8 @@ function Execute(call, callback) {
     const inputJson = req.input_json || '{}';
     const timeoutSeconds = req.timeout_seconds;
     
-    // Log received input for debugging
-    console.log(`[JS Executor] Received execution request for file: ${filename}`);
-    console.log(`[JS Executor] Input JSON length:`, inputJson.length);
-    console.log(`[JS Executor] Timeout: ${timeoutSeconds || 'default'} seconds`);
+    // Log metadata only (not content) to avoid leaking sensitive data
+    console.log(`[JS Executor] file=${filename} code_size=${code.length} input_size=${inputJson.length} timeout=${timeoutSeconds || 'default'}s`);
     
     // Parse input
     let input;
@@ -142,7 +140,8 @@ function startServer(port) {
         console.error('Failed to start server:', err);
         process.exit(1);
       }
-      server.start();
+      // Note: server.start() is deprecated in @grpc/grpc-js >= 1.10;
+      // the server begins accepting connections after bindAsync succeeds.
       console.log(`JavaScript language worker started on port ${bindPort}`);
     }
   );

@@ -25,4 +25,5 @@ type Config struct {
 	DisableObservability bool                `yaml:"disable_observability" mapstructure:"disable_observability"`
 	OutboxConfig         OutboxConfig        `yaml:"outbox" mapstructure:"outbox"`
 	IntelligenceConfig   intelligence.Config `yaml:"intelligence" mapstructure:"intelligence"`
+	EnableIntelligence   bool                `yaml:"enable_intelligence" mapstructure:"enable_intelligence"`
 }

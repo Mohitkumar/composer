@@ -4,7 +4,7 @@ import "encoding/json"
 
 type StepResult struct {
 	Status TaskInstanceStatus `json:"status"`
-	Output interface{}        `json:"output,omitempty"`
+	Output json.RawMessage    `json:"output,omitempty"`
 	Err    error              `json:"-"`
 }
 

@@ -28,9 +28,9 @@ func NewCoordinatorClient(addr string, logger zerolog.Logger) (*CoordinatorClien
 		return nil, fmt.Errorf("coordinator address is required")
 	}
 
-	conn, err := grpc.Dial(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
-		return nil, fmt.Errorf("failed to dial coordinator: %w", err)
+		return nil, fmt.Errorf("failed to connect to coordinator: %w", err)
 	}
 
 	client := workflowpb.NewWorkflowServiceClient(conn)

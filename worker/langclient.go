@@ -29,7 +29,7 @@ func NewLangClient(addr string, logger zerolog.Logger) (*LangClient, error) {
 	if addr == "" {
 		return nil, nil
 	}
-	conn, err := grpc.Dial(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		return nil, err
 	}

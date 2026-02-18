@@ -122,12 +122,15 @@ func SetupTestInfra(ctx context.Context, t *testing.T) *TestInfra {
 	}
 
 	// Create Redis stream
-	redisStream := redisq.NewRedisStream(&redisq.RedisConfig{
+	redisStream, err := redisq.NewRedisStream(&redisq.RedisConfig{
 		Addrs:    []string{redisAddr},
 		Username: "",
 		Password: "",
 		DB:       0,
 	})
+	if err != nil {
+		t.Fatalf("Failed to create Redis stream: %v", err)
+	}
 
 	return &TestInfra{
 		PostgresContainer: pgContainer,

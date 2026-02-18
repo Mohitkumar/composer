@@ -56,6 +56,7 @@ func setupFlags(cmd *cobra.Command) {
 	cmd.Flags().String("outbox.stream_prefix", "workflow.", "Outbox stream prefix (e.g., 'workflow.' for 'workflow.tasks')")
 
 	// Intelligence flags
+	cmd.Flags().Bool("enable-intelligence", false, "Enable Intelligence for error summarizing")
 	cmd.Flags().String("intelligence.agent_url", "", "AI intelligence agent URL (e.g., http://localhost:8000)")
 	cmd.Flags().Duration("intelligence.timeout", 30*time.Second, "AI intelligence agent request timeout")
 
@@ -126,6 +127,7 @@ func generateConfig() *coord.Config {
 			PollInterval: viper.GetDuration("outbox.poll_interval"),
 			StreamPrefix: viper.GetString("outbox.stream_prefix"),
 		},
+		EnableIntelligence: viper.GetBool("enable-intelligence"),
 		IntelligenceConfig: intelligence.Config{
 			AgentURL: viper.GetString("intelligence.agent_url"),
 			Timeout:  viper.GetDuration("intelligence.timeout"),

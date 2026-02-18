@@ -1,5 +1,7 @@
-# Build stage
+# Build stage — isolated-vm requires native compilation (V8 headers + C++ toolchain)
 FROM node:20-alpine AS builder
+
+RUN apk add --no-cache python3 make g++
 
 WORKDIR /app
 
@@ -16,9 +18,13 @@ FROM node:20-alpine
 
 WORKDIR /app
 
+# isolated-vm links against libstdc++ at runtime
+RUN apk add --no-cache libstdc++
+
 # Copy dependencies and source from builder
 COPY --from=builder /app/node_modules ./node_modules
 COPY --from=builder /app/*.js ./
+COPY --from=builder /app/package.json ./
 COPY --from=builder /app/proto ./proto
 
 EXPOSE 50052

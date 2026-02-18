@@ -27,6 +27,7 @@ type WorkflowRepository interface {
 	MarkWorkflowCompleted(ctx context.Context, tx pgx.Tx, runID, workflowID string, span trace.Span, logger zerolog.Logger) error
 	MarkWorkflowFailed(ctx context.Context, tx pgx.Tx, runID, workflowID, reason string, logger zerolog.Logger, span trace.Span) error
 	CheckPendingTasks(ctx context.Context, tx pgx.Tx, runID string) (bool, int, error)
+	CheckFailedTasks(ctx context.Context, tx pgx.Tx, runID string) (int, error)
 
 	// Task Instance operations
 	InsertTaskInstance(ctx context.Context, tx pgx.Tx, taskID, runID string, node *model.Node, taskInput json.RawMessage, scheduledAt time.Time, logger zerolog.Logger, span trace.Span) error
@@ -90,13 +91,16 @@ func (r *workflowRepository) InsertWorkflowRun(ctx context.Context, tx pgx.Tx, p
 	}
 
 	status := "RUNNING"
-	_, err = tx.Exec(ctx, `INSERT INTO workflow_runs (id, workflow_definition_id, workflow_version, status, input_json, context_json, created_at, updated_at)
+	result, err := tx.Exec(ctx, `INSERT INTO workflow_runs (id, workflow_definition_id, workflow_version, status, input_json, context_json, created_at, updated_at)
         VALUES ($1,$2,$3,$4,$5::jsonb,$6::jsonb,NOW(),NOW()) ON CONFLICT (id) DO NOTHING`,
 		p.RunID, p.WorkflowID, p.WorkflowVersion, status, p.Input, contextJSON)
 	if err != nil {
 		logger.Error().Err(err).Msg("failed to create workflow run")
 		util.RecordError(span, err)
 		return fmt.Errorf("failed to create workflow run: %w", err)
+	}
+	if result.RowsAffected() == 0 {
+		return fmt.Errorf("workflow run %s already exists (duplicate run_id)", p.RunID)
 	}
 
 	logger.Debug().Msg("created workflow run record")
@@ -176,16 +180,9 @@ func (r *workflowRepository) LoadAndUpdateRunContext(ctx context.Context, tx pgx
 		return nil, err
 	}
 
-	var outputObj interface{}
-	if len(output) > 0 {
-		if err := json.Unmarshal(output, &outputObj); err != nil {
-			outputObj = string(output)
-		}
-	}
-
 	runContext.Tasks[nodeID] = &model.StepResult{
 		Status: model.TaskInstanceStatusCompleted,
-		Output: outputObj,
+		Output: output,
 	}
 
 	return runContext, r.UpdateRunContext(ctx, tx, runID, runContext, logger, span)
@@ -261,16 +258,33 @@ func (r *workflowRepository) CheckPendingTasks(ctx context.Context, tx pgx.Tx, r
 	return pendingCount == 0, pendingCount, nil
 }
 
-// InsertTaskInstance inserts a new task instance
+// CheckFailedTasks returns the count of failed tasks for a workflow run
+func (r *workflowRepository) CheckFailedTasks(ctx context.Context, tx pgx.Tx, runID string) (int, error) {
+	var failedCount int
+	err := tx.QueryRow(ctx,
+		`SELECT COUNT(1) FROM task_instances WHERE run_id=$1 AND state = 'FAILED'`,
+		runID).Scan(&failedCount)
+	if err != nil {
+		return 0, fmt.Errorf("failed to check failed tasks: %w", err)
+	}
+	return failedCount, nil
+}
+
+// InsertTaskInstance inserts a new task instance.
+// Uses ON CONFLICT (run_id, node_id) to guarantee idempotency — duplicate inserts are silently skipped.
 func (r *workflowRepository) InsertTaskInstance(ctx context.Context, tx pgx.Tx, taskID, runID string, node *model.Node, taskInput json.RawMessage, scheduledAt time.Time, logger zerolog.Logger, span trace.Span) error {
 	nodeTypeForRouting := node.GetNodeTypeForRouting()
-	_, err := tx.Exec(ctx, `INSERT INTO task_instances (id, run_id, node_id, node_type, state, attempt, input_json, scheduled_at, created_at, updated_at)
-        VALUES ($1,$2,$3,$4,'PENDING',0,$5::jsonb,$6,NOW(),NOW()) ON CONFLICT (id) DO NOTHING`,
+	result, err := tx.Exec(ctx, `INSERT INTO task_instances (id, run_id, node_id, node_type, state, attempt, input_json, scheduled_at, created_at, updated_at)
+        VALUES ($1,$2,$3,$4,'PENDING',0,$5::jsonb,$6,NOW(),NOW()) ON CONFLICT (run_id, node_id) DO NOTHING`,
 		taskID, runID, node.NodeID, nodeTypeForRouting, taskInput, scheduledAt)
 	if err != nil {
 		logger.Error().Err(err).Msg("failed to create task instance")
 		util.RecordError(span, err)
 		return fmt.Errorf("failed to create task instance: %w", err)
+	}
+	if result.RowsAffected() == 0 {
+		logger.Debug().Str("run_id", runID).Str("node_id", node.NodeID).
+			Msg("task instance already exists for this run/node, skipping (idempotent)")
 	}
 	return nil
 }
@@ -295,7 +309,7 @@ func (r *workflowRepository) InsertTaskInstanceWithState(ctx context.Context, tx
 
 	nodeTypeForRouting := node.GetNodeTypeForRouting()
 	_, err := tx.Exec(ctx, `INSERT INTO task_instances (id, run_id, node_id, node_type, state, attempt, input_json, last_error, scheduled_at, finished_at, created_at, updated_at)
-        VALUES ($1,$2,$3,$4,$5,0,$6::jsonb,$7::jsonb,$8,$9,NOW(),NOW()) ON CONFLICT (id) DO NOTHING`,
+        VALUES ($1,$2,$3,$4,$5,0,$6::jsonb,$7::jsonb,$8,$9,NOW(),NOW()) ON CONFLICT (run_id, node_id) DO NOTHING`,
 		taskID, runID, node.NodeID, nodeTypeForRouting, state, taskInput, errorJSON, scheduledAt, finishedAt)
 	if err != nil {
 		logger.Error().Err(err).Msg("failed to create task instance with state")
@@ -427,14 +441,16 @@ func (r *workflowRepository) InsertTaskOutbox(ctx context.Context, tx pgx.Tx, ta
 	return nil
 }
 
-// CheckParallelBranchesComplete checks if all parallel branches are complete
+// CheckParallelBranchesComplete checks if all parallel branches are complete.
+// Uses FOR UPDATE to serialize concurrent join checks and prevent duplicate join node creation.
 func (r *workflowRepository) CheckParallelBranchesComplete(ctx context.Context, tx pgx.Tx, runID string, branchNodeIDs []string) (completedCount, totalCount int, err error) {
 	err = tx.QueryRow(ctx,
-		`SELECT 
+		`SELECT
 			COUNT(*) FILTER (WHERE state IN ('COMPLETED', 'SUCCEEDED')) as completed_count,
 			COUNT(*) as total_count
-		FROM task_instances 
-		WHERE run_id = $1 AND node_id = ANY($2)`,
+		FROM task_instances
+		WHERE run_id = $1 AND node_id = ANY($2)
+		FOR UPDATE`,
 		runID, branchNodeIDs).Scan(&completedCount, &totalCount)
 	if err != nil {
 		return 0, 0, fmt.Errorf("failed to check parallel branch status: %w", err)
