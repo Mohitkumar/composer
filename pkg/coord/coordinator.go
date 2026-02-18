@@ -60,7 +60,7 @@ func NewCoordinator(config *Config, logger *zerolog.Logger) (*Coordinator, error
 	}
 
 	// Create intelligence client
-	intelligenceClient := intelligence.NewClient(config.IntelligenceConfig, *logger)
+	intelligenceClient := intelligence.NewClient(config.IntelligenceConfig, config.EnableIntelligence, *logger)
 
 	coordinator := &Coordinator{
 		Config:       config,
