@@ -69,6 +69,7 @@ CREATE TABLE IF NOT EXISTS task_instances(
     FOREIGN KEY (run_id) REFERENCES workflow_runs(id) ON DELETE CASCADE
 );
 
+CREATE UNIQUE INDEX IF NOT EXISTS idx_task_instances_run_node ON task_instances(run_id, node_id);
 CREATE INDEX IF NOT EXISTS idx_task_instances_node_type ON task_instances(node_type);
 CREATE INDEX IF NOT EXISTS idx_task_instances_run_id ON task_instances(run_id);
 CREATE INDEX IF NOT EXISTS idx_task_instances_state ON task_instances(state);
@@ -267,7 +268,7 @@ INSERT INTO node_templates (id, name, description, runtime, node_type, spec_json
 
 ('sql-insert', 'SQL INSERT Query', 'Insert data into database table', 'sql', 'TASK',
  '{"query": "INSERT INTO users (name, email, status) VALUES (?, ?, ?) RETURNING id", "parameters": ["{{input.name}}", "{{input.email}}", "active"], "connection_string": "postgresql://user:pass@localhost:5432/dbname"}'::jsonb,
- 'database', ARRAY['sql', 'database', 'insert', 'create']),
+ 'database', ARRAY['sql', 'database', 'insert', 'create'])
 
 ON CONFLICT (id) DO NOTHING;
 
@@ -406,6 +407,6 @@ INSERT INTO workflow_templates (id, name, description, spec_json, category, tags
      }
    ]
  }'::jsonb,
- 'parallel', ARRAY['parallel', 'merge', 'http', 'javascript']),
+ 'parallel', ARRAY['parallel', 'merge', 'http', 'javascript'])
 
 ON CONFLICT (id) DO NOTHING;

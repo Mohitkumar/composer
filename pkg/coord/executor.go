@@ -138,15 +138,16 @@ func (c *Coordinator) HandleNodeCompleted(ctx context.Context, taskID string, ru
 	// STEP 1: Record the output from the previous node successfully
 	// This transaction should always succeed to preserve the node completion state
 	var runContext *model.RunContext
+	var alreadyCompleted bool
 	err = c.ExecuteWithTransaction(ctx, span, logger, func(ctx context.Context, tx pgx.Tx) error {
 		updated, err := c.Repository.MarkTaskCompleted(ctx, tx, runID, nodeID, output, logger, span)
 		if err != nil {
 			return err
 		}
 		if !updated {
-			// Task was already completed, load run context for potential next node processing
-			runContext, err = c.Repository.LoadRunContext(ctx, tx, runID, logger, span)
-			return err
+			// Task was already completed — this is a duplicate delivery (idempotent)
+			alreadyCompleted = true
+			return nil
 		}
 
 		if err := c.Repository.ClearTaskLease(ctx, tx, runID, nodeID, logger, span); err != nil {
@@ -165,6 +166,12 @@ func (c *Coordinator) HandleNodeCompleted(ctx context.Context, taskID string, ru
 	if err != nil {
 		logger.Error().Err(err).Msg("failed to record node completion")
 		return fmt.Errorf("failed to record node completion: %w", err)
+	}
+
+	// If task was already completed, this is a duplicate delivery — return early (idempotent)
+	if alreadyCompleted {
+		logger.Debug().Msg("node already completed (duplicate delivery), skipping next-node scheduling")
+		return nil
 	}
 
 	// Get the completed node to check its type
@@ -410,7 +417,8 @@ func (c *Coordinator) mergeRunContext(workflowInput json.RawMessage, runContextJ
 	return runContext, nil
 }
 
-// finalizeWorkflowIfComplete checks if workflow is complete and marks it as succeeded if so
+// finalizeWorkflowIfComplete checks if workflow is complete and marks it as succeeded or failed.
+// If no tasks are pending but some have failed, the workflow is marked FAILED (not SUCCEEDED).
 // Returns (isComplete, pendingCount, error)
 func (c *Coordinator) finalizeWorkflowIfComplete(ctx context.Context, tx pgx.Tx, runID, workflowID string, span trace.Span, logger zerolog.Logger) (bool, int, error) {
 	done, pending, err := c.Repository.CheckPendingTasks(ctx, tx, runID)
@@ -418,21 +426,42 @@ func (c *Coordinator) finalizeWorkflowIfComplete(ctx context.Context, tx pgx.Tx,
 		return false, 0, err
 	}
 
-	if done {
-		if err := c.Repository.MarkWorkflowCompleted(ctx, tx, runID, workflowID, span, logger); err != nil {
+	if !done {
+		return false, pending, nil
+	}
+
+	// No pending tasks — check if any tasks failed before declaring success
+	failedCount, err := c.Repository.CheckFailedTasks(ctx, tx, runID)
+	if err != nil {
+		return false, 0, err
+	}
+
+	if failedCount > 0 {
+		reason := fmt.Sprintf("workflow has %d failed task(s)", failedCount)
+		if err := c.Repository.MarkWorkflowFailed(ctx, tx, runID, workflowID, reason, logger, span); err != nil {
 			return false, 0, err
 		}
-		logger.Info().Msg("workflow completed successfully")
+		logger.Error().Int("failed_tasks", failedCount).Msg("workflow marked as failed due to failed tasks")
 		return true, 0, nil
 	}
 
-	return false, pending, nil
+	if err := c.Repository.MarkWorkflowCompleted(ctx, tx, runID, workflowID, span, logger); err != nil {
+		return false, 0, err
+	}
+	logger.Info().Msg("workflow completed successfully")
+	return true, 0, nil
 }
 
 // startNextNodes starts the next nodes in a separate transaction
 // This allows retrying if it fails without losing the completion record of the previous node
 func (c *Coordinator) startNextNodes(ctx context.Context, span trace.Span, logger zerolog.Logger, runID, workflowID string, workflowVersion int, nextNodes []*model.Node, runContext *model.RunContext) error {
 	return c.ExecuteWithTransaction(ctx, span, logger, func(ctx context.Context, tx pgx.Tx) error {
+		// Load workflow spec once for edge lookups (predecessor resolution, fork targets, etc.)
+		wfSpec, err := c.loadAndParseWorkflowSpec(ctx, workflowID, workflowVersion)
+		if err != nil {
+			return fmt.Errorf("failed to load workflow spec: %w", err)
+		}
+
 		// Create task instances and outbox entries for next nodes
 		var celResolutionErrors []string
 		var nodesToProcess []*model.Node
@@ -461,25 +490,16 @@ func (c *Coordinator) startNextNodes(ctx context.Context, span trace.Span, logge
 							switchTaskID = existingTaskID
 						}
 
-						// SWITCH nodes pass through the input from the previous node as output
-						// Get the output from the last completed node in the run context
-						if runContext.Tasks != nil && len(runContext.Tasks) > 0 {
-							// Find the most recent completed task output
-							for _, taskResult := range runContext.Tasks {
-								if taskResult.Status == model.TaskInstanceStatusCompleted && taskResult.Output != nil {
-									// Type assert to json.RawMessage
-									if outputBytes, ok := taskResult.Output.(json.RawMessage); ok {
-										switchOutput = outputBytes
-									} else if outputStr, ok := taskResult.Output.(string); ok {
-										switchOutput = json.RawMessage(outputStr)
-									} else {
-										// Marshal to JSON if it's another type
-										outputBytes, err := json.Marshal(taskResult.Output)
-										if err == nil {
-											switchOutput = json.RawMessage(outputBytes)
-										}
+						// SWITCH nodes pass through the output from their predecessor node.
+						// Find the predecessor by looking at incoming edges to this switch node.
+						if runContext.Tasks != nil {
+							for _, edge := range wfSpec.Edges {
+								if edge.To == nextNode.NodeID {
+									if predResult, ok := runContext.Tasks[edge.From]; ok && predResult != nil &&
+										predResult.Status == model.TaskInstanceStatusCompleted && len(predResult.Output) > 0 {
+										switchOutput = predResult.Output
+										break
 									}
-									break
 								}
 							}
 						}
@@ -535,12 +555,6 @@ func (c *Coordinator) startNextNodes(ctx context.Context, span trace.Span, logge
 					}
 
 					// Now evaluate conditions and get matched nodes
-					wfSpec, err := c.loadAndParseWorkflowSpec(ctx, workflowID, workflowVersion)
-					if err != nil {
-						logger.Error().Err(err).Str("node_id", nextNode.NodeID).Msg("failed to load workflow spec for switch node")
-						return fmt.Errorf("failed to load workflow spec: %w", err)
-					}
-
 					switchNodes, err := c.handleSwitchNode(ctx, wfSpec, nextNode.NodeID, runContext, logger)
 					if err != nil {
 						logger.Error().Err(err).Str("node_id", nextNode.NodeID).Msg("failed to handle switch node")
@@ -555,12 +569,6 @@ func (c *Coordinator) startNextNodes(ctx context.Context, span trace.Span, logge
 						Msg("switch node processed, adding matched nodes to processing queue")
 				} else if nextNode.Type == model.NodeTypeFork {
 					// For FORK nodes, get all outgoing nodes and process them
-					wfSpec, err := c.loadAndParseWorkflowSpec(ctx, workflowID, workflowVersion)
-					if err != nil {
-						logger.Error().Err(err).Str("node_id", nextNode.NodeID).Msg("failed to load workflow spec for fork node")
-						return fmt.Errorf("failed to load workflow spec: %w", err)
-					}
-
 					forkNodes := wfSpec.FindNextNodes(nextNode.NodeID)
 					nodesToProcess = append(nodesToProcess, forkNodes...)
 					logger.Debug().
@@ -829,120 +837,6 @@ func (c *Coordinator) findJoinNodes(wfSpec *model.WorkflowDefinitionSpec, branch
 			joinNodes = append(joinNodes, node)
 		}
 	}
-
-	return joinNodes, nil
-}
-
-// handleParallelNode handles completion of a FORK node by checking if all parallel branches are complete
-// NOTE: This function is no longer used as FORK nodes now fork immediately on completion
-// Keeping for reference but the logic is now in checkParallelJoin
-func (c *Coordinator) handleParallelNode(ctx context.Context, wfSpec *model.WorkflowDefinitionSpec, nodeID string, runID string, runContext *model.RunContext, logger zerolog.Logger, span trace.Span) ([]*model.Node, error) {
-	logger.Debug().Str("node_id", nodeID).Msg("handling parallel node completion")
-
-	// Find all outgoing edges from the parallel node (these are the parallel branches)
-	outgoingEdges := wfSpec.FindOutgoingEdges(nodeID)
-	if len(outgoingEdges) == 0 {
-		// No outgoing edges, nothing to do
-		return nil, nil
-	}
-
-	// Get all branch target nodes
-	branchNodeIDs := make([]string, 0, len(outgoingEdges))
-	for _, edge := range outgoingEdges {
-		branchNodeIDs = append(branchNodeIDs, edge.To)
-	}
-
-	// Check if all branches are complete
-	var completedCount int
-	var totalCount int
-	err := c.DB.QueryRow(ctx,
-		`SELECT 
-			COUNT(*) FILTER (WHERE state IN ('COMPLETED', 'SUCCEEDED')) as completed_count,
-			COUNT(*) as total_count
-		FROM task_instances 
-		WHERE run_id = $1 AND node_id = ANY($2)`,
-		runID, branchNodeIDs).Scan(&completedCount, &totalCount)
-
-	if err != nil {
-		logger.Error().Err(err).Msg("failed to check parallel branch completion status")
-		return nil, fmt.Errorf("failed to check parallel branch status: %w", err)
-	}
-
-	logger.Debug().
-		Int("completed_branches", completedCount).
-		Int("total_branches", totalCount).
-		Msg("checked parallel branch status")
-
-	// If not all branches are complete, don't proceed to join node yet
-	if completedCount < totalCount {
-		logger.Debug().
-			Int("pending_branches", totalCount-completedCount).
-			Msg("not all parallel branches complete, waiting for remaining branches")
-		return nil, nil
-	}
-
-	// All branches are complete, find the join node (nodes that come after all branches)
-	// The join node is typically a node that has incoming edges from all branch nodes
-	// For simplicity, we'll find nodes that come after any of the branch nodes
-	// and check if they have incoming edges from all branches
-
-	// Find all nodes that come after the branch nodes
-	joinCandidates := make(map[string]int) // nodeID -> incoming branch count
-	nodeMap := wfSpec.GetNodeMap()
-
-	for _, branchNodeID := range branchNodeIDs {
-		nextNodes := wfSpec.FindNextNodes(branchNodeID)
-		for _, nextNode := range nextNodes {
-			joinCandidates[nextNode.NodeID]++
-		}
-	}
-
-	// Find nodes that have incoming edges from all branches (join nodes)
-	joinNodes := make([]*model.Node, 0)
-	for candidateID, incomingCount := range joinCandidates {
-		// Check if this candidate has incoming edges from all branches
-		// For a proper join, it should have incoming edges from all branch nodes
-		hasAllBranches := true
-		for _, branchNodeID := range branchNodeIDs {
-			hasIncoming := false
-			for _, edge := range wfSpec.Edges {
-				if edge.From == branchNodeID && edge.To == candidateID {
-					hasIncoming = true
-					break
-				}
-			}
-			if !hasIncoming {
-				hasAllBranches = false
-				break
-			}
-		}
-
-		if hasAllBranches && incomingCount == len(branchNodeIDs) {
-			if node := nodeMap[candidateID]; node != nil {
-				joinNodes = append(joinNodes, node)
-			}
-		}
-	}
-
-	// If no explicit join node found, return nodes that come after any branch
-	// (this handles cases where branches merge naturally)
-	if len(joinNodes) == 0 {
-		allNextNodes := make(map[string]*model.Node)
-		for _, branchNodeID := range branchNodeIDs {
-			nextNodes := wfSpec.FindNextNodes(branchNodeID)
-			for _, nextNode := range nextNodes {
-				allNextNodes[nextNode.NodeID] = nextNode
-			}
-		}
-		for _, node := range allNextNodes {
-			joinNodes = append(joinNodes, node)
-		}
-	}
-
-	logger.Info().
-		Int("completed_branches", completedCount).
-		Int("join_nodes", len(joinNodes)).
-		Msg("all parallel branches complete, proceeding to join")
 
 	return joinNodes, nil
 }

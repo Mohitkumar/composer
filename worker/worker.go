@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -101,7 +102,7 @@ func (w *Worker) EnsureConsumerGroup(ctx context.Context) error {
 	return nil
 }
 
-// Run infinite loop: read messages, process
+// Run starts the worker loop: reads new messages and reclaims orphaned pending messages.
 func (w *Worker) Run(ctx context.Context) {
 	w.cfg.Logger.Info().
 		Str("stream", w.cfg.StreamName).
@@ -109,10 +110,20 @@ func (w *Worker) Run(ctx context.Context) {
 		Str("consumer", w.cfg.ConsumerName).
 		Msg("starting worker")
 
+	// Start the pending message recovery loop in a separate goroutine
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		w.reclaimPendingLoop(ctx)
+	}()
+
+	// Main loop: read new messages
 	for {
 		select {
 		case <-ctx.Done():
 			w.cfg.Logger.Info().Msg("context canceled, stopping worker")
+			wg.Wait()
 			return
 		default:
 		}
@@ -139,27 +150,87 @@ func (w *Worker) Run(ctx context.Context) {
 		// Process each stream result
 		for _, streamRes := range res {
 			for _, msg := range streamRes.Messages {
-				// Parse fields into TaskMessage
-				taskMsg, err := parseTaskMessage(msg.Values)
-				if err != nil {
-					w.cfg.Logger.Error().Err(err).Msg("invalid task message; ack and continue")
-					// Ack to remove from stream
-					_, _ = w.cfg.Redis.XAck(ctx, w.cfg.StreamName, w.cfg.ConsumerGroup, msg.ID)
-					continue
-				}
-
-				// Process with timeout (default 90 seconds)
-				processCtx, cancel := context.WithTimeout(ctx, 90*time.Second)
-				if err := w.processMessage(processCtx, &taskMsg, msg.ID); err != nil {
-					w.cfg.Logger.Error().Err(err).Str("task", taskMsg.TaskID).Msg("task processing failed")
-					// Do NOT ack; will be retried or moved to DLQ
-				} else {
-					// Ack message after successful processing
-					_, _ = w.cfg.Redis.XAck(ctx, w.cfg.StreamName, w.cfg.ConsumerGroup, msg.ID)
-				}
-				cancel()
+				w.handleMessage(ctx, msg)
 			}
 		}
+	}
+}
+
+// reclaimPendingLoop periodically reclaims messages that have been pending too long
+// (e.g., from crashed workers). Uses XAUTOCLAIM to atomically claim orphaned messages.
+func (w *Worker) reclaimPendingLoop(ctx context.Context) {
+	// Reclaim interval: check every lease TTL / 2
+	reclaimInterval := time.Duration(w.cfg.LeaseTTLSeconds/2) * time.Second
+	if reclaimInterval < 10*time.Second {
+		reclaimInterval = 10 * time.Second
+	}
+	// Messages idle longer than the lease TTL are considered orphaned
+	minIdleTime := time.Duration(w.cfg.LeaseTTLSeconds) * time.Second
+
+	ticker := time.NewTicker(reclaimInterval)
+	defer ticker.Stop()
+
+	w.cfg.Logger.Info().
+		Dur("reclaim_interval", reclaimInterval).
+		Dur("min_idle_time", minIdleTime).
+		Msg("starting pending message recovery loop")
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			w.reclaimPendingMessages(ctx, minIdleTime)
+		}
+	}
+}
+
+// reclaimPendingMessages uses XAUTOCLAIM to take ownership of messages that have been
+// pending longer than minIdleTime (orphaned by crashed/slow workers).
+func (w *Worker) reclaimPendingMessages(ctx context.Context, minIdleTime time.Duration) {
+	args := &redis.XAutoClaimArgs{
+		Stream:   w.cfg.StreamName,
+		Group:    w.cfg.ConsumerGroup,
+		Consumer: w.cfg.ConsumerName,
+		MinIdle:  minIdleTime,
+		Start:    "0-0",
+		Count:    10,
+	}
+
+	msgs, _, err := w.cfg.Redis.XAutoClaim(ctx, args)
+	if err != nil {
+		w.cfg.Logger.Error().Err(err).Msg("xautoclaim failed")
+		return
+	}
+
+	if len(msgs) > 0 {
+		w.cfg.Logger.Info().Int("reclaimed", len(msgs)).Msg("reclaimed orphaned pending messages")
+	}
+
+	for _, msg := range msgs {
+		w.handleMessage(ctx, msg)
+	}
+}
+
+// handleMessage parses and processes a single Redis stream message.
+func (w *Worker) handleMessage(ctx context.Context, msg redis.XMessage) {
+	taskMsg, err := parseTaskMessage(msg.Values)
+	if err != nil {
+		w.cfg.Logger.Error().Err(err).Msg("invalid task message; ack and continue")
+		_, _ = w.cfg.Redis.XAck(ctx, w.cfg.StreamName, w.cfg.ConsumerGroup, msg.ID)
+		return
+	}
+
+	// Process with timeout (default 90 seconds)
+	processCtx, cancel := context.WithTimeout(ctx, 90*time.Second)
+	defer cancel()
+
+	if err := w.processMessage(processCtx, &taskMsg, msg.ID); err != nil {
+		w.cfg.Logger.Error().Err(err).Str("task", taskMsg.TaskID).Msg("task processing failed")
+		// Do NOT ack; will be retried via XAUTOCLAIM
+	} else {
+		// Ack message after successful processing
+		_, _ = w.cfg.Redis.XAck(ctx, w.cfg.StreamName, w.cfg.ConsumerGroup, msg.ID)
 	}
 }
 
@@ -221,10 +292,14 @@ func (w *Worker) processMessage(ctx context.Context, msg *TaskMessage, msgID str
 		return err
 	}
 	if !acquired {
-		logger.Warn().Msg("task lease not acquired, leaving message for retry")
-		// do not ack; leave in pending so another worker can claim
+		logger.Warn().Msg("task lease not acquired (already running or completed), acking message")
+		// Task is already owned or finished; ack so it doesn't keep getting reclaimed
 		return nil
 	}
+
+	// Start lease renewal goroutine — renews every TTL/3 to prevent expiry during execution
+	leaseCtx2, stopRenewal := context.WithCancel(ctx)
+	go w.renewLeaseLoop(leaseCtx2, msg.TaskID, logger)
 
 	// Execute the task using router
 	var execOutput json.RawMessage
@@ -236,6 +311,9 @@ func (w *Worker) processMessage(ctx context.Context, msg *TaskMessage, msgID str
 		errStr := routeErr.Error()
 		execErr = &errStr
 	}
+
+	// Stop lease renewal before reporting result
+	stopRenewal()
 
 	duration := time.Since(start)
 	logger.Info().
@@ -251,4 +329,36 @@ func (w *Worker) processMessage(ctx context.Context, msg *TaskMessage, msgID str
 
 	logger.Info().Msg("reported completion to coordinator")
 	return nil
+}
+
+// renewLeaseLoop periodically renews the task lease until ctx is canceled.
+// Renews every TTL/3 to ensure the lease doesn't expire during task execution.
+func (w *Worker) renewLeaseLoop(ctx context.Context, taskID string, logger zerolog.Logger) {
+	renewInterval := time.Duration(w.cfg.LeaseTTLSeconds/3) * time.Second
+	if renewInterval < 5*time.Second {
+		renewInterval = 5 * time.Second
+	}
+
+	ticker := time.NewTicker(renewInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			renewCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			acquired, err := w.coordClient.AcquireTaskLease(renewCtx, taskID, w.cfg.ConsumerName, w.cfg.LeaseTTLSeconds)
+			cancel()
+			if err != nil {
+				logger.Warn().Err(err).Str("task_id", taskID).Msg("failed to renew task lease")
+				continue
+			}
+			if !acquired {
+				logger.Warn().Str("task_id", taskID).Msg("lease renewal failed: task no longer in leasable state")
+				return
+			}
+			logger.Debug().Str("task_id", taskID).Msg("task lease renewed")
+		}
+	}
 }

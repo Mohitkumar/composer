@@ -135,8 +135,16 @@ func (r *Resolver) buildStepsView(rc *model.RunContext) map[string]interface{} {
 			continue
 		}
 
+		// Decode json.RawMessage into interface{} for CEL evaluation
+		var outputVal interface{}
+		if len(res.Output) > 0 {
+			if err := json.Unmarshal(res.Output, &outputVal); err != nil {
+				outputVal = string(res.Output)
+			}
+		}
+
 		out[id] = map[string]interface{}{
-			"output": res.Output,
+			"output": outputVal,
 			"status": string(res.Status),
 		}
 	}

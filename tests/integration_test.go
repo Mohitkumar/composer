@@ -52,10 +52,9 @@ func TestIntegrationWorkflowExecution(t *testing.T) {
 	workflowSpec := model.WorkflowDefinitionSpec{
 		Nodes: []model.Node{
 			{
-				NodeID:  "fetch_data",
-				Name:    "Fetch Data",
-				Type:    model.NodeTypeTask,
-				Runtime: "http",
+				NodeID: "fetch_data",
+				Name:   "Fetch Data",
+				Type:   model.NodeTypeHTTP,
 				Spec: json.RawMessage(`{
 					"url": "https://httpbin.org/json",
 					"method": "GET",
@@ -63,10 +62,9 @@ func TestIntegrationWorkflowExecution(t *testing.T) {
 				}`),
 			},
 			{
-				NodeID:  "process_data",
-				Name:    "Process Data",
-				Type:    model.NodeTypeTask,
-				Runtime: "python",
+				NodeID: "process_data",
+				Name:   "Process Data",
+				Type:   model.NodeTypeCode,
 				Spec: json.RawMessage(`{
 					"code": "import json\ndef handler(input):\n    data = json.loads(input) if isinstance(input, str) else input\n    return {\"processed\": True, \"source\": data.get(\"slideshow\", {}).get(\"title\", \"unknown\")}\n",
 					"filename": "process.py",
@@ -74,10 +72,9 @@ func TestIntegrationWorkflowExecution(t *testing.T) {
 				}`),
 			},
 			{
-				NodeID:  "store_result",
-				Name:    "Store Result",
-				Type:    model.NodeTypeTask,
-				Runtime: "http",
+				NodeID: "store_result",
+				Name:   "Store Result",
+				Type:   model.NodeTypeHTTP,
 				Spec: json.RawMessage(`{
 					"url": "https://httpbin.org/post",
 					"method": "POST",
