@@ -1,11 +1,10 @@
 'use client';
 
-import { useQuery, useQueries, useMutation, useQueryClient } from '@tanstack/react-query';
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { workflowApi, type WorkflowDefinition, type WorkflowIssueSummary } from '@/lib/api-client';
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
-import { Input } from '@/components/ui/input';
-import { Plus, Edit, Trash2, Play, Search, MoreVertical, AlertTriangle, Rocket, BarChart3, Network } from 'lucide-react';
+import { Plus, Edit, Trash2, Play, MoreVertical, AlertTriangle, Rocket, BarChart3, Network } from 'lucide-react';
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -38,6 +37,8 @@ import { ExecuteWorkflowDialog } from '@/components/workflow/execute-workflow-di
 import { ExecutionDetailDialog } from '@/components/execution/execution-detail-dialog';
 import { WorkflowGraphDialog } from '@/components/workflow/workflow-graph-dialog';
 import { toast } from 'sonner';
+import { useDebounce } from '@/hooks/use-debounce';
+import { ErrorState, LoadingState, PageHeader, Pagination, SearchInput } from '@/components/shared';
 
 export default function WorkflowsPage() {
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
@@ -52,17 +53,12 @@ export default function WorkflowsPage() {
   const [workflowForGraph, setWorkflowForGraph] = useState<WorkflowDefinition | null>(null);
   const [page, setPage] = useState(1);
   const [searchQuery, setSearchQuery] = useState('');
-  const [debouncedSearch, setDebouncedSearch] = useState('');
+  const debouncedSearch = useDebounce(searchQuery, 300);
   const pageSize = 10;
   const queryClient = useQueryClient();
 
-  // Debounce search query
   useEffect(() => {
-    const timer = setTimeout(() => {
-      setDebouncedSearch(searchQuery);
-      setPage(1); // Reset to first page when search changes
-    }, 300);
-    return () => clearTimeout(timer);
+    setPage(1); // Reset to first page when search changes
   }, [searchQuery]);
 
   const { data: workflowResponse, isLoading, error, isError } = useQuery({
@@ -129,59 +125,10 @@ export default function WorkflowsPage() {
     },
   });
 
-  // Fetch latest versions for all workflows to show in table
-  const latestVersionsQueries = useQueries({
-    queries: workflows.map(workflow => ({
-      queryKey: ['workflow', workflow.id, 'latest'],
-      queryFn: () => workflowApi.get(workflow.id, undefined, true),
-      staleTime: 30000, // Cache for 30 seconds
-    })),
-  });
-
-  // Fetch deployed versions for all workflows
-  const deployedVersionsQueries = useQueries({
-    queries: workflows.map(workflow => ({
-      queryKey: ['workflow', workflow.id, 'deployed'],
-      queryFn: () => workflowApi.get(workflow.id), // Get deployed version (default)
-      staleTime: 30000, // Cache for 30 seconds
-    })),
-  });
-
-  // Create maps of workflow ID to version info
-  const latestVersionsMap = useMemo(() => {
-    const map = new Map<string, { version: number; deployed: boolean }>();
-    workflows.forEach((workflow, index) => {
-      const queryResult = latestVersionsQueries[index];
-      if (queryResult?.data) {
-        map.set(workflow.id, {
-          version: queryResult.data.version,
-          deployed: queryResult.data.deployed,
-        });
-      }
-    });
-    return map;
-  }, [workflows, latestVersionsQueries]);
-
-  const deployedVersionsMap = useMemo(() => {
-    const map = new Map<string, { version: number; deployed: boolean }>();
-    workflows.forEach((workflow, index) => {
-      const queryResult = deployedVersionsQueries[index];
-      if (queryResult?.data && queryResult.data.deployed) {
-        map.set(workflow.id, {
-          version: queryResult.data.version,
-          deployed: queryResult.data.deployed,
-        });
-      }
-    });
-    return map;
-  }, [workflows, deployedVersionsQueries]);
-
   // Helper to check if latest version is already deployed
   const isLatestVersionDeployed = (workflow: WorkflowDefinition): boolean => {
-    const latest = latestVersionsMap.get(workflow.id);
-    const deployed = deployedVersionsMap.get(workflow.id);
-    if (!latest || !deployed) return false;
-    return latest.deployed && latest.version === deployed.version;
+    if (!workflow.latest_version || !workflow.deployed_version) return false;
+    return workflow.latest_version === workflow.deployed_version;
   };
 
   const deployMutation = useMutation({
@@ -209,50 +156,17 @@ export default function WorkflowsPage() {
   });
 
   if (isLoading) {
-    return (
-      <div className="flex items-center justify-center min-h-[400px]">
-        <div className="text-center">
-          <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary mx-auto mb-4"></div>
-          <p className="text-muted-foreground">Loading workflows...</p>
-        </div>
-      </div>
-    );
+    return <LoadingState message="Loading workflows..." />;
   }
 
   if (isError) {
     return (
-      <Card>
-        <CardHeader>
-          <div className="flex items-center justify-between">
-            <div>
-              <CardTitle>Workflows</CardTitle>
-              <CardDescription>
-                Manage and monitor your workflow definitions
-              </CardDescription>
-            </div>
-            <Link href="/workflows/new">
-              <Button size="sm" className="h-8">
-                <Plus className="mr-1.5 h-3.5 w-3.5" />
-                Create Workflow
-              </Button>
-            </Link>
-          </div>
-        </CardHeader>
-        <CardContent className="pt-6">
-          <div className="text-center py-12">
-            <p className="text-destructive mb-2">Failed to load workflows</p>
-            <p className="text-sm text-muted-foreground mb-4">
-              {error instanceof Error ? error.message : 'Unknown error occurred'}
-            </p>
-            <Button
-              onClick={() => queryClient.invalidateQueries({ queryKey: ['workflows'] })}
-              size="sm"
-            >
-              Retry
-            </Button>
-          </div>
-        </CardContent>
-      </Card>
+      <ErrorState
+        title="Workflows"
+        description="Manage and monitor your workflow definitions"
+        error={error}
+        queryKey={['workflows']}
+      />
     );
   }
 
@@ -299,39 +213,31 @@ export default function WorkflowsPage() {
   return (
     <>
       <Card>
-        <CardHeader className="pb-3">
-          <div className="flex items-center justify-between gap-4">
-            <div className="flex-1">
-              <CardTitle className="text-xl">Workflows</CardTitle>
-              <CardDescription className="text-xs mt-0.5">
-                {total} workflow{total !== 1 ? 's' : ''} total • Manage and monitor your workflow definitions
-              </CardDescription>
-            </div>
-            <div className="flex items-center gap-2">
-              <div className="relative w-56">
-                <Search className="absolute left-2 top-1/2 transform -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
-                <Input
-                  placeholder="Search workflows..."
-                  value={searchQuery}
-                  onChange={(e) => setSearchQuery(e.target.value)}
-                  className="pl-7 h-8 text-sm"
-                />
-              </div>
+        <PageHeader
+          title="Workflows"
+          description={`${total} workflow${total !== 1 ? 's' : ''} total • Manage and monitor your workflow definitions`}
+          action={
+            <>
+              <SearchInput
+                placeholder="Search workflows..."
+                value={searchQuery}
+                onChange={setSearchQuery}
+              />
               <Link href="/workflows/new">
-                <Button size="sm" className="h-8">
+                <Button size="sm" className="btn-small">
                   <Plus className="mr-1.5 h-3.5 w-3.5" />
                   Create Workflow
                 </Button>
               </Link>
-            </div>
-          </div>
-        </CardHeader>
-        <CardContent className="pt-0">
+            </>
+          }
+        />
+        <CardContent className="page-content-padding">
           {workflows.length === 0 ? (
             <div className="text-center py-12">
               <p className="text-muted-foreground mb-4 text-sm">No workflows found</p>
               <Link href="/workflows/new">
-                <Button size="sm" className="h-8">
+                <Button size="sm" className="btn-small">
                   <Plus className="mr-1.5 h-3.5 w-3.5" />
                   Create Your First Workflow
                 </Button>
@@ -342,43 +248,41 @@ export default function WorkflowsPage() {
               <Table>
                 <TableHeader>
                   <TableRow>
-                    <TableHead className="h-9 text-xs font-medium">Name</TableHead>
-                    <TableHead className="h-9 text-xs font-medium">ID</TableHead>
-                    <TableHead className="h-9 text-xs font-medium">Deployed Version</TableHead>
-                    <TableHead className="h-9 text-xs font-medium">Latest Version</TableHead>
-                    <TableHead className="h-9 text-xs font-medium">Status</TableHead>
-                    <TableHead className="h-9 text-xs font-medium">Success Rate</TableHead>
-                    <TableHead className="h-9 text-xs font-medium">Created</TableHead>
-                    <TableHead className="h-9 text-xs font-medium text-right">Actions</TableHead>
+                    <TableHead className="table-header">Name</TableHead>
+                    <TableHead className="table-header">ID</TableHead>
+                    <TableHead className="table-header">Deployed Version</TableHead>
+                    <TableHead className="table-header">Latest Version</TableHead>
+                    <TableHead className="table-header">Status</TableHead>
+                    <TableHead className="table-header">Success Rate</TableHead>
+                    <TableHead className="table-header">Created</TableHead>
+                    <TableHead className="table-header text-right">Actions</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
                   {workflows.map((workflow, index) => (
-                    <TableRow key={`${workflow.id}-${index}`} className="h-11">
-                      <TableCell className="py-2 text-sm font-medium">
+                    <TableRow key={`${workflow.id}-${index}`} className="table-row">
+                      <TableCell className="table-cell text-sm font-medium">
                         {workflow.name}
                       </TableCell>
-                      <TableCell className="py-2 font-mono text-xs">
+                      <TableCell className="table-cell font-mono text-xs">
                         {workflow.id}
                       </TableCell>
-                      <TableCell className="py-2 text-sm">
-                        {(() => {
-                          const deployed = deployedVersionsMap.get(workflow.id);
-                          return deployed ? `v${deployed.version}` : <span className="text-muted-foreground">-</span>;
-                        })()}
+                      <TableCell className="table-cell text-sm">
+                        {workflow.deployed_version
+                          ? `v${workflow.deployed_version}`
+                          : <span className="text-muted-foreground">-</span>}
                       </TableCell>
-                      <TableCell className="py-2 text-sm">
-                        {(() => {
-                          const latest = latestVersionsMap.get(workflow.id);
-                          return latest ? `v${latest.version}` : <span className="text-muted-foreground">-</span>;
-                        })()}
+                      <TableCell className="table-cell text-sm">
+                        {workflow.latest_version
+                          ? `v${workflow.latest_version}`
+                          : <span className="text-muted-foreground">-</span>}
                       </TableCell>
-                      <TableCell className="py-2">
+                      <TableCell className="table-cell">
                         <Badge variant={workflow.enabled ? 'default' : 'secondary'} className="text-xs">
                           {workflow.enabled ? 'Enabled' : 'Disabled'}
                         </Badge>
                       </TableCell>
-                      <TableCell className="py-2">
+                      <TableCell className="table-cell">
                         {workflow.success_rate !== undefined && workflow.success_rate >= 0 ? (
                           <Badge
                             variant={
@@ -396,10 +300,10 @@ export default function WorkflowsPage() {
                           <span className="text-xs text-muted-foreground">-</span>
                         )}
                       </TableCell>
-                      <TableCell className="py-2 text-xs text-muted-foreground">
+                      <TableCell className="table-cell text-xs text-muted-foreground">
                         {format(new Date(workflow.created_at), 'MMM d, yyyy')}
                       </TableCell>
-                      <TableCell className="py-2">
+                      <TableCell className="table-cell">
                         <div className="flex items-center justify-end gap-1">
                           {/* Main menu: Edit, Run, Report */}
                           <Button
@@ -487,37 +391,15 @@ export default function WorkflowsPage() {
                 </TableBody>
               </Table>
 
-              {totalPages > 1 && (
-                <div className="flex items-center justify-between mt-3 pt-3 border-t">
-                  <div className="text-xs text-muted-foreground">
-                    Showing {workflows.length > 0 ? (page - 1) * pageSize + 1 : 0} to{' '}
-                    {Math.min(page * pageSize, total)} of {total} workflows
-                  </div>
-                  <div className="flex gap-2">
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      className="h-8"
-                      onClick={() => setPage((p) => Math.max(1, p - 1))}
-                      disabled={page === 1 || isLoading}
-                    >
-                      Previous
-                    </Button>
-                    <div className="text-xs text-muted-foreground flex items-center px-2">
-                      Page {page} of {totalPages}
-                    </div>
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      className="h-8"
-                      onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
-                      disabled={page === totalPages || isLoading}
-                    >
-                      Next
-                    </Button>
-                  </div>
-                </div>
-              )}
+              <Pagination
+                currentPage={page}
+                totalPages={totalPages}
+                total={total}
+                pageSize={pageSize}
+                itemsCount={workflows.length}
+                onPageChange={setPage}
+                isLoading={isLoading}
+              />
             </>
           )}
         </CardContent>

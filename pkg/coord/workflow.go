@@ -282,7 +282,9 @@ func (c *Coordinator) ListWorkflows(ctx context.Context, enabledOnly bool, searc
 // WorkflowWithStats extends WorkflowDefinitionRecord with statistics
 type WorkflowWithStats struct {
 	model.WorkflowDefinitionRecord
-	SuccessRate float64 `json:"success_rate"`
+	SuccessRate     float64 `json:"success_rate"`
+	LatestVersion   int     `json:"latest_version"`
+	DeployedVersion int     `json:"deployed_version,omitempty"`
 }
 
 // ListWorkflowsWithStatsResponse represents a paginated list of workflows with statistics
@@ -316,13 +318,36 @@ func (c *Coordinator) ListWorkflowsWithStats(ctx context.Context, enabledOnly bo
 		successRates = make(map[string]float64)
 	}
 
+	// Fetch latest and deployed versions in batch to avoid N+1 queries
+	latestVersions, err := c.getWorkflowLatestVersions(ctx, workflowIDs)
+	if err != nil {
+		c.Logger.Warn().Err(err).Msg("failed to load latest workflow versions")
+		latestVersions = make(map[string]int)
+	}
+
+	deployedVersions, err := c.getWorkflowDeployedVersions(ctx, workflowIDs)
+	if err != nil {
+		c.Logger.Warn().Err(err).Msg("failed to load deployed workflow versions")
+		deployedVersions = make(map[string]int)
+	}
+
 	// Build workflows with stats
 	workflowsWithStats := make([]WorkflowWithStats, 0, len(result.Workflows))
 	for _, wf := range result.Workflows {
 		rate := successRates[wf.ID]
+		latestVersion := latestVersions[wf.ID]
+		if latestVersion == 0 {
+			latestVersion = wf.Version
+		}
+		deployedVersion := deployedVersions[wf.ID]
+		if deployedVersion == 0 && wf.Deployed {
+			deployedVersion = wf.Version
+		}
 		workflowsWithStats = append(workflowsWithStats, WorkflowWithStats{
 			WorkflowDefinitionRecord: wf,
 			SuccessRate:              rate,
+			LatestVersion:            latestVersion,
+			DeployedVersion:          deployedVersion,
 		})
 	}
 
@@ -333,6 +358,79 @@ func (c *Coordinator) ListWorkflowsWithStats(ctx context.Context, enabledOnly bo
 		PageSize:   result.PageSize,
 		TotalPages: result.TotalPages,
 	}, nil
+}
+
+func (c *Coordinator) getWorkflowLatestVersions(ctx context.Context, workflowIDs []string) (map[string]int, error) {
+	if len(workflowIDs) == 0 {
+		return make(map[string]int), nil
+	}
+
+	query := `
+		SELECT id, MAX(version) as latest_version
+		FROM workflow_definitions
+		WHERE id = ANY($1)
+		  AND deleted_at IS NULL
+		GROUP BY id
+	`
+
+	rows, err := c.DB.Query(ctx, query, workflowIDs)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query latest workflow versions: %w", err)
+	}
+	defer rows.Close()
+
+	versions := make(map[string]int)
+	for rows.Next() {
+		var id string
+		var version int
+		if err := rows.Scan(&id, &version); err != nil {
+			return nil, fmt.Errorf("failed to scan latest workflow version: %w", err)
+		}
+		versions[id] = version
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating latest workflow versions: %w", err)
+	}
+
+	return versions, nil
+}
+
+func (c *Coordinator) getWorkflowDeployedVersions(ctx context.Context, workflowIDs []string) (map[string]int, error) {
+	if len(workflowIDs) == 0 {
+		return make(map[string]int), nil
+	}
+
+	query := `
+		SELECT id, MAX(version) as deployed_version
+		FROM workflow_definitions
+		WHERE id = ANY($1)
+		  AND deleted_at IS NULL
+		  AND deployed = true
+		GROUP BY id
+	`
+
+	rows, err := c.DB.Query(ctx, query, workflowIDs)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query deployed workflow versions: %w", err)
+	}
+	defer rows.Close()
+
+	versions := make(map[string]int)
+	for rows.Next() {
+		var id string
+		var version int
+		if err := rows.Scan(&id, &version); err != nil {
+			return nil, fmt.Errorf("failed to scan deployed workflow version: %w", err)
+		}
+		versions[id] = version
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating deployed workflow versions: %w", err)
+	}
+
+	return versions, nil
 }
 
 // calculateWorkflowSuccessRates calculates success rates for multiple workflows in batch
