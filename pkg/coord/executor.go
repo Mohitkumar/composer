@@ -129,13 +129,11 @@ func (c *Coordinator) HandleNodeCompleted(ctx context.Context, taskID string, ru
 
 	startTime := time.Now()
 
-	// Load workflow definition to get DAG structure (before transaction)
 	wfSpec, err := c.loadAndParseWorkflowSpec(ctx, workflowID, workflowVersion)
 	if err != nil {
 		return err
 	}
 
-	// STEP 1: Record the output from the previous node successfully
 	// This transaction should always succeed to preserve the node completion state
 	var runContext *model.RunContext
 	var alreadyCompleted bool
