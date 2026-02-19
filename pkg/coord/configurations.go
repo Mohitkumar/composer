@@ -38,7 +38,7 @@ func (c *Coordinator) ListConfigurations(ctx context.Context, configType string)
 	}
 	defer rows.Close()
 
-	var configurations []model.ConfigurationResponse
+	configurations := make([]model.ConfigurationResponse, 0)
 	for rows.Next() {
 		var config model.ConfigurationResponse
 		var description, createdBy sql.NullString

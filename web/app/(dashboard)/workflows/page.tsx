@@ -322,8 +322,8 @@ export default function WorkflowsPage() {
                             size="sm"
                             className="h-7 w-7 p-0"
                             onClick={() => handleExecute(workflow)}
-                            title="Execute workflow"
-                            disabled={executeMutation.isPending || executeDialogOpen}
+                            title={!workflow.deployed_version ? "No deployed version" : "Execute workflow"}
+                            disabled={executeMutation.isPending || executeDialogOpen || !workflow.deployed_version}
                           >
                             <Play className="h-3.5 w-3.5" />
                           </Button>
