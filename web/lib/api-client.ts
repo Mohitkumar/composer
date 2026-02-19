@@ -98,6 +98,8 @@ export interface WorkflowDefinition {
   deployed_at?: string;
   created_at: string;
   success_rate?: number; // Success rate percentage (0-100)
+  latest_version?: number; // Latest workflow version
+  deployed_version?: number; // Latest deployed version, if any
 }
 
 export interface CreateWorkflowRequest {

@@ -37,11 +37,6 @@ func (n *Node) GetNodeTypeForRouting() string {
 		// Fallback to "python" if runtime not specified
 		return "python"
 	}
-	// For non-CODE nodes, use the type string
-	// Control flow nodes (FORK, SWITCH, JOIN) are handled by coordinator, not worker
-	if n.Type == NodeTypeFork || n.Type == NodeTypeSwitch || n.Type == NodeTypeJoin {
-		return string(n.Type) // These are handled by coordinator
-	}
 	return string(n.Type)
 }
 

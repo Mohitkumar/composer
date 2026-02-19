@@ -140,15 +140,19 @@ func (h *handlers) listWorkflows(w http.ResponseWriter, r *http.Request) {
 		}
 
 		workflowMap := map[string]interface{}{
-			"id":           wf.ID,
-			"name":         wf.Name,
-			"version":      wf.Version,
-			"spec":         specYAML,
-			"created_by":   wf.CreatedBy,
-			"enabled":      wf.Enabled,
-			"deployed":     wf.Deployed,
-			"created_at":   wf.CreatedAt,
-			"success_rate": wf.SuccessRate,
+			"id":             wf.ID,
+			"name":           wf.Name,
+			"version":        wf.Version,
+			"spec":           specYAML,
+			"created_by":     wf.CreatedBy,
+			"enabled":        wf.Enabled,
+			"deployed":       wf.Deployed,
+			"created_at":     wf.CreatedAt,
+			"success_rate":   wf.SuccessRate,
+			"latest_version": wf.LatestVersion,
+		}
+		if wf.DeployedVersion > 0 {
+			workflowMap["deployed_version"] = wf.DeployedVersion
 		}
 		if wf.WebhookURL.Valid {
 			workflowMap["webhook_url"] = wf.WebhookURL.String

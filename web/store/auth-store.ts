@@ -68,23 +68,38 @@ export const useAuthStore = create<AuthState>()(
       checkAuth: () => {
         if (typeof window !== 'undefined') {
           const token = localStorage.getItem('auth_token');
-          if (token) {
-            // Token exists, assume authenticated
-            // In a production app, you might want to validate the token
-            // by calling a /auth/me endpoint
-            const userStr = localStorage.getItem('auth_user');
-            if (userStr) {
-              try {
-                const user = JSON.parse(userStr);
-                set({
-                  isAuthenticated: true,
-                  user,
-                });
-              } catch {
-                // Invalid user data, clear it
-                localStorage.removeItem('auth_user');
-              }
+          if (!token) {
+            set({
+              isAuthenticated: false,
+              user: null,
+            });
+            return;
+          }
+
+          // Token exists, assume authenticated
+          // In a production app, you might want to validate the token
+          // by calling a /auth/me endpoint
+          const userStr = localStorage.getItem('auth_user');
+          if (userStr) {
+            try {
+              const user = JSON.parse(userStr);
+              set({
+                isAuthenticated: true,
+                user,
+              });
+            } catch {
+              // Invalid user data, clear it
+              localStorage.removeItem('auth_user');
+              set({
+                isAuthenticated: false,
+                user: null,
+              });
             }
+          } else {
+            set({
+              isAuthenticated: false,
+              user: null,
+            });
           }
         }
       },
