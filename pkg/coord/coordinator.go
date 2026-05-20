@@ -21,6 +21,7 @@ type Coordinator struct {
 	Outbox       *outbox.OutboxEnqueuer
 	Template     *template.Resolver
 	Repository   WorkflowRepository // Repository for database operations
+	wfCache      *workflowCache
 }
 
 func NewCoordinator(config *Config, logger *zerolog.Logger) (*Coordinator, error) {
@@ -57,6 +58,12 @@ func NewCoordinator(config *Config, logger *zerolog.Logger) (*Coordinator, error
 		return nil, err
 	}
 
+	wfCache, err := newWorkflowCache(defaultCacheTTL)
+	if err != nil {
+		dbPool.Close()
+		return nil, fmt.Errorf("failed to create workflow cache: %w", err)
+	}
+
 	coordinator := &Coordinator{
 		Config:       config,
 		Logger:       logger,
@@ -65,6 +72,7 @@ func NewCoordinator(config *Config, logger *zerolog.Logger) (*Coordinator, error
 		LeaseManager: leaseManager,
 		Outbox:       outboxEnqueuer,
 		Template:     templateResolver,
+		wfCache:      wfCache,
 	}
 
 	// Create repository
@@ -85,6 +93,9 @@ func (b *Coordinator) Shutdown() error {
 	b.Outbox.Stop()
 
 	b.Logger.Info().Msg("closing connections")
+	if b.wfCache != nil {
+		b.wfCache.close()
+	}
 	if b.Redis != nil {
 		b.Redis.Close()
 	}

@@ -16,15 +16,13 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
-// StartWorkflow creates a workflow_run and creates initial task instance from start node
-// If RunID is not provided, it will be generated using UUID
+// StartWorkflow creates a workflow_run and schedules the initial task from the start node.
+// If RunID is not provided it is generated.
 func (c *Coordinator) StartWorkflow(ctx context.Context, p *model.StartWorkflowRequest) error {
-	// Generate run_id if not provided
 	if p.RunID == "" {
 		p.RunID = uuid.New().String()
 	}
 
-	// Start tracing span
 	ctx, span := util.StartWorkflowSpan(ctx, "start", p.WorkflowID, p.RunID)
 	defer util.EndSpan(span, nil)
 
@@ -39,8 +37,7 @@ func (c *Coordinator) StartWorkflow(ctx context.Context, p *model.StartWorkflowR
 
 	startTime := time.Now()
 
-	// Load workflow definition to get nodes and edges (before transaction)
-	wfSpec, err := c.loadAndParseWorkflowSpec(ctx, p.WorkflowID, p.WorkflowVersion)
+	dag, err := c.loadDAG(ctx, p.WorkflowID, p.WorkflowVersion)
 	if err != nil {
 		logger.Error().Err(err).Msg("failed to load workflow definition")
 		util.RecordError(span, err)
@@ -52,15 +49,13 @@ func (c *Coordinator) StartWorkflow(ctx context.Context, p *model.StartWorkflowR
 			return err
 		}
 
-		// Find start node using utility method
-		startNode, err := wfSpec.FindStartNode(p.StartNodeID)
+		startNode, err := dag.StartNode(p.StartNodeID)
 		if err != nil {
 			logger.Error().Err(err).Str("start_node_id", p.StartNodeID).Msg("failed to find start node")
 			util.RecordError(span, err)
 			return err
 		}
 
-		// Create task instance for start node
 		taskID := uuid.New().String()
 		scheduledAt := time.Now()
 		if p.StartedAtUnixMs > 0 {
@@ -95,27 +90,21 @@ func (c *Coordinator) StartWorkflow(ctx context.Context, p *model.StartWorkflowR
 	}
 
 	duration := time.Since(startTime)
-	logger.Info().
-		Dur("duration_ms", duration).
-		Msg("workflow started successfully")
+	logger.Info().Dur("duration_ms", duration).Msg("workflow started successfully")
 
 	util.RecordWorkflowStarted(ctx, p.WorkflowID, p.RunID)
-	util.SetSpanAttributes(span,
-		util.AttributeInt("workflow.duration_ms", duration.Milliseconds()),
-	)
+	util.SetSpanAttributes(span, util.AttributeInt("workflow.duration_ms", duration.Milliseconds()))
 
 	return nil
 }
 
 func (c *Coordinator) HandleNodeCompleted(ctx context.Context, taskID string, runID string, nodeID string, output json.RawMessage) error {
-	// Get workflow run info to load workflow definition (before transaction)
 	workflowID, workflowVersion, err := c.Repository.GetWorkflowRunInfo(ctx, runID)
 	if err != nil {
 		c.Logger.Error().Err(err).Str("run_id", runID).Msg("failed to get workflow run")
 		return fmt.Errorf("failed to get workflow run: %w", err)
 	}
 
-	// Start tracing span
 	ctx, span := util.StartTaskSpan(ctx, "completed", "", runID, nodeID)
 	defer util.EndSpan(span, nil)
 
@@ -129,12 +118,11 @@ func (c *Coordinator) HandleNodeCompleted(ctx context.Context, taskID string, ru
 
 	startTime := time.Now()
 
-	wfSpec, err := c.loadAndParseWorkflowSpec(ctx, workflowID, workflowVersion)
+	dag, err := c.loadDAG(ctx, workflowID, workflowVersion)
 	if err != nil {
 		return err
 	}
 
-	// This transaction should always succeed to preserve the node completion state
 	var runContext *model.RunContext
 	var alreadyCompleted bool
 	err = c.ExecuteWithTransaction(ctx, span, logger, func(ctx context.Context, tx pgx.Tx) error {
@@ -143,7 +131,6 @@ func (c *Coordinator) HandleNodeCompleted(ctx context.Context, taskID string, ru
 			return err
 		}
 		if !updated {
-			// Task was already completed — this is a duplicate delivery (idempotent)
 			alreadyCompleted = true
 			return nil
 		}
@@ -166,82 +153,49 @@ func (c *Coordinator) HandleNodeCompleted(ctx context.Context, taskID string, ru
 		return fmt.Errorf("failed to record node completion: %w", err)
 	}
 
-	// If task was already completed, this is a duplicate delivery — return early (idempotent)
 	if alreadyCompleted {
 		logger.Debug().Msg("node already completed (duplicate delivery), skipping next-node scheduling")
 		return nil
 	}
 
-	// Get the completed node to check its type
-	completedNode := wfSpec.GetNodeByID(nodeID)
+	completedNode := dag.GetNode(nodeID)
 	if completedNode == nil {
 		logger.Error().Str("node_id", nodeID).Msg("completed node not found in workflow spec")
 		return fmt.Errorf("node %s not found in workflow spec", nodeID)
 	}
 
-	// This is a separate transaction so that if it fails, we can retry without losing the completion record
 	var nextNodes []*model.Node
 	var nextNodesErr error
 
-	// Handle different node types
 	switch completedNode.Type {
 	case model.NodeTypeSwitch:
-		// For SWITCH nodes, evaluate conditions on outgoing edges
-		nextNodes, nextNodesErr = c.handleSwitchNode(ctx, wfSpec, nodeID, runContext, logger)
+		nextNodes, nextNodesErr = c.handleSwitchNode(ctx, dag, nodeID, runContext, logger)
 		if nextNodesErr != nil {
 			logger.Error().Err(nextNodesErr).Msg("failed to handle switch node")
 			return fmt.Errorf("failed to handle switch node: %w", nextNodesErr)
 		}
 	case model.NodeTypeFork:
-		// For FORK nodes, fork into all outgoing branches immediately
-		// The join logic will be handled when branch nodes complete
-		nextNodes = wfSpec.FindNextNodes(nodeID)
-		logger.Info().
-			Int("forked_branches", len(nextNodes)).
-			Msg("parallel node forking into branches")
+		nextNodes = dag.Successors(nodeID)
+		logger.Info().Int("forked_branches", len(nextNodes)).Msg("parallel node forking into branches")
 	default:
-		// For CODE, HTTP, WAIT, and other executable nodes, use standard next node logic
-		// Control flow nodes (SWITCH, FORK) are handled above
-
-		// Check if this node is part of a parallel execution (a branch node)
-		// Branch nodes have incoming edges from a FORK node
-		var parallelNodeID string
-		for _, edge := range wfSpec.Edges {
-			if edge.To == nodeID {
-				fromNode := wfSpec.GetNodeByID(edge.From)
-				if fromNode != nil && fromNode.Type == model.NodeTypeFork {
-					parallelNodeID = edge.From
-					break
-				}
-			}
-		}
-
-		if parallelNodeID != "" {
-			// This is a branch node - only process join nodes when all branches complete
-			// Don't process regular next nodes from individual branches
-			joinNodes, joinErr := c.checkParallelJoin(ctx, wfSpec, nodeID, runID, logger, span)
+		forkParent := dag.ForkParent(nodeID)
+		if forkParent != nil {
+			joinNodes, joinErr := c.checkParallelJoin(ctx, dag, nodeID, runID, logger, span)
 			if joinErr != nil {
 				logger.Warn().Err(joinErr).Msg("failed to check parallel join, continuing with normal flow")
-				// On error, don't process any next nodes to avoid premature execution
 				nextNodes = nil
 			} else if len(joinNodes) > 0 {
-				// All parallel branches are complete, process join nodes only
 				nextNodes = joinNodes
-				logger.Info().
-					Int("join_nodes", len(joinNodes)).
-					Msg("parallel branches complete, adding join nodes")
+				logger.Info().Int("join_nodes", len(joinNodes)).Msg("parallel branches complete, adding join nodes")
 			} else {
-				// Not all branches complete yet, don't process any next nodes from this branch
-				// (they will be processed when all branches complete)
 				nextNodes = nil
 				logger.Debug().
 					Str("branch_node_id", nodeID).
-					Str("parallel_node_id", parallelNodeID).
+					Str("parallel_node_id", forkParent.NodeID).
 					Msg("parallel branch completed, waiting for other branches before processing next nodes")
 			}
 		} else {
-			// Not a branch node, use standard next node logic
-			nextNodes = wfSpec.FindNextNodes(nodeID)
+			nextNodes = dag.Successors(nodeID)
 		}
 	}
 
@@ -251,7 +205,6 @@ func (c *Coordinator) HandleNodeCompleted(ctx context.Context, taskID string, ru
 		Msg("found next nodes")
 
 	if len(nextNodes) == 0 {
-		// No next nodes, check if workflow is complete
 		err = c.ExecuteWithTransaction(ctx, span, logger, func(ctx context.Context, tx pgx.Tx) error {
 			done, pending, err := c.finalizeWorkflowIfComplete(ctx, tx, runID, workflowID, span, logger)
 			if err != nil {
@@ -267,11 +220,8 @@ func (c *Coordinator) HandleNodeCompleted(ctx context.Context, taskID string, ru
 			logger.Error().Err(err).Msg("failed to finalize workflow completion check")
 		}
 	} else {
-		// Start next nodes in a separate transaction
-		err = c.startNextNodes(ctx, span, logger, runID, workflowID, workflowVersion, nextNodes, runContext)
+		err = c.startNextNodes(ctx, span, logger, runID, workflowID, dag, nextNodes, runContext)
 		if err != nil {
-			// Only fail workflow if there's a database/system error
-			// CEL resolution errors are now handled by creating FAILED task instances
 			failedNodeID := "unknown"
 			if len(nextNodes) > 0 {
 				failedNodeID = nextNodes[0].NodeID
@@ -283,14 +233,12 @@ func (c *Coordinator) HandleNodeCompleted(ctx context.Context, taskID string, ru
 				Str("error_type", "TASK_INSTANCE_CREATION_ERROR").
 				Msg("failed to start next nodes: database or system error (not CEL resolution)")
 
-			// Mark workflow as FAILED only for non-CEL errors (database issues, etc.)
-			markErr := c.markWorkflowFailedWithReason(ctx, runID, workflowID, fmt.Sprintf("failed to create task instance for node %s: %v", failedNodeID, err), logger, span)
+			markErr := c.markWorkflowFailedWithReason(ctx, runID, workflowID,
+				fmt.Sprintf("failed to create task instance for node %s: %v", failedNodeID, err), logger, span)
 			if markErr != nil {
 				logger.Error().Err(markErr).Msg("failed to mark workflow as failed after task instance creation error")
 			}
 		} else {
-			// Check if all next nodes failed CEL resolution - if so, mark workflow as failed
-			// This check happens after successful transaction, so we can query the database
 			if len(nextNodes) > 0 {
 				nodeIDs := make([]string, len(nextNodes))
 				for i, node := range nextNodes {
@@ -299,20 +247,16 @@ func (c *Coordinator) HandleNodeCompleted(ctx context.Context, taskID string, ru
 
 				var failedCount int
 				var totalCount int
-				// Use pgx.Array to properly pass array to PostgreSQL
 				err = c.DB.QueryRow(ctx,
-					`SELECT 
+					`SELECT
 						COUNT(*) FILTER (WHERE state = 'FAILED') as failed_count,
 						COUNT(*) as total_count
-					FROM task_instances 
+					FROM task_instances
 					WHERE run_id = $1 AND node_id = ANY($2)`,
 					runID, nodeIDs).Scan(&failedCount, &totalCount)
 
 				if err == nil && failedCount > 0 && failedCount == totalCount {
-					// All next nodes failed CEL resolution - mark workflow as failed
-					logger.Warn().
-						Int("failed_nodes", failedCount).
-						Msg("all next nodes failed CEL resolution, marking workflow as failed")
+					logger.Warn().Int("failed_nodes", failedCount).Msg("all next nodes failed CEL resolution, marking workflow as failed")
 					markErr := c.markWorkflowFailedWithReason(ctx, runID, workflowID,
 						fmt.Sprintf("all next nodes (%d) failed CEL resolution", failedCount), logger, span)
 					if markErr != nil {
@@ -332,19 +276,26 @@ func (c *Coordinator) HandleNodeCompleted(ctx context.Context, taskID string, ru
 	return nil
 }
 
-// loadAndParseWorkflowSpec loads a workflow definition and parses its spec
-func (c *Coordinator) loadAndParseWorkflowSpec(ctx context.Context, workflowID string, workflowVersion int) (*model.WorkflowDefinitionSpec, error) {
+// loadDAG returns a WorkflowDAG for the given workflow, using the in-process TTL cache.
+// On a cache miss it loads from the database and builds the DAG index structures.
+func (c *Coordinator) loadDAG(ctx context.Context, workflowID string, workflowVersion int) (*model.WorkflowDAG, error) {
+	if dag, ok := c.wfCache.get(workflowID, workflowVersion); ok {
+		return dag, nil
+	}
+
 	wfDef, err := c.GetWorkflow(ctx, workflowID, workflowVersion)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load workflow definition: %w", err)
 	}
 
-	var wfSpec model.WorkflowDefinitionSpec
-	if err := json.Unmarshal(wfDef.Spec, &wfSpec); err != nil {
+	var spec model.WorkflowDefinitionSpec
+	if err := json.Unmarshal(wfDef.Spec, &spec); err != nil {
 		return nil, fmt.Errorf("failed to parse workflow spec: %w", err)
 	}
 
-	return &wfSpec, nil
+	dag := model.BuildDAG(&spec)
+	c.wfCache.set(workflowID, workflowVersion, dag)
+	return dag, nil
 }
 
 func (c *Coordinator) newRunContext(input json.RawMessage, config json.RawMessage) *model.RunContext {
@@ -360,7 +311,6 @@ func (c *Coordinator) resolveNodeInputFromSpecRaw(specRaw json.RawMessage, runCo
 	if len(specRaw) > 0 {
 		if err := json.Unmarshal(specRaw, &spec); err != nil {
 			logger.Error().Err(err).Msg("failed to unmarshal node spec for templating; using raw spec")
-			// fall back to treating raw bytes as string
 			spec = string(specRaw)
 		}
 	}
@@ -415,9 +365,8 @@ func (c *Coordinator) mergeRunContext(workflowInput json.RawMessage, runContextJ
 	return runContext, nil
 }
 
-// finalizeWorkflowIfComplete checks if workflow is complete and marks it as succeeded or failed.
-// If no tasks are pending but some have failed, the workflow is marked FAILED (not SUCCEEDED).
-// Returns (isComplete, pendingCount, error)
+// finalizeWorkflowIfComplete checks if all tasks are done and marks the workflow SUCCEEDED or FAILED.
+// Returns (isComplete, pendingCount, error).
 func (c *Coordinator) finalizeWorkflowIfComplete(ctx context.Context, tx pgx.Tx, runID, workflowID string, span trace.Span, logger zerolog.Logger) (bool, int, error) {
 	done, pending, err := c.Repository.CheckPendingTasks(ctx, tx, runID)
 	if err != nil {
@@ -428,7 +377,6 @@ func (c *Coordinator) finalizeWorkflowIfComplete(ctx context.Context, tx pgx.Tx,
 		return false, pending, nil
 	}
 
-	// No pending tasks — check if any tasks failed before declaring success
 	failedCount, err := c.Repository.CheckFailedTasks(ctx, tx, runID)
 	if err != nil {
 		return false, 0, err
@@ -450,141 +398,105 @@ func (c *Coordinator) finalizeWorkflowIfComplete(ctx context.Context, tx pgx.Tx,
 	return true, 0, nil
 }
 
-// startNextNodes starts the next nodes in a separate transaction
-// This allows retrying if it fails without losing the completion record of the previous node
-func (c *Coordinator) startNextNodes(ctx context.Context, span trace.Span, logger zerolog.Logger, runID, workflowID string, workflowVersion int, nextNodes []*model.Node, runContext *model.RunContext) error {
+// startNextNodes creates task instances and outbox entries for the next nodes in a new transaction.
+// Separating this from the completion transaction means a retry won't re-process the completion.
+func (c *Coordinator) startNextNodes(ctx context.Context, span trace.Span, logger zerolog.Logger, runID, workflowID string, dag *model.WorkflowDAG, nextNodes []*model.Node, runContext *model.RunContext) error {
 	return c.ExecuteWithTransaction(ctx, span, logger, func(ctx context.Context, tx pgx.Tx) error {
-		// Load workflow spec once for edge lookups (predecessor resolution, fork targets, etc.)
-		wfSpec, err := c.loadAndParseWorkflowSpec(ctx, workflowID, workflowVersion)
-		if err != nil {
-			return fmt.Errorf("failed to load workflow spec: %w", err)
-		}
-
-		// Create task instances and outbox entries for next nodes
 		var celResolutionErrors []string
 		var nodesToProcess []*model.Node
 
-		// First pass: handle control flow nodes (SWITCH, FORK) immediately
+		// First pass: expand control-flow nodes (SWITCH, FORK) inline — they don't become worker tasks
 		for _, nextNode := range nextNodes {
-			if nextNode.IsControlFlowNode() {
-				// Control flow nodes are handled by coordinator, not worker
-				if nextNode.Type == model.NodeTypeSwitch {
-					// For SWITCH nodes:
-					// 1. Create a task instance and mark it as completed immediately (SWITCH nodes pass through input as output)
-					// 2. Update run context with SWITCH node output
-					// 3. Evaluate conditions and process resulting nodes
-
-					// Check if task instance already exists
-					exists, existingTaskID, existingState, err := c.Repository.TaskInstanceExists(ctx, tx, runID, nextNode.NodeID)
-					if err != nil {
-						return err
-					}
-
-					var switchOutput json.RawMessage
-					if !exists || existingState == "FAILED" {
-						// Create task instance for SWITCH node
-						switchTaskID := uuid.New().String()
-						if exists && existingState == "FAILED" {
-							switchTaskID = existingTaskID
-						}
-
-						// SWITCH nodes pass through the output from their predecessor node.
-						// Find the predecessor by looking at incoming edges to this switch node.
-						if runContext.Tasks != nil {
-							for _, edge := range wfSpec.Edges {
-								if edge.To == nextNode.NodeID {
-									if predResult, ok := runContext.Tasks[edge.From]; ok && predResult != nil &&
-										predResult.Status == model.TaskInstanceStatusCompleted && len(predResult.Output) > 0 {
-										switchOutput = predResult.Output
-										break
-									}
-								}
-							}
-						}
-
-						// If no output found, use empty object
-						if switchOutput == nil {
-							switchOutput = json.RawMessage("{}")
-						}
-
-						// Create task instance and mark as completed immediately
-						if err := c.Repository.InsertTaskInstance(ctx, tx, switchTaskID, runID, nextNode, json.RawMessage("{}"), time.Now(), logger, span); err != nil {
-							logger.Error().Err(err).Str("node_id", nextNode.NodeID).Msg("failed to create task instance for switch node")
-							return fmt.Errorf("failed to create task instance for switch node: %w", err)
-						}
-
-						// Mark as completed with pass-through output
-						if _, err := c.Repository.MarkTaskCompleted(ctx, tx, runID, nextNode.NodeID, switchOutput, logger, span); err != nil {
-							logger.Error().Err(err).Str("node_id", nextNode.NodeID).Msg("failed to mark switch node as completed")
-							return fmt.Errorf("failed to mark switch node as completed: %w", err)
-						}
-
-						// Update run context in database with SWITCH node output
-						updatedRunContext, err := c.Repository.LoadAndUpdateRunContext(ctx, tx, runID, nextNode.NodeID, switchOutput, logger, span)
-						if err != nil {
-							logger.Error().Err(err).Str("node_id", nextNode.NodeID).Msg("failed to update run context for switch node")
-							return fmt.Errorf("failed to update run context for switch node: %w", err)
-						}
-
-						// Update local run context for condition evaluation
-						runContext = updatedRunContext
-
-						c.recordTaskCreated(ctx, logger, span, switchTaskID, runID, nextNode)
-						logger.Debug().
-							Str("switch_node_id", nextNode.NodeID).
-							Str("task_id", switchTaskID).
-							Msg("switch node task instance created and marked as completed")
-					} else {
-						// Task instance already exists, load its output for run context
-						var existingOutput json.RawMessage
-						err := tx.QueryRow(ctx, `SELECT output_json FROM task_instances WHERE run_id=$1 AND node_id=$2`, runID, nextNode.NodeID).
-							Scan(&existingOutput)
-						if err == nil && existingOutput != nil {
-							switchOutput = existingOutput
-							// Update local run context for condition evaluation
-							if runContext.Tasks == nil {
-								runContext.Tasks = make(map[string]*model.StepResult)
-							}
-							runContext.Tasks[nextNode.NodeID] = &model.StepResult{
-								Status: model.TaskInstanceStatusCompleted,
-								Output: switchOutput,
-							}
-						}
-					}
-
-					// Now evaluate conditions and get matched nodes
-					switchNodes, err := c.handleSwitchNode(ctx, wfSpec, nextNode.NodeID, runContext, logger)
-					if err != nil {
-						logger.Error().Err(err).Str("node_id", nextNode.NodeID).Msg("failed to handle switch node")
-						return fmt.Errorf("failed to handle switch node: %w", err)
-					}
-
-					// Recursively process the nodes that matched the switch conditions
-					nodesToProcess = append(nodesToProcess, switchNodes...)
-					logger.Debug().
-						Str("switch_node_id", nextNode.NodeID).
-						Int("matched_nodes", len(switchNodes)).
-						Msg("switch node processed, adding matched nodes to processing queue")
-				} else if nextNode.Type == model.NodeTypeFork {
-					// For FORK nodes, get all outgoing nodes and process them
-					forkNodes := wfSpec.FindNextNodes(nextNode.NodeID)
-					nodesToProcess = append(nodesToProcess, forkNodes...)
-					logger.Debug().
-						Str("fork_node_id", nextNode.NodeID).
-						Int("forked_nodes", len(forkNodes)).
-						Msg("fork node processed, adding forked nodes to processing queue")
-				}
-				// JOIN nodes are handled automatically when all parallel branches complete
+			if !nextNode.IsControlFlowNode() {
+				nodesToProcess = append(nodesToProcess, nextNode)
 				continue
 			}
-			// Regular nodes go to the processing queue
-			nodesToProcess = append(nodesToProcess, nextNode)
+
+			switch nextNode.Type {
+			case model.NodeTypeSwitch:
+				exists, existingTaskID, existingState, err := c.Repository.TaskInstanceExists(ctx, tx, runID, nextNode.NodeID)
+				if err != nil {
+					return err
+				}
+
+				var switchOutput json.RawMessage
+				if !exists || existingState == "FAILED" {
+					switchTaskID := uuid.New().String()
+					if exists && existingState == "FAILED" {
+						switchTaskID = existingTaskID
+					}
+
+					// SWITCH passes through the output of its predecessor
+					if runContext.Tasks != nil {
+						switchOutput = dag.PredecessorOutput(nextNode.NodeID, runContext.Tasks)
+					}
+					if switchOutput == nil {
+						switchOutput = json.RawMessage("{}")
+					}
+
+					if err := c.Repository.InsertTaskInstance(ctx, tx, switchTaskID, runID, nextNode, json.RawMessage("{}"), time.Now(), logger, span); err != nil {
+						logger.Error().Err(err).Str("node_id", nextNode.NodeID).Msg("failed to create task instance for switch node")
+						return fmt.Errorf("failed to create task instance for switch node: %w", err)
+					}
+
+					if _, err := c.Repository.MarkTaskCompleted(ctx, tx, runID, nextNode.NodeID, switchOutput, logger, span); err != nil {
+						logger.Error().Err(err).Str("node_id", nextNode.NodeID).Msg("failed to mark switch node as completed")
+						return fmt.Errorf("failed to mark switch node as completed: %w", err)
+					}
+
+					updatedRunContext, err := c.Repository.LoadAndUpdateRunContext(ctx, tx, runID, nextNode.NodeID, switchOutput, logger, span)
+					if err != nil {
+						logger.Error().Err(err).Str("node_id", nextNode.NodeID).Msg("failed to update run context for switch node")
+						return fmt.Errorf("failed to update run context for switch node: %w", err)
+					}
+					runContext = updatedRunContext
+
+					c.recordTaskCreated(ctx, logger, span, switchTaskID, runID, nextNode)
+					logger.Debug().
+						Str("switch_node_id", nextNode.NodeID).
+						Str("task_id", switchTaskID).
+						Msg("switch node task instance created and marked as completed")
+				} else {
+					// Already exists — reload its output into the local run context for condition evaluation
+					var existingOutput json.RawMessage
+					_ = tx.QueryRow(ctx, `SELECT output_json FROM task_instances WHERE run_id=$1 AND node_id=$2`, runID, nextNode.NodeID).
+						Scan(&existingOutput)
+					if existingOutput != nil {
+						switchOutput = existingOutput
+						if runContext.Tasks == nil {
+							runContext.Tasks = make(map[string]*model.StepResult)
+						}
+						runContext.Tasks[nextNode.NodeID] = &model.StepResult{
+							Status: model.TaskInstanceStatusCompleted,
+							Output: switchOutput,
+						}
+					}
+				}
+
+				switchNodes, err := c.handleSwitchNode(ctx, dag, nextNode.NodeID, runContext, logger)
+				if err != nil {
+					logger.Error().Err(err).Str("node_id", nextNode.NodeID).Msg("failed to handle switch node")
+					return fmt.Errorf("failed to handle switch node: %w", err)
+				}
+				nodesToProcess = append(nodesToProcess, switchNodes...)
+				logger.Debug().
+					Str("switch_node_id", nextNode.NodeID).
+					Int("matched_nodes", len(switchNodes)).
+					Msg("switch node processed, adding matched nodes to processing queue")
+
+			case model.NodeTypeFork:
+				forkNodes := dag.Successors(nextNode.NodeID)
+				nodesToProcess = append(nodesToProcess, forkNodes...)
+				logger.Debug().
+					Str("fork_node_id", nextNode.NodeID).
+					Int("forked_nodes", len(forkNodes)).
+					Msg("fork node processed, adding forked nodes to processing queue")
+			}
+			// JOIN nodes are handled automatically when all parallel branches complete
 		}
 
 		// Second pass: create task instances for executable nodes
 		for _, nextNode := range nodesToProcess {
-			// Check if task instance already exists (idempotency)
-			// Allow recreating if the existing task is in FAILED state (for retry scenarios)
 			exists, existingTaskID, existingState, err := c.Repository.TaskInstanceExists(ctx, tx, runID, nextNode.NodeID)
 			if err != nil {
 				return err
@@ -598,8 +510,6 @@ func (c *Coordinator) startNextNodes(ctx context.Context, span trace.Span, logge
 				continue
 			}
 
-			// If task exists but is FAILED, we'll recreate it with a new ID
-			// This allows retrying failed nodes within the same workflow run
 			nextTaskID := uuid.New().String()
 			if exists && existingState == "FAILED" {
 				logger.Debug().
@@ -616,14 +526,12 @@ func (c *Coordinator) startNextNodes(ctx context.Context, span trace.Span, logge
 
 			taskInput, err := c.resolveNodeInputFromSpecRaw(nextNode.Spec, runContext, nextTaskLogger)
 			if err != nil {
-				// CEL resolution failed - create task instance as FAILED instead of failing the workflow
 				celError := fmt.Sprintf("failed to resolve CEL expressions: %v", err)
 				nextTaskLogger.Error().
 					Err(err).
 					Str("error_type", "CEL_RESOLUTION_ERROR").
 					Msg("failed to resolve CEL expressions for next node - creating task instance as FAILED")
 
-				// Create task instance with FAILED state
 				if insertErr := c.Repository.InsertTaskInstanceWithState(ctx, tx, nextTaskID, runID, nextNode, json.RawMessage("{}"), time.Now(), "FAILED", celError, nextTaskLogger, span); insertErr != nil {
 					nextTaskLogger.Error().
 						Err(insertErr).
@@ -631,10 +539,8 @@ func (c *Coordinator) startNextNodes(ctx context.Context, span trace.Span, logge
 						Msg("failed to insert failed task instance into database")
 					return fmt.Errorf("failed to create failed task instance for node %s: %w", nextNode.NodeID, insertErr)
 				}
-
 				celResolutionErrors = append(celResolutionErrors, fmt.Sprintf("node %s: %v", nextNode.NodeID, err))
 				c.recordTaskCreated(ctx, nextTaskLogger, span, nextTaskID, runID, nextNode)
-				// Don't create outbox entry for failed tasks - they can't be executed
 				continue
 			}
 
@@ -656,8 +562,6 @@ func (c *Coordinator) startNextNodes(ctx context.Context, span trace.Span, logge
 			}
 		}
 
-		// Log CEL resolution errors but don't fail the transaction
-		// The workflow can continue with other nodes that succeeded
 		if len(celResolutionErrors) > 0 {
 			logger.Warn().
 				Strs("cel_resolution_errors", celResolutionErrors).
@@ -674,89 +578,56 @@ func (c *Coordinator) startNextNodes(ctx context.Context, span trace.Span, logge
 	})
 }
 
-// handleSwitchNode handles completion of a SWITCH node by evaluating conditions on outgoing edges
-// and returning only the nodes that match the conditions
-func (c *Coordinator) handleSwitchNode(ctx context.Context, wfSpec *model.WorkflowDefinitionSpec, nodeID string, runContext *model.RunContext, logger zerolog.Logger) ([]*model.Node, error) {
+// handleSwitchNode evaluates outgoing edge conditions and returns the matching successor nodes.
+func (c *Coordinator) handleSwitchNode(ctx context.Context, dag *model.WorkflowDAG, nodeID string, runContext *model.RunContext, logger zerolog.Logger) ([]*model.Node, error) {
 	logger.Debug().Str("node_id", nodeID).Msg("handling switch node completion")
 
-	// Create a condition evaluator using CEL
 	evaluateCondition := func(condition string) (bool, error) {
-		// Use the template resolver to evaluate the condition
 		val, err := c.Template.ResolveTemplates(condition, runContext)
 		if err != nil {
 			return false, fmt.Errorf("failed to evaluate condition: %w", err)
 		}
-
-		// Convert to boolean
 		switch v := val.(type) {
 		case bool:
 			return v, nil
 		case string:
-			// Treat non-empty strings as true
 			return v != "", nil
 		case float64:
-			// Treat non-zero numbers as true
 			return v != 0, nil
 		case nil:
 			return false, nil
 		default:
-			// For other types, check if they're truthy
 			return v != nil, nil
 		}
 	}
 
-	// Find next nodes by evaluating conditions
-	nextNodes, err := wfSpec.FindNextNodesWithConditions(nodeID, evaluateCondition)
+	nextNodes, err := dag.SuccessorsConditional(nodeID, evaluateCondition)
 	if err != nil {
 		return nil, fmt.Errorf("failed to evaluate switch conditions: %w", err)
 	}
 
-	logger.Info().
-		Int("matched_branches", len(nextNodes)).
-		Msg("switch node evaluated conditions")
-
+	logger.Info().Int("matched_branches", len(nextNodes)).Msg("switch node evaluated conditions")
 	return nextNodes, nil
 }
 
-// checkParallelJoin checks if a completed node is part of a parallel execution and if all branches are complete
-// Returns join nodes if all branches are done, otherwise returns empty slice
-// This is workflow state transition logic - it uses repository for database queries
-func (c *Coordinator) checkParallelJoin(ctx context.Context, wfSpec *model.WorkflowDefinitionSpec, completedNodeID string, runID string, logger zerolog.Logger, span trace.Span) ([]*model.Node, error) {
-	// Find if this node has an incoming edge from a FORK node
-	var parallelNodeID string
-	for _, edge := range wfSpec.Edges {
-		if edge.To == completedNodeID {
-			node := wfSpec.GetNodeByID(edge.From)
-			if node != nil && node.Type == model.NodeTypeFork {
-				parallelNodeID = edge.From
-				break
-			}
-		}
-	}
-
-	// If not part of a parallel execution, return empty
-	if parallelNodeID == "" {
+// checkParallelJoin checks whether all branches of a fork are complete.
+// Returns the join nodes when all branches are done, or nil when waiting for more branches.
+func (c *Coordinator) checkParallelJoin(ctx context.Context, dag *model.WorkflowDAG, completedNodeID string, runID string, logger zerolog.Logger, span trace.Span) ([]*model.Node, error) {
+	forkNode := dag.ForkParent(completedNodeID)
+	if forkNode == nil {
 		return nil, nil
 	}
 
 	logger.Debug().
-		Str("parallel_node_id", parallelNodeID).
+		Str("parallel_node_id", forkNode.NodeID).
 		Str("branch_node_id", completedNodeID).
 		Msg("checking parallel join condition")
 
-	// Find all branches from the parallel node
-	outgoingEdges := wfSpec.FindOutgoingEdges(parallelNodeID)
-	if len(outgoingEdges) == 0 {
+	branchNodeIDs := dag.BranchesOf(forkNode.NodeID)
+	if len(branchNodeIDs) == 0 {
 		return nil, nil
 	}
 
-	// Get all branch target nodes
-	branchNodeIDs := make([]string, 0, len(outgoingEdges))
-	for _, edge := range outgoingEdges {
-		branchNodeIDs = append(branchNodeIDs, edge.To)
-	}
-
-	// Check if all branches are complete using repository
 	var joinNodes []*model.Node
 	err := c.ExecuteWithTransaction(ctx, span, logger, func(ctx context.Context, tx pgx.Tx) error {
 		completedCount, totalCount, err := c.Repository.CheckParallelBranchesComplete(ctx, tx, runID, branchNodeIDs)
@@ -764,90 +635,27 @@ func (c *Coordinator) checkParallelJoin(ctx context.Context, wfSpec *model.Workf
 			return err
 		}
 
-		// If not all branches are complete, return empty (no join yet)
 		if completedCount < totalCount {
 			logger.Debug().
 				Int("completed_branches", completedCount).
 				Int("total_branches", totalCount).
 				Msg("not all parallel branches complete yet")
-			joinNodes = nil
 			return nil
 		}
 
-		// All branches are complete, find join nodes
-		joinNodes, err = c.findJoinNodes(wfSpec, branchNodeIDs, logger)
-		return err
+		joinNodes = dag.JoinNodes(branchNodeIDs)
+		return nil
 	})
 
 	return joinNodes, err
 }
 
-// findJoinNodes finds nodes that should be executed after all parallel branches complete
-func (c *Coordinator) findJoinNodes(wfSpec *model.WorkflowDefinitionSpec, branchNodeIDs []string, logger zerolog.Logger) ([]*model.Node, error) {
-	// Find all nodes that come after the branch nodes
-	joinCandidates := make(map[string]int) // nodeID -> incoming branch count
-	nodeMap := wfSpec.GetNodeMap()
-
-	for _, branchNodeID := range branchNodeIDs {
-		nextNodes := wfSpec.FindNextNodes(branchNodeID)
-		for _, nextNode := range nextNodes {
-			joinCandidates[nextNode.NodeID]++
-		}
-	}
-
-	// Find nodes that have incoming edges from all branches (join nodes)
-	joinNodes := make([]*model.Node, 0)
-	for candidateID, incomingCount := range joinCandidates {
-		// Check if this candidate has incoming edges from all branches
-		hasAllBranches := true
-		for _, branchNodeID := range branchNodeIDs {
-			hasIncoming := false
-			for _, edge := range wfSpec.Edges {
-				if edge.From == branchNodeID && edge.To == candidateID {
-					hasIncoming = true
-					break
-				}
-			}
-			if !hasIncoming {
-				hasAllBranches = false
-				break
-			}
-		}
-
-		if hasAllBranches && incomingCount == len(branchNodeIDs) {
-			if node := nodeMap[candidateID]; node != nil {
-				joinNodes = append(joinNodes, node)
-			}
-		}
-	}
-
-	// If no explicit join node found, return nodes that come after any branch
-	// (this handles cases where branches merge naturally)
-	if len(joinNodes) == 0 {
-		allNextNodes := make(map[string]*model.Node)
-		for _, branchNodeID := range branchNodeIDs {
-			nextNodes := wfSpec.FindNextNodes(branchNodeID)
-			for _, nextNode := range nextNodes {
-				allNextNodes[nextNode.NodeID] = nextNode
-			}
-		}
-		for _, node := range allNextNodes {
-			joinNodes = append(joinNodes, node)
-		}
-	}
-
-	return joinNodes, nil
-}
-
-// HandleNodeFailed marks a node as failed and handles workflow failure logic
+// HandleNodeFailed marks a node as failed and handles workflow failure logic.
 func (c *Coordinator) HandleNodeFailed(ctx context.Context, runID string, nodeID string, errorMsg string) error {
-	// Get workflow info for logging
 	var workflowID string
-	var workflowVersion int
-	_ = c.DB.QueryRow(ctx, `SELECT workflow_definition_id, workflow_version FROM workflow_runs WHERE id=$1`, runID).
-		Scan(&workflowID, &workflowVersion)
+	_ = c.DB.QueryRow(ctx, `SELECT workflow_definition_id FROM workflow_runs WHERE id=$1`, runID).
+		Scan(&workflowID)
 
-	// Start tracing span
 	ctx, span := util.StartTaskSpan(ctx, "failed", "", runID, nodeID)
 	defer util.EndSpan(span, nil)
 
@@ -863,13 +671,11 @@ func (c *Coordinator) HandleNodeFailed(ctx context.Context, runID string, nodeID
 	startTime := time.Now()
 
 	err := c.ExecuteWithTransaction(ctx, span, logger, func(ctx context.Context, tx pgx.Tx) error {
-		// Get task info for metrics
 		taskID, nodeType, taskStartTime, err := c.Repository.GetTaskInstanceInfo(ctx, tx, runID, nodeID)
 		if err != nil {
 			logger.Warn().Err(err).Msg("failed to get task instance info, continuing with failure handling")
 		}
 
-		// Mark task instance as failed
 		updated, err := c.Repository.MarkTaskFailed(ctx, tx, runID, nodeID, errorMsg, logger, span)
 		if err != nil {
 			logger.Error().Err(err).Msg("failed to update task instance")
@@ -878,7 +684,6 @@ func (c *Coordinator) HandleNodeFailed(ctx context.Context, runID string, nodeID
 		}
 
 		if !updated {
-			// Task already failed or not found, return without error (idempotent)
 			logger.Debug().Msg("task already failed (idempotent)")
 			return nil
 		}
@@ -901,9 +706,6 @@ func (c *Coordinator) HandleNodeFailed(ctx context.Context, runID string, nodeID
 			)
 		}
 
-		// Check if workflow should be marked as failed
-		// For now, we mark workflow as failed if any critical node fails
-		// This can be enhanced with retry logic or conditional failure handling
 		done, pending, err := c.Repository.CheckPendingTasks(ctx, tx, runID)
 		if err != nil {
 			logger.Error().Err(err).Msg("failed to check pending tasks")
@@ -911,7 +713,6 @@ func (c *Coordinator) HandleNodeFailed(ctx context.Context, runID string, nodeID
 			return fmt.Errorf("failed to check pending tasks: %w", err)
 		}
 
-		// If no pending tasks and we have a failure, mark workflow as failed
 		if done {
 			if err := c.Repository.MarkWorkflowFailed(ctx, tx, runID, workflowID, errorMsg, logger, span); err != nil {
 				logger.Error().Err(err).Msg("failed to mark workflow as failed")
@@ -930,45 +731,35 @@ func (c *Coordinator) HandleNodeFailed(ctx context.Context, runID string, nodeID
 	}
 
 	duration := time.Since(startTime)
-	logger.Info().
-		Dur("duration_ms", duration).
-		Msg("node failure handled")
+	logger.Info().Dur("duration_ms", duration).Msg("node failure handled")
 
 	return nil
 }
 
-// markWorkflowFailedWithReason marks a workflow as failed with a specific error reason
+// markWorkflowFailedWithReason marks a workflow as failed only if it is still in a non-terminal state.
 func (c *Coordinator) markWorkflowFailedWithReason(ctx context.Context, runID, workflowID, reason string, logger zerolog.Logger, span trace.Span) error {
 	return c.ExecuteWithTransaction(ctx, span, logger, func(ctx context.Context, tx pgx.Tx) error {
-		// Check current status - only mark as failed if still running/pending
 		currentStatus, err := c.Repository.GetWorkflowRunStatus(ctx, tx, runID)
 		if err != nil {
 			return fmt.Errorf("failed to check workflow status: %w", err)
 		}
 
-		// Only update if workflow is still in a non-terminal state
 		if currentStatus != "FAILED" && currentStatus != "COMPLETED" && currentStatus != "SUCCEEDED" {
 			if err := c.Repository.MarkWorkflowFailed(ctx, tx, runID, workflowID, reason, logger, span); err != nil {
 				return err
 			}
-			logger.Error().
-				Str("failure_reason", reason).
-				Msg("workflow marked as failed: could not create task instance")
+			logger.Error().Str("failure_reason", reason).Msg("workflow marked as failed: could not create task instance")
 		} else {
-			logger.Debug().
-				Str("current_status", currentStatus).
-				Msg("workflow already in terminal state, not marking as failed")
+			logger.Debug().Str("current_status", currentStatus).Msg("workflow already in terminal state, not marking as failed")
 		}
 
 		return nil
 	})
 }
 
-// RetryWorkflowInstance retries a workflow instance from a specific node
-// It accepts optional config and input to replace the saved context, or uses the saved context if not provided
-// If workflowVersion is 0, it uses the deployed version
+// RetryWorkflowInstance retries a workflow instance from a specific node.
+// It accepts optional config and input to replace the saved context, or uses the saved context if not provided.
 func (c *Coordinator) RetryWorkflowInstance(ctx context.Context, p *model.RetryWorkflowRequest) error {
-	// Start tracing span
 	ctx, span := util.StartWorkflowSpan(ctx, "retry", "", p.RunID)
 	defer util.EndSpan(span, nil)
 
@@ -982,7 +773,6 @@ func (c *Coordinator) RetryWorkflowInstance(ctx context.Context, p *model.RetryW
 
 	startTime := time.Now()
 
-	// Get workflow instance to retrieve workflow ID and current version
 	workflowID, _, _, err := c.Repository.GetWorkflowRunForRetry(ctx, p.RunID)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -995,10 +785,8 @@ func (c *Coordinator) RetryWorkflowInstance(ctx context.Context, p *model.RetryW
 
 	logger = logger.With().Str("workflow_id", workflowID).Logger()
 
-	// Determine workflow version to use
 	workflowVersion := p.WorkflowVersion
 	if workflowVersion == 0 {
-		// Get deployed version
 		deployedWorkflow, err := c.GetWorkflow(ctx, workflowID, 0)
 		if err != nil {
 			logger.Error().Err(err).Msg("failed to get deployed workflow version")
@@ -1012,31 +800,26 @@ func (c *Coordinator) RetryWorkflowInstance(ctx context.Context, p *model.RetryW
 		logger = logger.With().Int("workflow_version", workflowVersion).Logger()
 	}
 
-	// Load workflow definition to get nodes and edges (before transaction)
-	wfSpec, err := c.loadAndParseWorkflowSpec(ctx, workflowID, workflowVersion)
+	dag, err := c.loadDAG(ctx, workflowID, workflowVersion)
 	if err != nil {
 		logger.Error().Err(err).Msg("failed to load workflow definition")
 		util.RecordError(span, err)
 		return err
 	}
 
-	// Find the restart node
-	restartNode := wfSpec.GetNodeByID(p.NodeID)
+	restartNode := dag.GetNode(p.NodeID)
 	if restartNode == nil {
 		return fmt.Errorf("node %s not found in workflow definition", p.NodeID)
 	}
 
-	// Find all descendant nodes to clean up
-	descendantNodeIDs := wfSpec.FindAllDescendantNodes(p.NodeID)
+	descendantNodeIDs := dag.Descendants(p.NodeID)
 
 	err = c.ExecuteWithTransaction(ctx, span, logger, func(ctx context.Context, tx pgx.Tx) error {
-		// Load current run context
 		runContext, err := c.Repository.LoadRunContext(ctx, tx, p.RunID, logger, span)
 		if err != nil {
 			return err
 		}
 
-		// Get workflow input for updating
 		var workflowInput json.RawMessage
 		err = tx.QueryRow(ctx, `SELECT input_json FROM workflow_runs WHERE id=$1`, p.RunID).
 			Scan(&workflowInput)
@@ -1046,7 +829,6 @@ func (c *Coordinator) RetryWorkflowInstance(ctx context.Context, p *model.RetryW
 			return fmt.Errorf("failed to load workflow input: %w", err)
 		}
 
-		// Update input and config if provided
 		if len(p.Input) > 0 {
 			runContext.Input = p.Input
 			workflowInput = p.Input
@@ -1055,37 +837,30 @@ func (c *Coordinator) RetryWorkflowInstance(ctx context.Context, p *model.RetryW
 			runContext.Config = p.ExecutionOptions
 		}
 
-		// Remove task results for descendant nodes (they will be re-executed)
 		for _, nodeID := range descendantNodeIDs {
 			delete(runContext.Tasks, nodeID)
 		}
-		// Also remove the restart node itself if it has results
 		delete(runContext.Tasks, p.NodeID)
 
-		// Update workflow run: reset status to RUNNING, update context and input, update version if changed
 		if err := c.Repository.UpdateWorkflowRunStatus(ctx, tx, p.RunID, "RUNNING", workflowVersion); err != nil {
 			return err
 		}
 
-		// Update run context and input
 		if err := c.Repository.UpdateRunContext(ctx, tx, p.RunID, runContext, logger, span); err != nil {
 			return err
 		}
 
-		// Update input if changed
 		if len(p.Input) > 0 {
 			if err := c.Repository.UpdateWorkflowInput(ctx, tx, p.RunID, p.Input); err != nil {
 				return err
 			}
 		}
 
-		// Delete task instances for restart node and all descendant nodes
 		nodeIDsToDelete := append(descendantNodeIDs, p.NodeID)
 		if err := c.Repository.DeleteTaskInstances(ctx, tx, p.RunID, nodeIDsToDelete, logger, span); err != nil {
 			return err
 		}
 
-		// Create new task instance for restart node
 		taskID := uuid.New().String()
 		scheduledAt := time.Now()
 
@@ -1118,9 +893,7 @@ func (c *Coordinator) RetryWorkflowInstance(ctx context.Context, p *model.RetryW
 	}
 
 	duration := time.Since(startTime)
-	logger.Info().
-		Dur("duration_ms", duration).
-		Msg("workflow retry started successfully")
+	logger.Info().Dur("duration_ms", duration).Msg("workflow retry started successfully")
 
 	util.RecordWorkflowStarted(ctx, workflowID, p.RunID)
 	util.SetSpanAttributes(span,
@@ -1131,7 +904,7 @@ func (c *Coordinator) RetryWorkflowInstance(ctx context.Context, p *model.RetryW
 	return nil
 }
 
-// ExecuteWithTransaction executes a function within a transaction
+// ExecuteWithTransaction executes fn inside a database transaction, committing on success.
 func (c *Coordinator) ExecuteWithTransaction(ctx context.Context, span trace.Span, logger zerolog.Logger, fn func(ctx context.Context, tx pgx.Tx) error) error {
 	tx, err := c.DB.Begin(ctx)
 	if err != nil {
