@@ -43,6 +43,9 @@ type WorkflowRepository interface {
 
 	// Parallel execution operations
 	CheckParallelBranchesComplete(ctx context.Context, tx pgx.Tx, runID string, branchNodeIDs []string) (completedCount, totalCount int, err error)
+	// CountCompletedBranches counts completed branch nodes inside a transaction.
+	// FOR UPDATE serializes concurrent join checks so only one goroutine proceeds.
+	CountCompletedBranches(ctx context.Context, tx pgx.Tx, runID string, branchNodeIDs []string) (int, error)
 
 	// Workflow run status operations
 	GetWorkflowRunStatus(ctx context.Context, tx pgx.Tx, runID string) (status string, err error)
@@ -456,6 +459,22 @@ func (r *workflowRepository) CheckParallelBranchesComplete(ctx context.Context, 
 		return 0, 0, fmt.Errorf("failed to check parallel branch status: %w", err)
 	}
 	return completedCount, totalCount, nil
+}
+
+// CountCompletedBranches counts how many of the given branch nodes are in a completed state.
+// Uses FOR UPDATE to serialize concurrent join checks for the same run.
+func (r *workflowRepository) CountCompletedBranches(ctx context.Context, tx pgx.Tx, runID string, branchNodeIDs []string) (int, error) {
+	var count int
+	err := tx.QueryRow(ctx,
+		`SELECT COUNT(*) FILTER (WHERE state IN ('COMPLETED', 'SUCCEEDED'))
+		 FROM task_instances
+		 WHERE run_id = $1 AND node_id = ANY($2)
+		 FOR UPDATE`,
+		runID, branchNodeIDs).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("failed to count completed branches: %w", err)
+	}
+	return count, nil
 }
 
 // GetWorkflowRunStatus gets the current status of a workflow run
