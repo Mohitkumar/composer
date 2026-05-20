@@ -456,9 +456,11 @@ func (r *workflowRepository) CheckParallelBranchesComplete(ctx context.Context, 
 		`SELECT
 			COUNT(*) FILTER (WHERE state IN ('COMPLETED', 'SUCCEEDED')) as completed_count,
 			COUNT(*) as total_count
-		FROM task_instances
-		WHERE run_id = $1 AND node_id = ANY($2)
-		FOR UPDATE`,
+		FROM (
+			SELECT id, state FROM task_instances
+			WHERE run_id = $1 AND node_id = ANY($2)
+			FOR UPDATE
+		) locked`,
 		runID, branchNodeIDs).Scan(&completedCount, &totalCount)
 	if err != nil {
 		return 0, 0, fmt.Errorf("failed to check parallel branch status: %w", err)
@@ -472,9 +474,11 @@ func (r *workflowRepository) CountCompletedBranches(ctx context.Context, tx pgx.
 	var count int
 	err := tx.QueryRow(ctx,
 		`SELECT COUNT(*) FILTER (WHERE state IN ('COMPLETED', 'SUCCEEDED'))
-		 FROM task_instances
-		 WHERE run_id = $1 AND node_id = ANY($2)
-		 FOR UPDATE`,
+		 FROM (
+			SELECT id, state FROM task_instances
+			WHERE run_id = $1 AND node_id = ANY($2)
+			FOR UPDATE
+		 ) locked`,
 		runID, branchNodeIDs).Scan(&count)
 	if err != nil {
 		return 0, fmt.Errorf("failed to count completed branches: %w", err)

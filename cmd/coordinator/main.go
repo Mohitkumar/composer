@@ -133,6 +133,9 @@ func generateConfig() *coord.Config {
 	if config.DBConfig.URL == "" {
 		config.DBConfig.URL = "postgres://postgres:password@localhost:5432/composer?sslmode=disable"
 	}
+	if config.DBConfig.MaxConns == 0 {
+		config.DBConfig.MaxConns = 25
+	}
 	// Set outbox defaults if not provided
 	if config.OutboxConfig.BatchSize == 0 {
 		config.OutboxConfig.BatchSize = 50
