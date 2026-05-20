@@ -1,0 +1,110 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: bench-postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: composer
+    volumes:
+      - bench_postgres_data:/var/lib/postgresql/data
+      - ../migrations:/migrations:ro
+      - ../infra/docker/init-db.sh:/docker-entrypoint-initdb.d/01-init-db.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: bench-redis
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  coordinator:
+    build:
+      context: ..
+      dockerfile: infra/docker/Dockerfile.coordinator
+    container_name: bench-coordinator
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      - STORE_URL=postgres://postgres:password@postgres:5432/composer?sslmode=disable
+      - COMPOSER_REDIS_ADDRS=redis:6379
+    command:
+      - ./coordinator
+      - --store.url=postgres://postgres:password@postgres:5432/composer?sslmode=disable
+      - --redis.addrs=redis:6379
+      - --api.http_port=8080
+      - --api.grpc_port=50051
+      - --disable-observability
+      - --outbox.batch_size=100
+      - --outbox.concurrency=4
+      - --outbox.poll_interval=200ms
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/health || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  worker:
+    build:
+      context: ..
+      dockerfile: infra/docker/Dockerfile.worker
+    depends_on:
+      coordinator:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      - REDIS_ADDR=redis:6379
+      - COORDINATOR_ADDR=coordinator:50051
+      - STREAM_NAME=workflow.tasks
+      - CONSUMER_GROUP=workflow-workers
+      - WORKER_ID=worker-{{.Task.Slot}}
+    deploy:
+      replicas: 3
+    restart: unless-stopped
+
+  mock-server:
+    build:
+      context: ./mock-server
+    container_name: bench-mock-server
+    ports:
+      - "8081:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/health || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # Run with: docker compose run --rm k6 run /scripts/<test>.js
+  k6:
+    image: grafana/k6:latest
+    profiles: [test]
+    volumes:
+      - ./k6:/scripts
+    networks:
+      - default
+    environment:
+      - BASE_URL=http://coordinator:8080
+      - MOCK_SERVER_URL=http://mock-server:8080
+      - K6_USERNAME=admin
+      - K6_PASSWORD=admin123
+    depends_on:
+      coordinator:
+        condition: service_healthy
+      mock-server:
+        condition: service_healthy
+
+volumes:
+  bench_postgres_data:
