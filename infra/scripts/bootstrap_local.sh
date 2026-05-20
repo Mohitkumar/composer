@@ -29,9 +29,6 @@ COORDINATOR_HTTP_PORT="${COORDINATOR_HTTP_PORT:-8080}"
 COORDINATOR_GRPC_PORT="${COORDINATOR_GRPC_PORT:-50051}"
 WORKER_JS_PORT="${WORKER_JS_PORT:-50052}"
 WORKER_PY_PORT="${WORKER_PY_PORT:-50053}"
-AI_SERVICE_PORT="${AI_SERVICE_PORT:-8000}"
-INTELLIGENCE_AGENT_URL="${INTELLIGENCE_AGENT_URL:-}"
-GOOGLE_API_KEY="${GOOGLE_API_KEY:-}"
 
 # Check prerequisites
 echo -e "${YELLOW}Checking prerequisites...${NC}"
@@ -54,16 +51,14 @@ else
     SKIP_JS_WORKER=false
 fi
 
-# Check Python/UV (for Python worker and AI service)
+# Check Python/UV (for Python worker)
 if ! command -v uv &> /dev/null; then
-    echo -e "${YELLOW}⚠ UV not found. Python worker and AI service will be skipped.${NC}"
+    echo -e "${YELLOW}⚠ UV not found. Python worker will be skipped.${NC}"
     SKIP_PY_WORKER=true
-    SKIP_AI_SERVICE=true
 else
     UV_VERSION=$(uv --version | awk '{print $2}')
     echo -e "${GREEN}✓ UV ${UV_VERSION} found${NC}"
     SKIP_PY_WORKER=false
-    SKIP_AI_SERVICE=false
 fi
 
 # Check PostgreSQL connection
@@ -150,17 +145,6 @@ if [ "$SKIP_PY_WORKER" = false ]; then
     cd "$PROJECT_ROOT"
 fi
 
-# Setup AI service
-if [ "$SKIP_AI_SERVICE" = false ]; then
-    echo -e "${YELLOW}Setting up AI service...${NC}"
-    cd "$PROJECT_ROOT/ai"
-    if [ ! -d ".venv" ]; then
-        uv sync
-    fi
-    echo -e "${GREEN}✓ AI service ready${NC}\n"
-    cd "$PROJECT_ROOT"
-fi
-
 # Create logs directory
 mkdir -p "$PROJECT_ROOT/logs"
 
@@ -188,19 +172,6 @@ COORDINATOR_ARGS=(
     --api.grpc_port="$COORDINATOR_GRPC_PORT"
     --disable-observability
 )
-
-# Add intelligence agent URL if provided (default to AI service if running)
-if [ -n "$INTELLIGENCE_AGENT_URL" ]; then
-    COORDINATOR_ARGS+=(--intelligence.agent_url="$INTELLIGENCE_AGENT_URL")
-    echo -e "${GREEN}✓ Intelligence agent configured: $INTELLIGENCE_AGENT_URL${NC}"
-elif [ "$SKIP_AI_SERVICE" = false ]; then
-    # Auto-configure AI service URL if AI service is available
-    # Note: AI service will be started later, but we set the URL now
-    INTELLIGENCE_AGENT_URL="http://localhost:${AI_SERVICE_PORT}"
-    COORDINATOR_ARGS+=(--intelligence.agent_url="$INTELLIGENCE_AGENT_URL")
-    echo -e "${GREEN}✓ Intelligence agent auto-configured: $INTELLIGENCE_AGENT_URL${NC}"
-    echo -e "${YELLOW}  (AI service will start after coordinator)${NC}"
-fi
 
 STORE_URL="$STORE_URL" \
 COMPOSER_REDIS_ADDRS="$REDIS_ADDR" \
@@ -300,46 +271,6 @@ else
     echo -e "${YELLOW}  Warning: No language workers configured. JavaScript/Python nodes will fail.${NC}"
 fi
 
-# Start AI Service (if available)
-if [ "$SKIP_AI_SERVICE" = false ]; then
-    echo -e "${BLUE}Starting AI Service...${NC}"
-    # Check if port is already in use
-    if command -v lsof &> /dev/null; then
-        EXISTING_PID=$(lsof -ti :"$AI_SERVICE_PORT" 2>/dev/null || true)
-        if [ -n "$EXISTING_PID" ]; then
-            echo -e "${YELLOW}Port $AI_SERVICE_PORT is already in use (PID: $EXISTING_PID), killing existing process...${NC}"
-            kill "$EXISTING_PID" 2>/dev/null || true
-            sleep 1
-        fi
-    fi
-    cd "$PROJECT_ROOT/ai" || exit 1
-    (GOOGLE_API_KEY="$GOOGLE_API_KEY" HOST=0.0.0.0 PORT="$AI_SERVICE_PORT" uv run python main.py > "$PROJECT_ROOT/logs/ai-service.log" 2>&1) &
-    AI_SERVICE_PID=$!
-    sleep 2  # Give it a moment to start
-    
-    # Wait for AI service to be ready
-    echo -n "Waiting for AI service to be ready..."
-    for i in {1..10}; do
-        if curl -s "http://localhost:${AI_SERVICE_PORT}/health" &> /dev/null 2>&1 || (command -v nc &> /dev/null && nc -z localhost "$AI_SERVICE_PORT" 2>/dev/null); then
-            echo -e " ${GREEN}✓${NC}"
-            break
-        fi
-        echo -n "."
-        sleep 1
-    done
-    echo ""
-    
-    if ! kill -0 "$AI_SERVICE_PID" 2>/dev/null; then
-        echo -e "${YELLOW}⚠ AI Service may have failed to start, check logs${NC}"
-        if [ -z "$GOOGLE_API_KEY" ]; then
-            echo -e "${YELLOW}⚠ GOOGLE_API_KEY not set. AI service requires GOOGLE_API_KEY environment variable.${NC}"
-        fi
-    else
-        echo -e "${GREEN}✓ AI Service started (PID: $AI_SERVICE_PID)${NC}"
-    fi
-    cd "$PROJECT_ROOT" || exit 1
-fi
-
 # Display status
 echo -e "\n${GREEN}=== Services Running ===${NC}"
 echo -e "Coordinator HTTP:  ${GREEN}http://localhost:${COORDINATOR_HTTP_PORT}${NC}"
@@ -350,10 +281,6 @@ fi
 if [ "$SKIP_PY_WORKER" = false ]; then
     echo -e "Python Worker:     ${GREEN}localhost:${WORKER_PY_PORT}${NC}"
 fi
-if [ "$SKIP_AI_SERVICE" = false ]; then
-    echo -e "AI Service:        ${GREEN}http://localhost:${AI_SERVICE_PORT}${NC}"
-fi
-
 echo -e "\n${GREEN}=== Log Files ===${NC}"
 echo -e "Coordinator:  ${YELLOW}$PROJECT_ROOT/logs/coordinator.log${NC}"
 echo -e "Go Worker:    ${YELLOW}$PROJECT_ROOT/logs/worker.log${NC}"
@@ -363,10 +290,6 @@ fi
 if [ "$SKIP_PY_WORKER" = false ]; then
     echo -e "Python Worker: ${YELLOW}$PROJECT_ROOT/logs/language-server-py.log${NC}"
 fi
-if [ "$SKIP_AI_SERVICE" = false ]; then
-    echo -e "AI Service: ${YELLOW}$PROJECT_ROOT/logs/ai-service.log${NC}"
-fi
-
 echo -e "\n${GREEN}=== Useful Commands ===${NC}"
 echo -e "View coordinator logs:  ${YELLOW}tail -f logs/coordinator.log${NC}"
 echo -e "View worker logs:       ${YELLOW}tail -f logs/worker.log${NC}"
