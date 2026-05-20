@@ -142,5 +142,5 @@ docker-logs: ## Show docker-compose logs
 
 run-local: ## Run the project locally using bootstrap script
 	@echo "Running local bootstrap script..."
-	@bash infra/scripts/bootstrap_local.sh POSTGRES_USER=root POSTGRES_PASSWORD=root POSTGRES_DB=composer REDIS_HOST=localhost REDIS_PORT=6379
+	@bash infra/scripts/bootstrap_local.sh POSTGRES_USER=root POSTGRES_PASSWORD=root POSTGRES_DB=composers REDIS_HOST=localhost REDIS_PORT=6379
 
