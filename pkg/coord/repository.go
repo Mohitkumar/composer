@@ -53,6 +53,11 @@ type WorkflowRepository interface {
 	UpdateWorkflowRunStatus(ctx context.Context, tx pgx.Tx, runID string, status string, workflowVersion int) error
 	UpdateWorkflowInput(ctx context.Context, tx pgx.Tx, runID string, input json.RawMessage) error
 	DeleteTaskInstances(ctx context.Context, tx pgx.Tx, runID string, nodeIDs []string, logger zerolog.Logger, span trace.Span) error
+
+	// RecoverOrphanedTasks is called on startup to re-queue tasks orphaned by a coordinator crash.
+	// It resets RUNNING tasks with expired leases to PENDING, then creates missing outbox entries
+	// for any PENDING task that has no active outbox row.
+	RecoverOrphanedTasks(ctx context.Context, logger zerolog.Logger) error
 }
 
 // workflowRepository implements WorkflowRepository
@@ -550,5 +555,93 @@ func (r *workflowRepository) DeleteTaskInstances(ctx context.Context, tx pgx.Tx,
 		util.RecordError(span, err)
 		return fmt.Errorf("failed to delete task instances: %w", err)
 	}
+	return nil
+}
+
+// RecoverOrphanedTasks resets expired RUNNING tasks to PENDING and creates outbox entries for
+// any PENDING task that has no active outbox row. Called once on coordinator startup.
+func (r *workflowRepository) RecoverOrphanedTasks(ctx context.Context, logger zerolog.Logger) error {
+	// Step 1: Reset RUNNING tasks with expired leases back to PENDING.
+	// These belong to workers that died or a previous coordinator crash.
+	result, err := r.db.Exec(ctx,
+		`UPDATE task_instances
+		 SET state='PENDING', lease_owner=NULL, lease_expires_at=NULL, started_at=NULL, updated_at=NOW()
+		 WHERE state='RUNNING' AND (lease_expires_at IS NULL OR lease_expires_at < NOW())`)
+	if err != nil {
+		return fmt.Errorf("failed to reset expired running tasks: %w", err)
+	}
+	if n := result.RowsAffected(); n > 0 {
+		logger.Warn().Int64("count", n).Msg("reset expired RUNNING tasks to PENDING for recovery")
+	}
+
+	// Step 2: Find PENDING tasks whose outbox entry was never created or was already consumed
+	// (coordinator crashed between task creation and outbox insert — they're in the same tx,
+	// so this mainly covers reset tasks from step 1 above).
+	rows, err := r.db.Query(ctx,
+		`SELECT ti.id, ti.run_id, ti.node_id, ti.node_type, ti.input_json
+		 FROM task_instances ti
+		 WHERE ti.state = 'PENDING'
+		 AND NOT EXISTS (
+			 SELECT 1 FROM outbox o
+			 WHERE o.payload->>'task_id' = ti.id
+			   AND o.status IN ('PENDING','RETRY','IN_FLIGHT')
+		 )`)
+	if err != nil {
+		return fmt.Errorf("failed to query orphaned pending tasks: %w", err)
+	}
+	defer rows.Close()
+
+	type orphanRow struct {
+		taskID   string
+		runID    string
+		nodeID   string
+		nodeType string
+		input    json.RawMessage
+	}
+
+	var orphans []orphanRow
+	for rows.Next() {
+		var o orphanRow
+		if err := rows.Scan(&o.taskID, &o.runID, &o.nodeID, &o.nodeType, &o.input); err != nil {
+			return fmt.Errorf("failed to scan orphaned task row: %w", err)
+		}
+		orphans = append(orphans, o)
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("error iterating orphaned tasks: %w", err)
+	}
+
+	if len(orphans) == 0 {
+		logger.Info().Msg("startup recovery: no orphaned tasks found")
+		return nil
+	}
+
+	logger.Warn().Int("count", len(orphans)).Msg("startup recovery: re-queuing orphaned tasks")
+
+	for _, o := range orphans {
+		payload := map[string]interface{}{
+			"task_id":   o.taskID,
+			"run_id":    o.runID,
+			"node_id":   o.nodeID,
+			"node_type": o.nodeType,
+			"input":     string(o.input),
+		}
+		payloadBytes, err := json.Marshal(payload)
+		if err != nil {
+			logger.Error().Err(err).Str("task_id", o.taskID).Msg("recovery: failed to marshal outbox payload")
+			continue
+		}
+		outboxID := uuid.New().String()
+		_, err = r.db.Exec(ctx,
+			`INSERT INTO outbox (id, stream, payload, type, status, next_attempt_at, attempt_count, max_retries, created_at, updated_at)
+			 VALUES ($1,'workflow.tasks',$2::jsonb,'TASK_EXECUTION','PENDING',NOW(),0,5,NOW(),NOW())`,
+			outboxID, payloadBytes)
+		if err != nil {
+			logger.Error().Err(err).Str("task_id", o.taskID).Msg("recovery: failed to create outbox entry")
+			continue
+		}
+		logger.Info().Str("task_id", o.taskID).Str("run_id", o.runID).Str("node_id", o.nodeID).Msg("recovery: re-queued orphaned task")
+	}
+
 	return nil
 }

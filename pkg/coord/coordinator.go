@@ -83,6 +83,13 @@ func NewCoordinator(config *Config, logger *zerolog.Logger) (*Coordinator, error
 
 func (b *Coordinator) Run(ctx context.Context) error {
 	b.Logger.Info().Msg("starting coordinator")
+
+	// Recover any tasks orphaned by a previous coordinator crash before starting
+	// the outbox enqueuer, so recovered outbox entries are picked up in the first poll.
+	if err := b.Repository.RecoverOrphanedTasks(ctx, *b.Logger); err != nil {
+		b.Logger.Error().Err(err).Msg("startup recovery failed — continuing anyway")
+	}
+
 	b.Logger.Info().Msg("starting outbox enqueuer")
 	go b.Outbox.Run(ctx)
 	return nil
