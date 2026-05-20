@@ -7,79 +7,90 @@ import (
 	"time"
 
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/sdk/resource"
-	"go.opentelemetry.io/otel/sdk/trace"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	semconv "go.opentelemetry.io/otel/semconv/v1.24.0"
 )
 
-// InitOpenTelemetry initializes the OpenTelemetry SDK with OTLP exporter
-// This should be called once at application startup
-// If disableObservability is true, it returns a no-op shutdown function and skips initialization
+// InitOpenTelemetry initializes the OpenTelemetry SDK with OTLP exporters for
+// both traces and metrics. Call once at startup.
+// If disableObservability is true, it returns a no-op shutdown function.
 func InitOpenTelemetry(ctx context.Context, serviceName, serviceVersion string, disableObservability bool) (func() error, error) {
-	// If observability is disabled, return a no-op shutdown function
 	if disableObservability {
-		return func() error {
-			return nil
-		}, nil
+		return func() error { return nil }, nil
 	}
 
-	// Get OTLP endpoint from environment or use default
 	otlpEndpoint := os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT")
 	if otlpEndpoint == "" {
 		otlpEndpoint = "localhost:4317"
 	}
 
-	// Create resource with service information
 	res, err := resource.New(ctx,
 		resource.WithAttributes(
 			semconv.ServiceNameKey.String(serviceName),
 			semconv.ServiceVersionKey.String(serviceVersion),
 		),
-		resource.WithFromEnv(), // Automatically read OTEL_RESOURCE_ATTRIBUTES
+		resource.WithFromEnv(),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create resource: %w", err)
 	}
 
-	// Initialize trace exporter
+	// ── Traces ──────────────────────────────────────────────────────────────────
 	traceExporter, err := otlptrace.New(ctx,
 		otlptracegrpc.NewClient(
 			otlptracegrpc.WithEndpoint(otlpEndpoint),
-			otlptracegrpc.WithInsecure(), // For local development
+			otlptracegrpc.WithInsecure(),
 		),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create trace exporter: %w", err)
 	}
-
-	// Initialize trace provider
-	tracerProvider := trace.NewTracerProvider(
-		trace.WithBatcher(traceExporter,
-			trace.WithBatchTimeout(5*time.Second),
-			trace.WithMaxExportBatchSize(512),
+	tracerProvider := sdktrace.NewTracerProvider(
+		sdktrace.WithBatcher(traceExporter,
+			sdktrace.WithBatchTimeout(5*time.Second),
+			sdktrace.WithMaxExportBatchSize(512),
 		),
-		trace.WithResource(res),
+		sdktrace.WithResource(res),
 	)
 	otel.SetTracerProvider(tracerProvider)
 
-	// Metrics initialization disabled - only traces are collected
+	// ── Metrics ─────────────────────────────────────────────────────────────────
+	metricExporter, err := otlpmetricgrpc.New(ctx,
+		otlpmetricgrpc.WithEndpoint(otlpEndpoint),
+		otlpmetricgrpc.WithInsecure(),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create metric exporter: %w", err)
+	}
+	meterProvider := sdkmetric.NewMeterProvider(
+		sdkmetric.WithReader(sdkmetric.NewPeriodicReader(metricExporter,
+			sdkmetric.WithInterval(10*time.Second),
+		)),
+		sdkmetric.WithResource(res),
+	)
+	otel.SetMeterProvider(meterProvider)
 
-	// Set global propagator
 	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(
 		propagation.TraceContext{},
 		propagation.Baggage{},
 	))
 
-	// Return shutdown function
 	return func() error {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-
-		if err := tracerProvider.Shutdown(ctx); err != nil {
+		tCtx, tCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer tCancel()
+		if err := tracerProvider.Shutdown(tCtx); err != nil {
 			return fmt.Errorf("failed to shutdown tracer provider: %w", err)
+		}
+		mCtx, mCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer mCancel()
+		if err := meterProvider.Shutdown(mCtx); err != nil {
+			return fmt.Errorf("failed to shutdown meter provider: %w", err)
 		}
 		return nil
 	}, nil

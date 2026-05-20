@@ -67,8 +67,9 @@ func InitMetrics() error {
 
 	workflowDurationHistogram, err = meter.Float64Histogram(
 		"workflow.duration",
-		metric.WithDescription("Duration of workflow execution in seconds"),
+		metric.WithDescription("End-to-end duration of workflow execution in seconds"),
 		metric.WithUnit("s"),
+		metric.WithExplicitBucketBoundaries(0.1, 0.5, 1, 2.5, 5, 10, 30, 60, 120, 300, 600, 1800, 3600),
 	)
 	if err != nil {
 		return err
@@ -109,8 +110,9 @@ func InitMetrics() error {
 
 	taskDurationHistogram, err = meter.Float64Histogram(
 		"task.duration",
-		metric.WithDescription("Duration of task execution in seconds"),
+		metric.WithDescription("Duration of individual task execution in seconds (started_at to completed_at)"),
 		metric.WithUnit("s"),
+		metric.WithExplicitBucketBoundaries(0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60),
 	)
 	if err != nil {
 		return err

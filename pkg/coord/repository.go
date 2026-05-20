@@ -32,7 +32,7 @@ type WorkflowRepository interface {
 	// Task Instance operations
 	InsertTaskInstance(ctx context.Context, tx pgx.Tx, taskID, runID string, node *model.Node, taskInput json.RawMessage, scheduledAt time.Time, logger zerolog.Logger, span trace.Span) error
 	InsertTaskInstanceWithState(ctx context.Context, tx pgx.Tx, taskID, runID string, node *model.Node, taskInput json.RawMessage, scheduledAt time.Time, state string, errorMsg string, logger zerolog.Logger, span trace.Span) error
-	MarkTaskCompleted(ctx context.Context, tx pgx.Tx, runID, nodeID string, output json.RawMessage, logger zerolog.Logger, span trace.Span) (bool, error)
+	MarkTaskCompleted(ctx context.Context, tx pgx.Tx, runID, nodeID string, output json.RawMessage, logger zerolog.Logger, span trace.Span) (updated bool, taskID string, nodeType string, startedAt time.Time, err error)
 	MarkTaskFailed(ctx context.Context, tx pgx.Tx, runID, nodeID, errorMsg string, logger zerolog.Logger, span trace.Span) (bool, error)
 	TaskInstanceExists(ctx context.Context, tx pgx.Tx, runID, nodeID string) (bool, string, string, error)
 	GetTaskInstanceInfo(ctx context.Context, tx pgx.Tx, runID, nodeID string) (taskID string, nodeType string, taskStartTime time.Time, err error)
@@ -322,26 +322,31 @@ func (r *workflowRepository) InsertTaskInstanceWithState(ctx context.Context, tx
 	return nil
 }
 
-// MarkTaskCompleted marks a task instance as completed
-func (r *workflowRepository) MarkTaskCompleted(ctx context.Context, tx pgx.Tx, runID, nodeID string, output json.RawMessage, logger zerolog.Logger, span trace.Span) (bool, error) {
-	result, err := tx.Exec(ctx,
-		`UPDATE task_instances 
+// MarkTaskCompleted marks a task instance as completed and returns its identity
+// and start time for duration measurement. startedAt will be zero if the task
+// was never started (e.g. control nodes persisted directly as COMPLETED).
+func (r *workflowRepository) MarkTaskCompleted(ctx context.Context, tx pgx.Tx, runID, nodeID string, output json.RawMessage, logger zerolog.Logger, span trace.Span) (updated bool, taskID string, nodeType string, startedAt time.Time, err error) {
+	var rawStartedAt sql.NullTime
+	err = tx.QueryRow(ctx,
+		`UPDATE task_instances
              SET state='COMPLETED',
                  output_json=$1::jsonb,
                  completed_at=now(),
-                 updated_at=now() 
-         WHERE run_id=$2 AND node_id=$3 AND state IN ('RUNNING', 'PENDING')`,
-		output, runID, nodeID)
+                 updated_at=now()
+         WHERE run_id=$2 AND node_id=$3 AND state IN ('RUNNING', 'PENDING')
+         RETURNING id, node_type, started_at`,
+		output, runID, nodeID).Scan(&taskID, &nodeType, &rawStartedAt)
+	if err == pgx.ErrNoRows {
+		return false, "", "", time.Time{}, nil
+	}
 	if err != nil {
-		return false, fmt.Errorf("failed to update task instance: %w", err)
+		return false, "", "", time.Time{}, fmt.Errorf("failed to update task instance: %w", err)
 	}
-
-	rowsAffected := result.RowsAffected()
-	if rowsAffected == 0 {
-		return false, nil
+	logger.Debug().Int64("rows_updated", 1).Msg("marked task completed")
+	if rawStartedAt.Valid {
+		startedAt = rawStartedAt.Time
 	}
-	logger.Debug().Int64("rows_updated", rowsAffected).Msg("marked task completed")
-	return true, nil
+	return true, taskID, nodeType, startedAt, nil
 }
 
 // MarkTaskFailed marks a task instance as failed

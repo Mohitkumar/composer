@@ -126,8 +126,12 @@ func (c *Coordinator) HandleNodeCompleted(ctx context.Context, taskID string, ru
 
 	var runContext *model.RunContext
 	var alreadyCompleted bool
+	var completedTaskID, completedNodeType string
+	var completedStartedAt time.Time
 	err = c.ExecuteWithTransaction(ctx, span, logger, func(ctx context.Context, tx pgx.Tx) error {
-		updated, err := c.Repository.MarkTaskCompleted(ctx, tx, runID, nodeID, output, logger, span)
+		var updated bool
+		var err error
+		updated, completedTaskID, completedNodeType, completedStartedAt, err = c.Repository.MarkTaskCompleted(ctx, tx, runID, nodeID, output, logger, span)
 		if err != nil {
 			return err
 		}
@@ -148,6 +152,15 @@ func (c *Coordinator) HandleNodeCompleted(ctx context.Context, taskID string, ru
 	if alreadyCompleted {
 		logger.Debug().Msg("node already completed (duplicate delivery), skipping")
 		return nil
+	}
+
+	// Record task execution duration (started_at set by lease manager when worker claimed the task).
+	if !completedStartedAt.IsZero() {
+		util.RecordTaskCompleted(ctx, completedTaskID, runID, nodeID, completedNodeType, time.Since(completedStartedAt))
+		util.SetSpanAttributes(span,
+			util.Attribute("task.id", completedTaskID),
+			util.Attribute("task.node_type", completedNodeType),
+		)
 	}
 
 	// ── Build state machine ─────────────────────────────────────────────────────
@@ -269,7 +282,7 @@ func (c *Coordinator) persistRoutingResult(
 				logger.Error().Err(err).Str("node_id", cn.Node.NodeID).Msg("failed to create control node task instance")
 				return fmt.Errorf("failed to create task instance for control node %s: %w", cn.Node.NodeID, err)
 			}
-			if _, err := c.Repository.MarkTaskCompleted(ctx, tx, runID, cn.Node.NodeID, cn.Output, logger, span); err != nil {
+			if _, _, _, _, err := c.Repository.MarkTaskCompleted(ctx, tx, runID, cn.Node.NodeID, cn.Output, logger, span); err != nil {
 				logger.Error().Err(err).Str("node_id", cn.Node.NodeID).Msg("failed to mark control node as completed")
 				return fmt.Errorf("failed to mark control node %s as completed: %w", cn.Node.NodeID, err)
 			}
