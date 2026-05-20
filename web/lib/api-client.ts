@@ -259,16 +259,7 @@ export const workflowApi = {
     return response.data;
   },
 
-  getIssueSummary: async (id: string): Promise<WorkflowIssueSummary> => {
-    const response = await apiClient.get(`/workflows/${id}/issue-summary`);
-    return response.data;
-  },
 };
-
-export interface WorkflowIssueSummary {
-  summary: string;
-  errors: string[];
-}
 
 export interface TaskInstance {
   id: string;

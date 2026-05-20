@@ -5,7 +5,6 @@ import (
 	"fmt"
 
 	"github.com/mohitkumar/composer/pkg/db"
-	"github.com/mohitkumar/composer/pkg/intelligence"
 	"github.com/mohitkumar/composer/pkg/lease"
 	"github.com/mohitkumar/composer/pkg/outbox"
 	"github.com/mohitkumar/composer/pkg/redisq"
@@ -21,7 +20,6 @@ type Coordinator struct {
 	LeaseManager *lease.Manager
 	Outbox       *outbox.OutboxEnqueuer
 	Template     *template.Resolver
-	Intelligence *intelligence.Client
 	Repository   WorkflowRepository // Repository for database operations
 }
 
@@ -59,9 +57,6 @@ func NewCoordinator(config *Config, logger *zerolog.Logger) (*Coordinator, error
 		return nil, err
 	}
 
-	// Create intelligence client
-	intelligenceClient := intelligence.NewClient(config.IntelligenceConfig, config.EnableIntelligence, *logger)
-
 	coordinator := &Coordinator{
 		Config:       config,
 		Logger:       logger,
@@ -70,7 +65,6 @@ func NewCoordinator(config *Config, logger *zerolog.Logger) (*Coordinator, error
 		LeaseManager: leaseManager,
 		Outbox:       outboxEnqueuer,
 		Template:     templateResolver,
-		Intelligence: intelligenceClient,
 	}
 
 	// Create repository

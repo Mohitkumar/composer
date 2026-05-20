@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(rm -rf /Users/mohitkumar/code/composer/ai)",
+      "Bash(rm -rf /Users/mohitkumar/code/composer/pkg/intelligence)"
+    ]
+  }
+}

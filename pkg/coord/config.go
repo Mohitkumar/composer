@@ -5,7 +5,6 @@ import (
 
 	"github.com/mohitkumar/composer/pkg/api"
 	"github.com/mohitkumar/composer/pkg/db"
-	"github.com/mohitkumar/composer/pkg/intelligence"
 	"github.com/mohitkumar/composer/pkg/redisq"
 )
 
@@ -24,6 +23,4 @@ type Config struct {
 	APIConfig            api.APIConfig       `yaml:"api" mapstructure:"api"`
 	DisableObservability bool                `yaml:"disable_observability" mapstructure:"disable_observability"`
 	OutboxConfig         OutboxConfig        `yaml:"outbox" mapstructure:"outbox"`
-	IntelligenceConfig   intelligence.Config `yaml:"intelligence" mapstructure:"intelligence"`
-	EnableIntelligence   bool                `yaml:"enable_intelligence" mapstructure:"enable_intelligence"`
 }

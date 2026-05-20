@@ -3,10 +3,8 @@
 import {
   Home,
   Play,
-  Settings,
   Workflow,
   LogOut,
-  User,
   Key,
 } from 'lucide-react';
 import Link from 'next/link';
@@ -27,14 +25,6 @@ import {
 } from '@/components/ui/sidebar';
 import { useAuthStore } from '@/store/auth-store';
 import { Button } from '@/components/ui/button';
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuLabel,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from '@/components/ui/dropdown-menu';
 import { Avatar, AvatarFallback } from '@/components/ui/avatar';
 
 const menuItems = [
@@ -57,11 +47,6 @@ const menuItems = [
     title: 'Configurations',
     url: '/configurations',
     icon: Key,
-  },
-  {
-    title: 'Settings',
-    url: '/settings',
-    icon: Settings,
   },
 ];
 
@@ -137,48 +122,23 @@ function SidebarFooterWrapper() {
 
   return (
     <SidebarFooter>
-      <DropdownMenu>
-        <DropdownMenuTrigger asChild>
-          <Button
-            variant="ghost"
-            className={`w-full h-auto p-2 gap-2 ${
-              isCollapsed
-                ? 'justify-center px-2'
-                : 'justify-start'
-            }`}
-          >
-            <Avatar className="h-8 w-8">
-              <AvatarFallback>{userInitials}</AvatarFallback>
-            </Avatar>
-            {!isCollapsed && (
-              <div className="flex flex-col items-start flex-1 min-w-0">
-                <span className="text-sm font-medium truncate w-full">
-                  {user?.username || 'User'}
-                </span>
-              </div>
-            )}
+      <div className={`flex items-center p-2 gap-2 ${isCollapsed ? 'justify-center' : 'justify-between'}`}>
+        <div className="flex items-center gap-2 min-w-0">
+          <Avatar className="h-8 w-8 shrink-0">
+            <AvatarFallback>{userInitials}</AvatarFallback>
+          </Avatar>
+          {!isCollapsed && (
+            <span className="text-sm font-medium truncate">
+              {user?.username || 'User'}
+            </span>
+          )}
+        </div>
+        {!isCollapsed && (
+          <Button variant="ghost" size="sm" className="h-8 w-8 p-0 shrink-0" onClick={handleLogout} title="Log out">
+            <LogOut className="h-4 w-4" />
           </Button>
-        </DropdownMenuTrigger>
-        <DropdownMenuContent className="w-56" align="end" forceMount>
-          <DropdownMenuLabel className="font-normal">
-            <div className="flex flex-col space-y-1">
-              <p className="text-sm font-medium leading-none">
-                {user?.username}
-              </p>
-            </div>
-          </DropdownMenuLabel>
-          <DropdownMenuSeparator />
-          <DropdownMenuItem>
-            <User className="mr-2 h-4 w-4" />
-            <span>Profile</span>
-          </DropdownMenuItem>
-          <DropdownMenuSeparator />
-          <DropdownMenuItem onClick={handleLogout}>
-            <LogOut className="mr-2 h-4 w-4" />
-            <span>Log out</span>
-          </DropdownMenuItem>
-        </DropdownMenuContent>
-      </DropdownMenu>
+        )}
+      </div>
     </SidebarFooter>
   );
 }
