@@ -170,30 +170,60 @@ func (r *workflowRepository) UpdateRunContext(ctx context.Context, tx pgx.Tx, ru
 	return nil
 }
 
-// LoadAndUpdateRunContext loads and updates the run context with a new node output
+// LoadAndUpdateRunContext atomically merges the completed node's output into
+// the run context using a single SQL UPDATE with jsonb_set, avoiding the
+// SELECT FOR UPDATE + read-modify-write pattern that caused deadlocks when
+// multiple branch nodes completed concurrently for the same run.
+//
+// Each branch appends its own key under context_json->'tasks' independently;
+// because the update is a single statement there is no lost-update race and
+// no workflow_runs row lock is held while task_instances locks are held.
 func (r *workflowRepository) LoadAndUpdateRunContext(ctx context.Context, tx pgx.Tx, runID, nodeID string, output json.RawMessage, logger zerolog.Logger, span trace.Span) (*model.RunContext, error) {
-	var workflowInput json.RawMessage
-	var runContextJSON json.RawMessage
-	if err := tx.QueryRow(ctx, `SELECT input_json, context_json FROM workflow_runs WHERE id=$1 FOR UPDATE`, runID).
-		Scan(&workflowInput, &runContextJSON); err != nil {
-		logger.Error().Err(err).Msg("failed to load workflow run context")
-		util.RecordError(span, err)
-		return nil, fmt.Errorf("failed to load workflow run context: %w", err)
+	stepResult := &model.StepResult{
+		Status: model.TaskInstanceStatusCompleted,
+		Output: output,
+	}
+	stepResultJSON, err := json.Marshal(stepResult)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal step result: %w", err)
 	}
 
-	runContext, err := r.coord.mergeRunContext(workflowInput, runContextJSON)
+	// Atomically set context_json['tasks'][nodeID] = stepResult.
+	// COALESCE handles a NULL context_json on the very first update.
+	// The || operator merges into the existing tasks map without touching
+	// any other top-level keys (input, config, …).
+	// RETURNING gives back the fully-merged context so the caller can build
+	// the in-memory RunContext for DAG routing — no second read needed.
+	var workflowInput json.RawMessage
+	var updatedContextJSON json.RawMessage
+	err = tx.QueryRow(ctx, `
+		UPDATE workflow_runs
+		SET
+			context_json = jsonb_set(
+				COALESCE(context_json, '{}'::jsonb),
+				'{tasks}',
+				COALESCE(context_json->'tasks', '{}'::jsonb) ||
+				jsonb_build_object($1::text, $2::jsonb)
+			),
+			updated_at = now()
+		WHERE id = $3
+		RETURNING input_json, context_json`,
+		nodeID, stepResultJSON, runID,
+	).Scan(&workflowInput, &updatedContextJSON)
+	if err != nil {
+		logger.Error().Err(err).Msg("failed to update workflow run context")
+		util.RecordError(span, err)
+		return nil, fmt.Errorf("failed to update workflow run context: %w", err)
+	}
+
+	runContext, err := r.coord.mergeRunContext(workflowInput, updatedContextJSON)
 	if err != nil {
 		logger.Error().Err(err).Msg("failed to merge run context")
 		util.RecordError(span, err)
 		return nil, err
 	}
 
-	runContext.Tasks[nodeID] = &model.StepResult{
-		Status: model.TaskInstanceStatusCompleted,
-		Output: output,
-	}
-
-	return runContext, r.UpdateRunContext(ctx, tx, runID, runContext, logger, span)
+	return runContext, nil
 }
 
 // MarkWorkflowCompleted marks a workflow as completed
@@ -475,6 +505,9 @@ func (r *workflowRepository) CheckParallelBranchesComplete(ctx context.Context, 
 
 // CountCompletedBranches counts how many of the given branch nodes are in a completed state.
 // Uses FOR UPDATE to serialize concurrent join checks for the same run.
+// ORDER BY id guarantees that every concurrent caller acquires the sibling row
+// locks in the same order, preventing deadlocks when multiple branches
+// complete simultaneously.
 func (r *workflowRepository) CountCompletedBranches(ctx context.Context, tx pgx.Tx, runID string, branchNodeIDs []string) (int, error) {
 	var count int
 	err := tx.QueryRow(ctx,
@@ -482,6 +515,7 @@ func (r *workflowRepository) CountCompletedBranches(ctx context.Context, tx pgx.
 		 FROM (
 			SELECT id, state FROM task_instances
 			WHERE run_id = $1 AND node_id = ANY($2)
+			ORDER BY id
 			FOR UPDATE
 		 ) locked`,
 		runID, branchNodeIDs).Scan(&count)

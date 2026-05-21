@@ -27,6 +27,7 @@ services:
       - --api.http_port=8080
       - --api.grpc_port=50051
       - --outbox.concurrency=4
+      - --outbox.poll_interval=100ms
     ports:
       - "8080:8080"
       - "50051:50051"

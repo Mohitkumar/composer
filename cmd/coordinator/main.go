@@ -51,7 +51,7 @@ func setupFlags(cmd *cobra.Command) {
 	// Outbox flags
 	cmd.Flags().Int("outbox.batch_size", 50, "Outbox batch size (number of messages to process per batch)")
 	cmd.Flags().Int("outbox.concurrency", 2, "Outbox concurrency (number of concurrent workers)")
-	cmd.Flags().Duration("outbox.poll_interval", time.Second, "Outbox poll interval (how often to check for new messages)")
+	cmd.Flags().Duration("outbox.poll_interval", 100*time.Millisecond, "Outbox poll interval (how often to check for new messages)")
 	cmd.Flags().String("outbox.stream_prefix", "workflow.", "Outbox stream prefix (e.g., 'workflow.' for 'workflow.tasks')")
 
 	// Config file flag
@@ -144,7 +144,7 @@ func generateConfig() *coord.Config {
 		config.OutboxConfig.Concurrency = 2
 	}
 	if config.OutboxConfig.PollInterval == 0 {
-		config.OutboxConfig.PollInterval = time.Second
+		config.OutboxConfig.PollInterval = 100 * time.Millisecond
 	}
 	if config.OutboxConfig.StreamPrefix == "" {
 		config.OutboxConfig.StreamPrefix = "workflow."
