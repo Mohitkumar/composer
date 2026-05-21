@@ -169,7 +169,6 @@ func (c *Coordinator) HandleNodeCompleted(ctx context.Context, taskID, runID, no
 		return fmt.Errorf("node %s not found in workflow spec", nodeID)
 	}
 
-	// ── Txn B (branch nodes only): count completed siblings ─────────────────────
 	completedBranchCount := 0
 	if execState.IsBranchNode(nodeID) {
 		siblings := execState.BranchSiblingIDs(nodeID)
@@ -183,7 +182,6 @@ func (c *Coordinator) HandleNodeCompleted(ctx context.Context, taskID, runID, no
 		}
 	}
 
-	// ── Route (pure state machine, no DB) ───────────────────────────────────────
 	routing, err := execState.NextNodes(nodeID, completedBranchCount)
 	if err != nil {
 		logger.Error().Err(err).Str("node_type", string(completedNode.Type)).Msg("routing failed")
@@ -196,7 +194,6 @@ func (c *Coordinator) HandleNodeCompleted(ctx context.Context, taskID, runID, no
 		Int("control_nodes", len(routing.ControlNodes)).
 		Msg("routing resolved")
 
-	// ── Persist result ──────────────────────────────────────────────────────────
 	if routing.IsEmpty() {
 		err = c.ExecuteWithTransaction(ctx, span, logger, func(ctx context.Context, tx pgx.Tx) error {
 			done, pending, err := c.finalizeWorkflowIfComplete(ctx, tx, runID, workflowID, span, logger)
@@ -261,7 +258,6 @@ func (c *Coordinator) persistRoutingResult(
 	routing *model.RoutingResult,
 ) (celFailed, totalExec int, err error) {
 	err = c.ExecuteWithTransaction(ctx, span, logger, func(ctx context.Context, tx pgx.Tx) error {
-		// ── 1. Persist control nodes as instantly-completed ──────────────────────
 		for _, cn := range routing.ControlNodes {
 			exists, existingTaskID, existingState, err := c.Repository.TaskInstanceExists(ctx, tx, runID, cn.Node.NodeID)
 			if err != nil {
