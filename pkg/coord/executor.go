@@ -567,7 +567,6 @@ func (c *Coordinator) RetryWorkflowInstance(ctx context.Context, p *model.RetryW
 
 	duration := time.Since(startTime)
 	logger.Info().Dur("duration_ms", duration).Msg("workflow retry started successfully")
-	util.RecordWorkflowStarted(ctx, workflowID, p.RunID)
 	util.SetSpanAttributes(span,
 		util.AttributeInt("workflow.duration_ms", duration.Milliseconds()),
 		util.Attribute("workflow.retry_node_id", p.NodeID),

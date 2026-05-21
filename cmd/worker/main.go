@@ -169,6 +169,20 @@ func main() {
 	sigc := make(chan os.Signal, 1)
 	signal.Notify(sigc, syscall.SIGINT, syscall.SIGTERM)
 
+	// Periodically sample process metrics (RSS, heap, goroutines)
+	go func() {
+		ticker := time.NewTicker(15 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				util.SampleProcessMetrics(ctx)
+			}
+		}
+	}()
+
 	// Run worker in goroutine
 	done := make(chan error, 1)
 	go func() {

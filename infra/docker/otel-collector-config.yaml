@@ -27,6 +27,8 @@ exporters:
     namespace: composer
     send_timestamps: true
     metric_expiration: 3m
+    resource_to_telemetry_conversion:
+      enabled: true
 
 service:
   pipelines:

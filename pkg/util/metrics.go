@@ -36,6 +36,26 @@ var (
 	// Depth gauges — set by the coordinator's background sampler
 	RedisStreamDepthGauge metric.Int64Gauge
 	OutboxBacklogGauge    metric.Int64Gauge
+
+	// Process metrics (coordinator + worker)
+	ProcessRSSGauge        metric.Int64Gauge
+	ProcessHeapInuseGauge  metric.Int64Gauge
+	ProcessGoroutinesGauge metric.Int64Gauge
+
+	// DB pool metrics (coordinator only)
+	DBPoolAcquiredGauge  metric.Int64Gauge
+	DBPoolIdleGauge      metric.Int64Gauge
+	DBPoolTotalGauge     metric.Int64Gauge
+	DBPoolMaxGauge       metric.Int64Gauge
+	DBPoolWaitCountGauge metric.Int64Gauge
+
+	// Redis server memory (coordinator only)
+	RedisMemoryUsedGauge metric.Int64Gauge
+
+	// Workflow cache metrics (coordinator only)
+	WfCacheSizeGauge    metric.Int64Gauge
+	WfCacheHitsCounter  metric.Int64Counter
+	WfCacheMissesCounter metric.Int64Counter
 )
 
 // InitMetrics initializes all metrics. Should be called once at startup.
@@ -166,6 +186,109 @@ func InitMetrics() error {
 	OutboxBacklogGauge, err = meter.Int64Gauge(
 		"outbox.backlog",
 		metric.WithDescription("Number of outbox rows waiting to be published (PENDING + RETRY)"),
+	)
+	if err != nil {
+		return err
+	}
+
+	// Process metrics (coordinator + worker)
+	ProcessRSSGauge, err = meter.Int64Gauge(
+		"process.rss_bytes",
+		metric.WithDescription("Resident set size of the process in bytes"),
+		metric.WithUnit("By"),
+	)
+	if err != nil {
+		return err
+	}
+
+	ProcessHeapInuseGauge, err = meter.Int64Gauge(
+		"process.heap_inuse_bytes",
+		metric.WithDescription("Go heap memory currently in use in bytes"),
+		metric.WithUnit("By"),
+	)
+	if err != nil {
+		return err
+	}
+
+	ProcessGoroutinesGauge, err = meter.Int64Gauge(
+		"process.goroutines",
+		metric.WithDescription("Number of goroutines currently running"),
+	)
+	if err != nil {
+		return err
+	}
+
+	// DB pool metrics (coordinator only)
+	DBPoolAcquiredGauge, err = meter.Int64Gauge(
+		"db.pool.acquired",
+		metric.WithDescription("Number of connections currently acquired from the pool"),
+	)
+	if err != nil {
+		return err
+	}
+
+	DBPoolIdleGauge, err = meter.Int64Gauge(
+		"db.pool.idle",
+		metric.WithDescription("Number of idle connections in the pool"),
+	)
+	if err != nil {
+		return err
+	}
+
+	DBPoolTotalGauge, err = meter.Int64Gauge(
+		"db.pool.total",
+		metric.WithDescription("Total number of connections in the pool (acquired + idle + constructing)"),
+	)
+	if err != nil {
+		return err
+	}
+
+	DBPoolMaxGauge, err = meter.Int64Gauge(
+		"db.pool.max",
+		metric.WithDescription("Maximum number of connections allowed in the pool"),
+	)
+	if err != nil {
+		return err
+	}
+
+	DBPoolWaitCountGauge, err = meter.Int64Gauge(
+		"db.pool.wait_count",
+		metric.WithDescription("Cumulative number of times a connection was not immediately available"),
+	)
+	if err != nil {
+		return err
+	}
+
+	// Redis server memory
+	RedisMemoryUsedGauge, err = meter.Int64Gauge(
+		"redis.memory.used_bytes",
+		metric.WithDescription("Redis server used_memory in bytes"),
+		metric.WithUnit("By"),
+	)
+	if err != nil {
+		return err
+	}
+
+	// Workflow cache metrics (coordinator only)
+	WfCacheSizeGauge, err = meter.Int64Gauge(
+		"wf_cache.size",
+		metric.WithDescription("Number of workflow DAGs currently held in the in-process cache"),
+	)
+	if err != nil {
+		return err
+	}
+
+	WfCacheHitsCounter, err = meter.Int64Counter(
+		"wf_cache.hits",
+		metric.WithDescription("Total number of workflow DAG cache hits"),
+	)
+	if err != nil {
+		return err
+	}
+
+	WfCacheMissesCounter, err = meter.Int64Counter(
+		"wf_cache.misses",
+		metric.WithDescription("Total number of workflow DAG cache misses"),
 	)
 	if err != nil {
 		return err
