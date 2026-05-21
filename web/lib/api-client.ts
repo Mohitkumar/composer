@@ -1,15 +1,8 @@
 import axios from 'axios';
 
-// Use Next.js API proxy to avoid CORS issues
-// In production, you can set NEXT_PUBLIC_USE_PROXY=false to call backend directly
-const USE_PROXY = process.env.NEXT_PUBLIC_USE_PROXY !== 'false';
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080';
-
-// Use proxy route to avoid CORS - the proxy route at /api/[...path] will forward to backend
-// The path will be: /api/api/v1/workflows -> backend: http://localhost:8080/api/v1/workflows
-const baseURL = USE_PROXY
-  ? '/api/api/v1' // Next.js API route proxy (path: /api/[...path] where path = 'api/v1/...')
-  : `${API_BASE_URL}/api/v1`; // Direct backend URL (if proxy disabled)
+// All API calls go through the Next.js proxy route to avoid CORS issues.
+// The proxy route (/api/[...path]) forwards to the backend using API_INTERNAL_URL server-side.
+const baseURL = '/api/api/v1';
 
 export const apiClient = axios.create({
   baseURL,

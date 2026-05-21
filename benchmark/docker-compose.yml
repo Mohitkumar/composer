@@ -101,8 +101,7 @@ services:
       coordinator:
         condition: service_healthy
     environment:
-      - NEXT_PUBLIC_API_URL=http://localhost:8080
-      - NEXT_PUBLIC_USE_PROXY=false
+      - API_INTERNAL_URL=http://coordinator:8080
       - NODE_ENV=production
     ports:
       - "3000:3000"
