@@ -12,6 +12,7 @@ import (
 	"strconv"
 
 	"github.com/mohitkumar/composer/pkg/redisq"
+	redisstream "github.com/mohitkumar/composer/pkg/stream/redis"
 	"github.com/mohitkumar/composer/pkg/util"
 	"github.com/mohitkumar/composer/worker"
 	"github.com/rs/zerolog"
@@ -135,13 +136,18 @@ func main() {
 	}
 	defer redisStream.Close()
 
+	// Create Redis stream consumer
+	streamConsumer := redisstream.NewConsumer(redisstream.ConsumerConfig{
+		StreamName:    streamName,
+		ConsumerGroup: consumerGroup,
+		ConsumerName:  workerID,
+	}, redisStream, logger)
+
 	// Create worker
 	wcfg := worker.WorkerConfig{
-		Redis:           redisStream,
+		Stream:          streamConsumer,
 		CoordinatorAddr: coordAddr,
 		LangWorkerAddrs: langWorkerAddrs,
-		StreamName:      streamName,
-		ConsumerGroup:   consumerGroup,
 		ConsumerName:    workerID,
 		LeaseTTLSeconds: leaseTTLSeconds,
 		Logger:          logger,

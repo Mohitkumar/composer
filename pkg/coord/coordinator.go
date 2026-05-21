@@ -11,6 +11,7 @@ import (
 	"github.com/mohitkumar/composer/pkg/lease"
 	"github.com/mohitkumar/composer/pkg/outbox"
 	"github.com/mohitkumar/composer/pkg/redisq"
+	redisstream "github.com/mohitkumar/composer/pkg/stream/redis"
 	"github.com/mohitkumar/composer/pkg/template"
 	"github.com/mohitkumar/composer/pkg/util"
 	"github.com/rs/zerolog"
@@ -51,7 +52,7 @@ func NewCoordinator(config *Config, logger *zerolog.Logger) (*Coordinator, error
 	// Create outbox enqueuer
 	outboxEnqueuer := outbox.NewOutboxEnqueuer(outbox.EnqueuerConfig{
 		DB:           dbPool,
-		Redis:        redisStream,
+		Publisher:    redisstream.NewPublisher(redisStream),
 		Logger:       *logger,
 		BatchSize:    config.OutboxConfig.BatchSize,
 		Concurrency:  config.OutboxConfig.Concurrency,

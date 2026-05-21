@@ -7,35 +7,33 @@ import (
 	"sync"
 	"time"
 
-	"github.com/redis/go-redis/v9"
+	"github.com/mohitkumar/composer/pkg/stream"
 	"github.com/rs/zerolog"
 )
 
-// Worker processes tasks from Redis stream & reports results via gRPC
+// Worker processes tasks from a stream and reports results via gRPC.
 type Worker struct {
 	cfg           WorkerConfig
 	router        *Router
 	coordClient   *CoordinatorClient
-	langClient    *LangClient        // Legacy single client (for backward compatibility)
-	langClientMgr *LangClientManager // New multi-client manager
+	langClientMgr *LangClientManager
 }
 
-// TaskMessage is the fields we expect in Redis stream message
+// TaskMessage is the fields we expect in each stream message.
 type TaskMessage struct {
-	TaskID   string          `json:"task_id"` // task_instance id
+	TaskID   string          `json:"task_id"`
 	RunID    string          `json:"run_id"`
 	NodeID   string          `json:"node_id"`
-	NodeType string          `json:"node_type"` // e.g., "http", "python", "js"
+	NodeType string          `json:"node_type"` // e.g. "http", "python", "js"
 	Input    json.RawMessage `json:"input"`
 }
 
-// NewWorker creates a new worker instance
+// NewWorker creates a new Worker.
 func NewWorker(cfg WorkerConfig) (*Worker, error) {
 	if cfg.Logger.GetLevel() == zerolog.NoLevel {
 		cfg.Logger = zerolog.New(nil).Level(zerolog.InfoLevel)
 	}
 
-	// Create language client manager if addresses provided
 	var langClientMgr *LangClientManager
 	var err error
 
@@ -44,7 +42,6 @@ func NewWorker(cfg WorkerConfig) (*Worker, error) {
 		if err != nil {
 			return nil, fmt.Errorf("failed to create language client manager: %w", err)
 		}
-		// Extract runtime names for logging
 		runtimeNames := make([]string, 0, len(cfg.LangWorkerAddrs))
 		for runtime := range cfg.LangWorkerAddrs {
 			runtimeNames = append(runtimeNames, runtime)
@@ -54,13 +51,11 @@ func NewWorker(cfg WorkerConfig) (*Worker, error) {
 			Msg("language client manager created with multiple runtimes")
 	}
 
-	// Create coordinator client
 	coordClient, err := NewCoordinatorClient(cfg.CoordinatorAddr, cfg.Logger)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create coordinator client: %w", err)
 	}
 
-	// Create router
 	router := NewRouter(langClientMgr, cfg.Logger)
 
 	return &Worker{
@@ -71,7 +66,7 @@ func NewWorker(cfg WorkerConfig) (*Worker, error) {
 	}, nil
 }
 
-// Close closes all connections
+// Close releases all connections.
 func (w *Worker) Close() error {
 	var errs []error
 	if w.coordClient != nil {
@@ -90,27 +85,19 @@ func (w *Worker) Close() error {
 	return nil
 }
 
-// EnsureConsumerGroup creates the consumer group if not exists
+// EnsureConsumerGroup delegates to the stream consumer's Setup method.
+// Idempotent — safe to call on every startup.
 func (w *Worker) EnsureConsumerGroup(ctx context.Context) error {
-	err := w.cfg.Redis.XGroupCreateMkStream(ctx, w.cfg.StreamName, w.cfg.ConsumerGroup, "0")
-	if err != nil {
-		// Ignore BUSYGROUP error (group already exists)
-		if err.Error() != "BUSYGROUP Consumer Group name already exists" {
-			w.cfg.Logger.Debug().Err(err).Msg("xgroup create maybe exists")
-		}
-	}
-	return nil
+	return w.cfg.Stream.Setup(ctx)
 }
 
-// Run starts the worker loop: reads new messages and reclaims orphaned pending messages.
+// Run starts the worker loop: reads new messages and reclaims orphaned pending
+// messages in parallel.
 func (w *Worker) Run(ctx context.Context) {
 	w.cfg.Logger.Info().
-		Str("stream", w.cfg.StreamName).
-		Str("group", w.cfg.ConsumerGroup).
 		Str("consumer", w.cfg.ConsumerName).
 		Msg("starting worker")
 
-	// Start the pending message recovery loop in a separate goroutine
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
@@ -118,7 +105,6 @@ func (w *Worker) Run(ctx context.Context) {
 		w.reclaimPendingLoop(ctx)
 	}()
 
-	// Main loop: read new messages
 	for {
 		select {
 		case <-ctx.Done():
@@ -128,43 +114,25 @@ func (w *Worker) Run(ctx context.Context) {
 		default:
 		}
 
-		// XREADGROUP BLOCK for new messages
-		args := &redis.XReadGroupArgs{
-			Group:    w.cfg.ConsumerGroup,
-			Consumer: w.cfg.ConsumerName,
-			Streams:  []string{w.cfg.StreamName, ">"},
-			Count:    1,
-			Block:    5 * time.Second,
-		}
-
-		res, err := w.cfg.Redis.XReadGroup(ctx, args)
+		msgs, err := w.cfg.Stream.ReadNew(ctx)
 		if err != nil {
-			if err == redis.Nil {
-				continue
-			}
-			w.cfg.Logger.Error().Err(err).Msg("xreadgroup failed")
+			w.cfg.Logger.Error().Err(err).Msg("read new messages failed")
 			time.Sleep(1 * time.Second)
 			continue
 		}
-
-		// Process each stream result
-		for _, streamRes := range res {
-			for _, msg := range streamRes.Messages {
-				w.handleMessage(ctx, msg)
-			}
+		for _, msg := range msgs {
+			w.handleMessage(ctx, msg)
 		}
 	}
 }
 
-// reclaimPendingLoop periodically reclaims messages that have been pending too long
-// (e.g., from crashed workers). Uses XAUTOCLAIM to atomically claim orphaned messages.
+// reclaimPendingLoop periodically reclaims messages that have been pending too
+// long (e.g. from crashed workers).
 func (w *Worker) reclaimPendingLoop(ctx context.Context) {
-	// Reclaim interval: check every lease TTL / 2
 	reclaimInterval := time.Duration(w.cfg.LeaseTTLSeconds/2) * time.Second
 	if reclaimInterval < 10*time.Second {
 		reclaimInterval = 10 * time.Second
 	}
-	// Messages idle longer than the lease TTL are considered orphaned
 	minIdleTime := time.Duration(w.cfg.LeaseTTLSeconds) * time.Second
 
 	ticker := time.NewTicker(reclaimInterval)
@@ -185,56 +153,91 @@ func (w *Worker) reclaimPendingLoop(ctx context.Context) {
 	}
 }
 
-// reclaimPendingMessages uses XAUTOCLAIM to take ownership of messages that have been
-// pending longer than minIdleTime (orphaned by crashed/slow workers).
+// reclaimPendingMessages reclaims orphaned messages and enforces the DLQ limit.
+// Messages whose DeliveryCount exceeds MaxDeliveries are dead-lettered instead
+// of being reprocessed.
 func (w *Worker) reclaimPendingMessages(ctx context.Context, minIdleTime time.Duration) {
-	args := &redis.XAutoClaimArgs{
-		Stream:   w.cfg.StreamName,
-		Group:    w.cfg.ConsumerGroup,
-		Consumer: w.cfg.ConsumerName,
-		MinIdle:  minIdleTime,
-		Start:    "0-0",
-		Count:    10,
-	}
-
-	msgs, _, err := w.cfg.Redis.XAutoClaim(ctx, args)
+	msgs, err := w.cfg.Stream.ReclaimOrphaned(ctx, minIdleTime)
 	if err != nil {
-		w.cfg.Logger.Error().Err(err).Msg("xautoclaim failed")
+		w.cfg.Logger.Error().Err(err).Msg("reclaim orphaned messages failed")
 		return
 	}
-
 	if len(msgs) > 0 {
 		w.cfg.Logger.Info().Int("reclaimed", len(msgs)).Msg("reclaimed orphaned pending messages")
 	}
 
+	maxDeliveries := w.cfg.MaxDeliveries
+	if maxDeliveries <= 0 {
+		maxDeliveries = 5
+	}
+
 	for _, msg := range msgs {
+		if msg.DeliveryCount > maxDeliveries {
+			w.deadLetter(ctx, msg, maxDeliveries)
+			continue
+		}
 		w.handleMessage(ctx, msg)
 	}
 }
 
-// handleMessage parses and processes a single Redis stream message.
-func (w *Worker) handleMessage(ctx context.Context, msg redis.XMessage) {
+// deadLetter reports a message as permanently failed to the coordinator and
+// removes it from the stream so it is never redelivered.
+// If ReportTaskResult fails the message is not acked so the next reclaim cycle
+// will retry the DLQ report.
+func (w *Worker) deadLetter(ctx context.Context, msg stream.Message, maxDeliveries int64) {
 	taskMsg, err := parseTaskMessage(msg.Values)
 	if err != nil {
-		w.cfg.Logger.Error().Err(err).Msg("invalid task message; ack and continue")
-		_, _ = w.cfg.Redis.XAck(ctx, w.cfg.StreamName, w.cfg.ConsumerGroup, msg.ID)
+		w.cfg.Logger.Error().
+			Err(err).
+			Str("msg_id", msg.ID).
+			Int64("delivery_count", msg.DeliveryCount).
+			Msg("dead-letter: unparseable message payload, discarding")
+		_ = w.cfg.Stream.Ack(ctx, msg.ID)
 		return
 	}
 
-	// Process with timeout (default 90 seconds)
+	w.cfg.Logger.Error().
+		Str("msg_id", msg.ID).
+		Str("task_id", taskMsg.TaskID).
+		Int64("delivery_count", msg.DeliveryCount).
+		Int64("max_deliveries", maxDeliveries).
+		Msg("dead-lettering task: exceeded max delivery attempts")
+
+	errStr := fmt.Sprintf("task exceeded max delivery attempts (%d)", maxDeliveries)
+	if reportErr := w.coordClient.ReportTaskResult(
+		ctx, taskMsg.TaskID, taskMsg.RunID, taskMsg.NodeID, nil, &errStr,
+	); reportErr != nil {
+		w.cfg.Logger.Error().
+			Err(reportErr).
+			Str("task_id", taskMsg.TaskID).
+			Msg("failed to report dead-lettered task; will retry on next reclaim cycle")
+		return // do not ack — retry DLQ report next cycle
+	}
+
+	_ = w.cfg.Stream.Ack(ctx, msg.ID)
+}
+
+// handleMessage parses and processes a single message.
+func (w *Worker) handleMessage(ctx context.Context, msg stream.Message) {
+	taskMsg, err := parseTaskMessage(msg.Values)
+	if err != nil {
+		w.cfg.Logger.Error().Err(err).Msg("invalid task message; acking and discarding")
+		_ = w.cfg.Stream.Ack(ctx, msg.ID)
+		return
+	}
+
 	processCtx, cancel := context.WithTimeout(ctx, 90*time.Second)
 	defer cancel()
 
-	if err := w.processMessage(processCtx, &taskMsg, msg.ID); err != nil {
+	if err := w.processMessage(processCtx, &taskMsg); err != nil {
 		w.cfg.Logger.Error().Err(err).Str("task", taskMsg.TaskID).Msg("task processing failed")
-		// Do NOT ack; will be retried via XAUTOCLAIM
+		// Do NOT ack — will be retried via reclaim.
 	} else {
-		// Ack message after successful processing
-		_, _ = w.cfg.Redis.XAck(ctx, w.cfg.StreamName, w.cfg.ConsumerGroup, msg.ID)
+		_ = w.cfg.Stream.Ack(ctx, msg.ID)
 	}
 }
 
-func parseTaskMessage(values map[string]interface{}) (TaskMessage, error) {
+func parseTaskMessage(values map[string]any) (TaskMessage, error) {
 	var t TaskMessage
 	get := func(k string) (string, bool) {
 		v, ok := values[k]
@@ -269,7 +272,7 @@ func parseTaskMessage(values map[string]interface{}) (TaskMessage, error) {
 	if s, ok := get("node_type"); ok {
 		t.NodeType = s
 	} else {
-		t.NodeType = "http" // default
+		t.NodeType = "http"
 	}
 	if s, ok := get("input"); ok {
 		t.Input = json.RawMessage(s)
@@ -277,7 +280,7 @@ func parseTaskMessage(values map[string]interface{}) (TaskMessage, error) {
 	return t, nil
 }
 
-func (w *Worker) processMessage(ctx context.Context, msg *TaskMessage, msgID string) error {
+func (w *Worker) processMessage(ctx context.Context, msg *TaskMessage) error {
 	logger := w.cfg.Logger.With().
 		Str("task", msg.TaskID).
 		Str("node", msg.NodeID).
@@ -293,16 +296,12 @@ func (w *Worker) processMessage(ctx context.Context, msg *TaskMessage, msgID str
 	}
 	if !acquired {
 		logger.Warn().Msg("task lease not acquired (already running or completed), acking message")
-		// Task is already owned or finished; ack so it doesn't keep getting reclaimed
 		return nil
 	}
 
-	// Start lease renewal goroutine — renews every TTL/3 to prevent expiry during execution
 	leaseCtx2, stopRenewal := context.WithCancel(ctx)
 	go w.renewLeaseLoop(leaseCtx2, msg.TaskID, logger)
 
-	// Execute the task using router
-	var execOutput json.RawMessage
 	var execErr *string
 	start := time.Now()
 
@@ -312,7 +311,6 @@ func (w *Worker) processMessage(ctx context.Context, msg *TaskMessage, msgID str
 		execErr = &errStr
 	}
 
-	// Stop lease renewal before reporting result
 	stopRenewal()
 
 	duration := time.Since(start)
@@ -321,7 +319,6 @@ func (w *Worker) processMessage(ctx context.Context, msg *TaskMessage, msgID str
 		Bool("success", execErr == nil).
 		Msg("task executed")
 
-	// Report completion to coordinator via gRPC
 	if err := w.coordClient.ReportTaskResult(ctx, msg.TaskID, msg.RunID, msg.NodeID, execOutput, execErr); err != nil {
 		logger.Error().Err(err).Msg("failed to report task result to coordinator")
 		return fmt.Errorf("failed to report result: %w", err)
@@ -332,7 +329,6 @@ func (w *Worker) processMessage(ctx context.Context, msg *TaskMessage, msgID str
 }
 
 // renewLeaseLoop periodically renews the task lease until ctx is canceled.
-// Renews every TTL/3 to ensure the lease doesn't expire during task execution.
 func (w *Worker) renewLeaseLoop(ctx context.Context, taskID string, logger zerolog.Logger) {
 	renewInterval := time.Duration(w.cfg.LeaseTTLSeconds/3) * time.Second
 	if renewInterval < 5*time.Second {

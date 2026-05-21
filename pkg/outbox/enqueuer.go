@@ -261,7 +261,7 @@ func (o *OutboxEnqueuer) processRow(ctx context.Context, r outboxRow) error {
 		stream = "workflow.tasks"
 	}
 
-	_, err := o.cfg.Redis.XAdd(ctx, stream, payloadMap)
+	err := o.cfg.Publisher.Publish(ctx, stream, payloadMap)
 	if err == nil {
 		// Successfully sent — delete the outbox row to prevent table bloat
 		_, uerr := o.cfg.DB.Exec(ctx, `DELETE FROM outbox WHERE id=$1`, r.ID)
