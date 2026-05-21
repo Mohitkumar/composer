@@ -32,7 +32,7 @@ type WorkflowRepository interface {
 	// Task Instance operations
 	InsertTaskInstance(ctx context.Context, tx pgx.Tx, taskID, runID string, node *model.Node, taskInput json.RawMessage, scheduledAt time.Time, logger zerolog.Logger, span trace.Span) error
 	InsertTaskInstanceWithState(ctx context.Context, tx pgx.Tx, taskID, runID string, node *model.Node, taskInput json.RawMessage, scheduledAt time.Time, state string, errorMsg string, logger zerolog.Logger, span trace.Span) error
-	MarkTaskCompleted(ctx context.Context, tx pgx.Tx, runID, nodeID string, output json.RawMessage, logger zerolog.Logger, span trace.Span) (bool, error)
+	MarkTaskCompleted(ctx context.Context, tx pgx.Tx, runID, nodeID string, output json.RawMessage, logger zerolog.Logger, span trace.Span) (updated bool, taskID string, nodeType string, startedAt time.Time, err error)
 	MarkTaskFailed(ctx context.Context, tx pgx.Tx, runID, nodeID, errorMsg string, logger zerolog.Logger, span trace.Span) (bool, error)
 	TaskInstanceExists(ctx context.Context, tx pgx.Tx, runID, nodeID string) (bool, string, string, error)
 	GetTaskInstanceInfo(ctx context.Context, tx pgx.Tx, runID, nodeID string) (taskID string, nodeType string, taskStartTime time.Time, err error)
@@ -43,6 +43,9 @@ type WorkflowRepository interface {
 
 	// Parallel execution operations
 	CheckParallelBranchesComplete(ctx context.Context, tx pgx.Tx, runID string, branchNodeIDs []string) (completedCount, totalCount int, err error)
+	// CountCompletedBranches counts completed branch nodes inside a transaction.
+	// FOR UPDATE serializes concurrent join checks so only one goroutine proceeds.
+	CountCompletedBranches(ctx context.Context, tx pgx.Tx, runID string, branchNodeIDs []string) (int, error)
 
 	// Workflow run status operations
 	GetWorkflowRunStatus(ctx context.Context, tx pgx.Tx, runID string) (status string, err error)
@@ -50,6 +53,11 @@ type WorkflowRepository interface {
 	UpdateWorkflowRunStatus(ctx context.Context, tx pgx.Tx, runID string, status string, workflowVersion int) error
 	UpdateWorkflowInput(ctx context.Context, tx pgx.Tx, runID string, input json.RawMessage) error
 	DeleteTaskInstances(ctx context.Context, tx pgx.Tx, runID string, nodeIDs []string, logger zerolog.Logger, span trace.Span) error
+
+	// RecoverOrphanedTasks is called on startup to re-queue tasks orphaned by a coordinator crash.
+	// It resets RUNNING tasks with expired leases to PENDING, then creates missing outbox entries
+	// for any PENDING task that has no active outbox row.
+	RecoverOrphanedTasks(ctx context.Context, logger zerolog.Logger) error
 }
 
 // workflowRepository implements WorkflowRepository
@@ -162,30 +170,60 @@ func (r *workflowRepository) UpdateRunContext(ctx context.Context, tx pgx.Tx, ru
 	return nil
 }
 
-// LoadAndUpdateRunContext loads and updates the run context with a new node output
+// LoadAndUpdateRunContext atomically merges the completed node's output into
+// the run context using a single SQL UPDATE with jsonb_set, avoiding the
+// SELECT FOR UPDATE + read-modify-write pattern that caused deadlocks when
+// multiple branch nodes completed concurrently for the same run.
+//
+// Each branch appends its own key under context_json->'tasks' independently;
+// because the update is a single statement there is no lost-update race and
+// no workflow_runs row lock is held while task_instances locks are held.
 func (r *workflowRepository) LoadAndUpdateRunContext(ctx context.Context, tx pgx.Tx, runID, nodeID string, output json.RawMessage, logger zerolog.Logger, span trace.Span) (*model.RunContext, error) {
-	var workflowInput json.RawMessage
-	var runContextJSON json.RawMessage
-	if err := tx.QueryRow(ctx, `SELECT input_json, context_json FROM workflow_runs WHERE id=$1 FOR UPDATE`, runID).
-		Scan(&workflowInput, &runContextJSON); err != nil {
-		logger.Error().Err(err).Msg("failed to load workflow run context")
-		util.RecordError(span, err)
-		return nil, fmt.Errorf("failed to load workflow run context: %w", err)
+	stepResult := &model.StepResult{
+		Status: model.TaskInstanceStatusCompleted,
+		Output: output,
+	}
+	stepResultJSON, err := json.Marshal(stepResult)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal step result: %w", err)
 	}
 
-	runContext, err := r.coord.mergeRunContext(workflowInput, runContextJSON)
+	// Atomically set context_json['tasks'][nodeID] = stepResult.
+	// COALESCE handles a NULL context_json on the very first update.
+	// The || operator merges into the existing tasks map without touching
+	// any other top-level keys (input, config, …).
+	// RETURNING gives back the fully-merged context so the caller can build
+	// the in-memory RunContext for DAG routing — no second read needed.
+	var workflowInput json.RawMessage
+	var updatedContextJSON json.RawMessage
+	err = tx.QueryRow(ctx, `
+		UPDATE workflow_runs
+		SET
+			context_json = jsonb_set(
+				COALESCE(context_json, '{}'::jsonb),
+				'{tasks}',
+				COALESCE(context_json->'tasks', '{}'::jsonb) ||
+				jsonb_build_object($1::text, $2::jsonb)
+			),
+			updated_at = now()
+		WHERE id = $3
+		RETURNING input_json, context_json`,
+		nodeID, stepResultJSON, runID,
+	).Scan(&workflowInput, &updatedContextJSON)
+	if err != nil {
+		logger.Error().Err(err).Msg("failed to update workflow run context")
+		util.RecordError(span, err)
+		return nil, fmt.Errorf("failed to update workflow run context: %w", err)
+	}
+
+	runContext, err := r.coord.mergeRunContext(workflowInput, updatedContextJSON)
 	if err != nil {
 		logger.Error().Err(err).Msg("failed to merge run context")
 		util.RecordError(span, err)
 		return nil, err
 	}
 
-	runContext.Tasks[nodeID] = &model.StepResult{
-		Status: model.TaskInstanceStatusCompleted,
-		Output: output,
-	}
-
-	return runContext, r.UpdateRunContext(ctx, tx, runID, runContext, logger, span)
+	return runContext, nil
 }
 
 // MarkWorkflowCompleted marks a workflow as completed
@@ -319,26 +357,31 @@ func (r *workflowRepository) InsertTaskInstanceWithState(ctx context.Context, tx
 	return nil
 }
 
-// MarkTaskCompleted marks a task instance as completed
-func (r *workflowRepository) MarkTaskCompleted(ctx context.Context, tx pgx.Tx, runID, nodeID string, output json.RawMessage, logger zerolog.Logger, span trace.Span) (bool, error) {
-	result, err := tx.Exec(ctx,
-		`UPDATE task_instances 
+// MarkTaskCompleted marks a task instance as completed and returns its identity
+// and start time for duration measurement. startedAt will be zero if the task
+// was never started (e.g. control nodes persisted directly as COMPLETED).
+func (r *workflowRepository) MarkTaskCompleted(ctx context.Context, tx pgx.Tx, runID, nodeID string, output json.RawMessage, logger zerolog.Logger, span trace.Span) (updated bool, taskID string, nodeType string, startedAt time.Time, err error) {
+	var rawStartedAt sql.NullTime
+	err = tx.QueryRow(ctx,
+		`UPDATE task_instances
              SET state='COMPLETED',
                  output_json=$1::jsonb,
                  completed_at=now(),
-                 updated_at=now() 
-         WHERE run_id=$2 AND node_id=$3 AND state IN ('RUNNING', 'PENDING')`,
-		output, runID, nodeID)
+                 updated_at=now()
+         WHERE run_id=$2 AND node_id=$3 AND state IN ('RUNNING', 'PENDING')
+         RETURNING id, node_type, started_at`,
+		output, runID, nodeID).Scan(&taskID, &nodeType, &rawStartedAt)
+	if err == pgx.ErrNoRows {
+		return false, "", "", time.Time{}, nil
+	}
 	if err != nil {
-		return false, fmt.Errorf("failed to update task instance: %w", err)
+		return false, "", "", time.Time{}, fmt.Errorf("failed to update task instance: %w", err)
 	}
-
-	rowsAffected := result.RowsAffected()
-	if rowsAffected == 0 {
-		return false, nil
+	logger.Debug().Int64("rows_updated", 1).Msg("marked task completed")
+	if rawStartedAt.Valid {
+		startedAt = rawStartedAt.Time
 	}
-	logger.Debug().Int64("rows_updated", rowsAffected).Msg("marked task completed")
-	return true, nil
+	return true, taskID, nodeType, startedAt, nil
 }
 
 // MarkTaskFailed marks a task instance as failed
@@ -448,14 +491,38 @@ func (r *workflowRepository) CheckParallelBranchesComplete(ctx context.Context, 
 		`SELECT
 			COUNT(*) FILTER (WHERE state IN ('COMPLETED', 'SUCCEEDED')) as completed_count,
 			COUNT(*) as total_count
-		FROM task_instances
-		WHERE run_id = $1 AND node_id = ANY($2)
-		FOR UPDATE`,
+		FROM (
+			SELECT id, state FROM task_instances
+			WHERE run_id = $1 AND node_id = ANY($2)
+			FOR UPDATE
+		) locked`,
 		runID, branchNodeIDs).Scan(&completedCount, &totalCount)
 	if err != nil {
 		return 0, 0, fmt.Errorf("failed to check parallel branch status: %w", err)
 	}
 	return completedCount, totalCount, nil
+}
+
+// CountCompletedBranches counts how many of the given branch nodes are in a completed state.
+// Uses FOR UPDATE to serialize concurrent join checks for the same run.
+// ORDER BY id guarantees that every concurrent caller acquires the sibling row
+// locks in the same order, preventing deadlocks when multiple branches
+// complete simultaneously.
+func (r *workflowRepository) CountCompletedBranches(ctx context.Context, tx pgx.Tx, runID string, branchNodeIDs []string) (int, error) {
+	var count int
+	err := tx.QueryRow(ctx,
+		`SELECT COUNT(*) FILTER (WHERE state IN ('COMPLETED', 'SUCCEEDED'))
+		 FROM (
+			SELECT id, state FROM task_instances
+			WHERE run_id = $1 AND node_id = ANY($2)
+			ORDER BY id
+			FOR UPDATE
+		 ) locked`,
+		runID, branchNodeIDs).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("failed to count completed branches: %w", err)
+	}
+	return count, nil
 }
 
 // GetWorkflowRunStatus gets the current status of a workflow run
@@ -522,5 +589,93 @@ func (r *workflowRepository) DeleteTaskInstances(ctx context.Context, tx pgx.Tx,
 		util.RecordError(span, err)
 		return fmt.Errorf("failed to delete task instances: %w", err)
 	}
+	return nil
+}
+
+// RecoverOrphanedTasks resets expired RUNNING tasks to PENDING and creates outbox entries for
+// any PENDING task that has no active outbox row. Called once on coordinator startup.
+func (r *workflowRepository) RecoverOrphanedTasks(ctx context.Context, logger zerolog.Logger) error {
+	// Step 1: Reset RUNNING tasks with expired leases back to PENDING.
+	// These belong to workers that died or a previous coordinator crash.
+	result, err := r.db.Exec(ctx,
+		`UPDATE task_instances
+		 SET state='PENDING', lease_owner=NULL, lease_expires_at=NULL, started_at=NULL, updated_at=NOW()
+		 WHERE state='RUNNING' AND (lease_expires_at IS NULL OR lease_expires_at < NOW())`)
+	if err != nil {
+		return fmt.Errorf("failed to reset expired running tasks: %w", err)
+	}
+	if n := result.RowsAffected(); n > 0 {
+		logger.Warn().Int64("count", n).Msg("reset expired RUNNING tasks to PENDING for recovery")
+	}
+
+	// Step 2: Find PENDING tasks whose outbox entry was never created or was already consumed
+	// (coordinator crashed between task creation and outbox insert — they're in the same tx,
+	// so this mainly covers reset tasks from step 1 above).
+	rows, err := r.db.Query(ctx,
+		`SELECT ti.id, ti.run_id, ti.node_id, ti.node_type, ti.input_json
+		 FROM task_instances ti
+		 WHERE ti.state = 'PENDING'
+		 AND NOT EXISTS (
+			 SELECT 1 FROM outbox o
+			 WHERE o.payload->>'task_id' = ti.id
+			   AND o.status IN ('PENDING','RETRY','IN_FLIGHT')
+		 )`)
+	if err != nil {
+		return fmt.Errorf("failed to query orphaned pending tasks: %w", err)
+	}
+	defer rows.Close()
+
+	type orphanRow struct {
+		taskID   string
+		runID    string
+		nodeID   string
+		nodeType string
+		input    json.RawMessage
+	}
+
+	var orphans []orphanRow
+	for rows.Next() {
+		var o orphanRow
+		if err := rows.Scan(&o.taskID, &o.runID, &o.nodeID, &o.nodeType, &o.input); err != nil {
+			return fmt.Errorf("failed to scan orphaned task row: %w", err)
+		}
+		orphans = append(orphans, o)
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("error iterating orphaned tasks: %w", err)
+	}
+
+	if len(orphans) == 0 {
+		logger.Info().Msg("startup recovery: no orphaned tasks found")
+		return nil
+	}
+
+	logger.Warn().Int("count", len(orphans)).Msg("startup recovery: re-queuing orphaned tasks")
+
+	for _, o := range orphans {
+		payload := map[string]interface{}{
+			"task_id":   o.taskID,
+			"run_id":    o.runID,
+			"node_id":   o.nodeID,
+			"node_type": o.nodeType,
+			"input":     string(o.input),
+		}
+		payloadBytes, err := json.Marshal(payload)
+		if err != nil {
+			logger.Error().Err(err).Str("task_id", o.taskID).Msg("recovery: failed to marshal outbox payload")
+			continue
+		}
+		outboxID := uuid.New().String()
+		_, err = r.db.Exec(ctx,
+			`INSERT INTO outbox (id, stream, payload, type, status, next_attempt_at, attempt_count, max_retries, created_at, updated_at)
+			 VALUES ($1,'workflow.tasks',$2::jsonb,'TASK_EXECUTION','PENDING',NOW(),0,5,NOW(),NOW())`,
+			outboxID, payloadBytes)
+		if err != nil {
+			logger.Error().Err(err).Str("task_id", o.taskID).Msg("recovery: failed to create outbox entry")
+			continue
+		}
+		logger.Info().Str("task_id", o.taskID).Str("run_id", o.runID).Str("node_id", o.nodeID).Msg("recovery: re-queued orphaned task")
+	}
+
 	return nil
 }

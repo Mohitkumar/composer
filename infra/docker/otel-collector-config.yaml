@@ -15,21 +15,28 @@ processors:
     check_interval: 1s
 
 exporters:
-  # Export traces to Jaeger via OTLP (Jaeger accepts OTLP on port 4317)
-  otlp:
+  # Traces → Jaeger
+  otlp/jaeger:
     endpoint: jaeger:4317
     tls:
       insecure: true
 
-  # Debug exporter (logs to stdout)
-  debug:
-    verbosity: detailed
+  # Metrics → Prometheus scrape endpoint
+  prometheus:
+    endpoint: "0.0.0.0:8889"
+    namespace: composer
+    send_timestamps: true
+    metric_expiration: 3m
+    resource_to_telemetry_conversion:
+      enabled: true
 
 service:
   pipelines:
     traces:
       receivers: [otlp]
       processors: [memory_limiter, batch]
-      exporters: [otlp, debug]
-  extensions: []
-
+      exporters: [otlp/jaeger]
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [prometheus]

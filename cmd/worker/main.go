@@ -12,6 +12,7 @@ import (
 	"strconv"
 
 	"github.com/mohitkumar/composer/pkg/redisq"
+	redisstream "github.com/mohitkumar/composer/pkg/stream/redis"
 	"github.com/mohitkumar/composer/pkg/util"
 	"github.com/mohitkumar/composer/worker"
 	"github.com/rs/zerolog"
@@ -135,13 +136,18 @@ func main() {
 	}
 	defer redisStream.Close()
 
+	// Create Redis stream consumer
+	streamConsumer := redisstream.NewConsumer(redisstream.ConsumerConfig{
+		StreamName:    streamName,
+		ConsumerGroup: consumerGroup,
+		ConsumerName:  workerID,
+	}, redisStream, logger)
+
 	// Create worker
 	wcfg := worker.WorkerConfig{
-		Redis:           redisStream,
+		Stream:          streamConsumer,
 		CoordinatorAddr: coordAddr,
 		LangWorkerAddrs: langWorkerAddrs,
-		StreamName:      streamName,
-		ConsumerGroup:   consumerGroup,
 		ConsumerName:    workerID,
 		LeaseTTLSeconds: leaseTTLSeconds,
 		Logger:          logger,
@@ -168,6 +174,20 @@ func main() {
 	// Handle shutdown
 	sigc := make(chan os.Signal, 1)
 	signal.Notify(sigc, syscall.SIGINT, syscall.SIGTERM)
+
+	// Periodically sample process metrics (RSS, heap, goroutines)
+	go func() {
+		ticker := time.NewTicker(15 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				util.SampleProcessMetrics(ctx)
+			}
+		}
+	}()
 
 	// Run worker in goroutine
 	done := make(chan error, 1)

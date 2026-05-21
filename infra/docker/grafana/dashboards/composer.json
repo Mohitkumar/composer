@@ -1,0 +1,417 @@
+{
+  "title": "Composer Workflow Engine",
+  "uid": "composer-bench",
+  "schemaVersion": 38,
+  "version": 1,
+  "refresh": "15s",
+  "time": { "from": "now-30m", "to": "now" },
+  "timepicker": {},
+  "templating": { "list": [] },
+  "annotations": { "list": [] },
+  "panels": [
+    {
+      "type": "row",
+      "title": "Workflow Throughput",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "collapsed": false,
+      "id": 1
+    },
+    {
+      "type": "timeseries",
+      "title": "Workflows Started / Completed (per minute)",
+      "id": 2,
+      "gridPos": { "h": 7, "w": 12, "x": 0, "y": 1 },
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": { "unit": "short", "custom": { "lineWidth": 2 } },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" } },
+      "targets": [
+        {
+          "expr": "sum(rate(composer_workflow_started_total[1m])) * 60",
+          "legendFormat": "started/min",
+          "refId": "A"
+        },
+        {
+          "expr": "sum(rate(composer_workflow_completed_total[1m])) * 60",
+          "legendFormat": "completed/min",
+          "refId": "B"
+        },
+        {
+          "expr": "sum(rate(composer_workflow_failed_total[1m])) * 60",
+          "legendFormat": "failed/min",
+          "refId": "C"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Workflow Success Rate (%)",
+      "id": 3,
+      "gridPos": { "h": 7, "w": 12, "x": 12, "y": 1 },
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": { "unit": "percent", "min": 0, "max": 100, "custom": { "lineWidth": 2 } },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "100 * sum(rate(composer_workflow_completed_total[1m])) / (sum(rate(composer_workflow_completed_total[1m])) + sum(rate(composer_workflow_failed_total[1m])))",
+          "legendFormat": "success %",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "Workflow Latency",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 8 },
+      "collapsed": false,
+      "id": 10
+    },
+    {
+      "type": "timeseries",
+      "title": "Workflow Duration p50 / p75 / p99 (seconds)",
+      "id": 11,
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 9 },
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": { "unit": "s", "custom": { "lineWidth": 2 } },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" } },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum(rate(composer_workflow_duration_seconds_bucket[2m])) by (le))",
+          "legendFormat": "p50",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.75, sum(rate(composer_workflow_duration_seconds_bucket[2m])) by (le))",
+          "legendFormat": "p75",
+          "refId": "B"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum(rate(composer_workflow_duration_seconds_bucket[2m])) by (le))",
+          "legendFormat": "p99",
+          "refId": "C"
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "Task / Node Latency",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 17 },
+      "collapsed": false,
+      "id": 20
+    },
+    {
+      "type": "timeseries",
+      "title": "Task Duration p99 by Node Type (seconds)",
+      "id": 21,
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 18 },
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": { "unit": "s", "custom": { "lineWidth": 2 } },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" } },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.99, sum(rate(composer_task_duration_seconds_bucket[2m])) by (le, task_node_type))",
+          "legendFormat": "p99 {{task_node_type}}",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.50, sum(rate(composer_task_duration_seconds_bucket[2m])) by (le, task_node_type))",
+          "legendFormat": "p50 {{task_node_type}}",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Tasks Completed per Minute by Node Type",
+      "id": 22,
+      "gridPos": { "h": 7, "w": 24, "x": 0, "y": 26 },
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": { "unit": "short", "custom": { "lineWidth": 2 } },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" } },
+      "targets": [
+        {
+          "expr": "sum(rate(composer_task_completed_total[1m])) by (task_node_type) * 60",
+          "legendFormat": "{{task_node_type}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "System Health — Queue Depths",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 33 },
+      "collapsed": false,
+      "id": 30
+    },
+    {
+      "type": "timeseries",
+      "title": "Redis Task Stream Depth",
+      "id": 31,
+      "gridPos": { "h": 7, "w": 12, "x": 0, "y": 34 },
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": { "unit": "short", "custom": { "lineWidth": 2 }, "color": { "fixedColor": "orange", "mode": "fixed" } },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "composer_redis_stream_depth",
+          "legendFormat": "stream depth",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Outbox Backlog (PENDING + RETRY + IN_FLIGHT)",
+      "id": 32,
+      "gridPos": { "h": 7, "w": 12, "x": 12, "y": 34 },
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": { "unit": "short", "custom": { "lineWidth": 2 }, "color": { "fixedColor": "purple", "mode": "fixed" } },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "composer_outbox_backlog",
+          "legendFormat": "outbox backlog",
+          "refId": "A"
+        },
+        {
+          "expr": "composer_outbox_in_flight",
+          "legendFormat": "in-flight",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Outbox Throughput (processed / failed / DLQ per minute)",
+      "id": 33,
+      "gridPos": { "h": 7, "w": 24, "x": 0, "y": 41 },
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": { "unit": "short", "custom": { "lineWidth": 2 } },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" } },
+      "targets": [
+        {
+          "expr": "sum(rate(composer_outbox_processed_total[1m])) * 60",
+          "legendFormat": "processed/min",
+          "refId": "A"
+        },
+        {
+          "expr": "sum(rate(composer_outbox_failed_total[1m])) * 60",
+          "legendFormat": "failed/min",
+          "refId": "B"
+        },
+        {
+          "expr": "sum(rate(composer_outbox_dlq_total[1m])) * 60",
+          "legendFormat": "dlq/min",
+          "refId": "C"
+        }
+      ]
+    },
+
+    {
+      "type": "row",
+      "title": "System Health — Process Memory & Goroutines",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 48 },
+      "collapsed": false,
+      "id": 40
+    },
+    {
+      "type": "timeseries",
+      "title": "Process RSS Memory by Service",
+      "id": 41,
+      "gridPos": { "h": 7, "w": 12, "x": 0, "y": 49 },
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": { "unit": "bytes", "custom": { "lineWidth": 2 } },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" } },
+      "targets": [
+        {
+          "expr": "composer_process_rss_bytes",
+          "legendFormat": "{{service_name}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Go Heap In-Use by Service",
+      "id": 42,
+      "gridPos": { "h": 7, "w": 12, "x": 12, "y": 49 },
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": { "unit": "bytes", "custom": { "lineWidth": 2 } },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" } },
+      "targets": [
+        {
+          "expr": "composer_process_heap_inuse_bytes",
+          "legendFormat": "{{service_name}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Goroutines by Service",
+      "id": 43,
+      "gridPos": { "h": 7, "w": 12, "x": 0, "y": 56 },
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": { "unit": "short", "custom": { "lineWidth": 2 } },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" } },
+      "targets": [
+        {
+          "expr": "composer_process_goroutines",
+          "legendFormat": "{{service_name}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Redis Server Memory Used",
+      "id": 44,
+      "gridPos": { "h": 7, "w": 12, "x": 12, "y": 56 },
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": { "unit": "bytes", "color": { "fixedColor": "red", "mode": "fixed" }, "custom": { "lineWidth": 2 } },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "composer_redis_memory_used_bytes",
+          "legendFormat": "redis used_memory",
+          "refId": "A"
+        }
+      ]
+    },
+
+    {
+      "type": "row",
+      "title": "System Health — DB Connection Pool",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 63 },
+      "collapsed": false,
+      "id": 50
+    },
+    {
+      "type": "timeseries",
+      "title": "DB Pool Connections",
+      "id": 51,
+      "gridPos": { "h": 7, "w": 12, "x": 0, "y": 64 },
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": { "unit": "short", "custom": { "lineWidth": 2 } },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" } },
+      "targets": [
+        {
+          "expr": "composer_db_pool_acquired",
+          "legendFormat": "acquired",
+          "refId": "A"
+        },
+        {
+          "expr": "composer_db_pool_idle",
+          "legendFormat": "idle",
+          "refId": "B"
+        },
+        {
+          "expr": "composer_db_pool_total",
+          "legendFormat": "total",
+          "refId": "C"
+        },
+        {
+          "expr": "composer_db_pool_max",
+          "legendFormat": "max (config)",
+          "refId": "D"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "DB Pool Empty-Acquire Count (cumulative waits for free connection)",
+      "id": 52,
+      "gridPos": { "h": 7, "w": 12, "x": 12, "y": 64 },
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": { "unit": "short", "color": { "fixedColor": "orange", "mode": "fixed" }, "custom": { "lineWidth": 2 } },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "composer_db_pool_wait_count",
+          "legendFormat": "empty-acquire waits",
+          "refId": "A"
+        }
+      ]
+    },
+
+    {
+      "type": "row",
+      "title": "Workflow DAG Cache",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 71 },
+      "collapsed": false,
+      "id": 60
+    },
+    {
+      "type": "timeseries",
+      "title": "Workflow Cache Size (entries)",
+      "id": 61,
+      "gridPos": { "h": 7, "w": 12, "x": 0, "y": 72 },
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": { "unit": "short", "custom": { "lineWidth": 2 } },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "composer_wf_cache_size",
+          "legendFormat": "cached DAGs",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Workflow Cache Hit Rate",
+      "id": 62,
+      "gridPos": { "h": 7, "w": 12, "x": 12, "y": 72 },
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": { "unit": "percentunit", "min": 0, "max": 1, "custom": { "lineWidth": 2 } },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "rate(composer_wf_cache_hits_total[2m]) / (rate(composer_wf_cache_hits_total[2m]) + rate(composer_wf_cache_misses_total[2m]))",
+          "legendFormat": "hit rate",
+          "refId": "A"
+        }
+      ]
+    }
+  ]
+}

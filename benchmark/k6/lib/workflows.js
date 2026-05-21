@@ -255,12 +255,97 @@ edges:
     to: process
 `;
 
+/**
+ * WORKFLOW 6: python-code
+ * Single Python CODE node — adds two numbers from the input.
+ * Purpose: baseline for Python language worker overhead vs pure HTTP.
+ * Expected duration: ~50–100ms (Python startup + gRPC round trip)
+ */
+const PYTHON_CODE_SPEC = `
+nodes:
+  - node_id: compute
+    name: Python Compute
+    type: CODE
+    runtime: python
+    spec:
+      code: |
+        def handler(input):
+            import json
+            data = json.loads(input) if isinstance(input, str) else input
+            a = data.get("a", 10)
+            b = data.get("b", 20)
+            return {"sum": a + b, "product": a * b, "runtime": "python"}
+      input: '{"a": 7, "b": 13}'
+      timeout: 30
+edges: []
+`;
+
+/**
+ * WORKFLOW 7: js-code
+ * Single JavaScript CODE node — same computation as the Python node.
+ * Purpose: baseline for JS language worker overhead and runtime comparison.
+ * Expected duration: ~30–80ms
+ */
+const JS_CODE_SPEC = `
+nodes:
+  - node_id: compute
+    name: JS Compute
+    type: CODE
+    runtime: js
+    spec:
+      code: |
+        function handler(input) {
+          const data = typeof input === 'string' ? JSON.parse(input) : input;
+          const a = data.a || 10;
+          const b = data.b || 20;
+          return { sum: a + b, product: a * b, runtime: 'js' };
+        }
+      input: '{"a": 7, "b": 13}'
+      timeout: 30
+edges: []
+`;
+
+/**
+ * WORKFLOW 8: python-http-chain
+ * Python CODE node → HTTP POST (passes Python output to mock server).
+ * Purpose: exercises the full CODE → HTTP pipeline with context propagation.
+ */
+const PYTHON_HTTP_CHAIN_SPEC = `
+nodes:
+  - node_id: py_transform
+    name: Python Transform
+    type: CODE
+    runtime: python
+    spec:
+      code: |
+        def handler(input):
+            import json
+            data = json.loads(input) if isinstance(input, str) else input
+            return {"value": 100, "transformed_by": "python", "original": data}
+      input: '{"seed": 42}'
+      timeout: 30
+  - node_id: http_notify
+    name: HTTP Notify
+    type: HTTP
+    spec:
+      url: "${MOCK_URL}/api/notify"
+      method: POST
+      body: "{{tasks.py_transform.output}}"
+      timeout_seconds: 10
+edges:
+  - from: py_transform
+    to: http_notify
+`;
+
 export const WORKFLOW_DEFINITIONS = [
-  { id: 'bench-http-simple',   name: 'Bench HTTP Simple',   spec: HTTP_SIMPLE_SPEC   },
-  { id: 'bench-http-chain',    name: 'Bench HTTP Chain',    spec: HTTP_CHAIN_SPEC    },
-  { id: 'bench-switch-branch', name: 'Bench Switch Branch', spec: SWITCH_BRANCH_SPEC },
-  { id: 'bench-fork-join',     name: 'Bench Fork Join',     spec: FORK_JOIN_SPEC     },
-  { id: 'bench-mixed',         name: 'Bench Mixed',         spec: MIXED_SPEC         },
+  { id: 'bench-http-simple',      name: 'Bench HTTP Simple',      spec: HTTP_SIMPLE_SPEC      },
+  { id: 'bench-http-chain',       name: 'Bench HTTP Chain',       spec: HTTP_CHAIN_SPEC       },
+  { id: 'bench-switch-branch',    name: 'Bench Switch Branch',    spec: SWITCH_BRANCH_SPEC    },
+  { id: 'bench-fork-join',        name: 'Bench Fork Join',        spec: FORK_JOIN_SPEC        },
+  { id: 'bench-mixed',            name: 'Bench Mixed',            spec: MIXED_SPEC            },
+  { id: 'bench-python-code',      name: 'Bench Python Code',      spec: PYTHON_CODE_SPEC      },
+  { id: 'bench-js-code',          name: 'Bench JS Code',          spec: JS_CODE_SPEC          },
+  { id: 'bench-python-http-chain',name: 'Bench Python HTTP Chain',spec: PYTHON_HTTP_CHAIN_SPEC},
 ];
 
 // ---------------------------------------------------------------------------
@@ -281,33 +366,60 @@ export function createWorkflow(token, wf) {
   return ok;
 }
 
-export function deployWorkflow(token, id) {
+export function deployWorkflow(token, id, version) {
+  version = version || 1;
   const res = http.post(
-    `${BASE_URL}/api/v1/workflows/${id}/deploy?version=1`,
+    `${BASE_URL}/api/v1/workflows/${id}/deploy?version=${version}`,
     null,
     { headers: authHeaders(token), timeout: '15s' }
   );
 
-  const ok = check(res, { [`deploy ${id} 200`]: (r) => r.status === 200 });
+  const ok = check(res, { [`deploy ${id} v${version} 200`]: (r) => r.status === 200 });
   if (!ok) {
-    console.warn(`[workflows] deploy ${id} → ${res.status}: ${res.body}`);
+    console.warn(`[workflows] deploy ${id} v${version} → ${res.status}: ${res.body}`);
   }
   return ok;
 }
 
 /**
- * Creates and deploys all benchmark workflows. Safe to call multiple times —
- * duplicate workflow creation is silently ignored (coordinator upserts).
+ * Creates and deploys all benchmark workflows. Idempotent:
+ *   - If already deployed → skip entirely.
+ *   - If exists but not deployed → deploy the latest version that's there.
+ *   - If missing → create version 1, then deploy it.
  * Returns the list of deployed workflow IDs.
  */
 export function setupWorkflows(token) {
   const deployed = [];
+
   for (const wf of WORKFLOW_DEFINITIONS) {
-    createWorkflow(token, wf);
-    if (deployWorkflow(token, wf.id)) {
+    // Check current state before creating to avoid version drift.
+    const getRes = http.get(
+      `${BASE_URL}/api/v1/workflows/${wf.id}?latest=true`,
+      { headers: authHeaders(token), timeout: '10s' }
+    );
+
+    if (getRes.status === 200) {
+      const existing = JSON.parse(getRes.body);
+      if (existing.deployed) {
+        // Already deployed — nothing to do.
+        deployed.push(wf.id);
+        console.log(`[workflows] ${wf.id} already deployed (v${existing.deployed_version || existing.version})`);
+        continue;
+      }
+      // Exists but not deployed — deploy the version that's there.
+      const version = existing.latest_version || existing.version;
+      if (deployWorkflow(token, wf.id, version)) {
+        deployed.push(wf.id);
+      }
+      continue;
+    }
+
+    // Workflow doesn't exist yet — create v1 then deploy.
+    if (createWorkflow(token, wf) && deployWorkflow(token, wf.id, 1)) {
       deployed.push(wf.id);
     }
   }
+
   console.log(`[workflows] ${deployed.length}/${WORKFLOW_DEFINITIONS.length} workflows ready`);
   return deployed;
 }

@@ -1,36 +1,8 @@
+include:
+  - docker-compose.datastores.yml
+  - docker-compose.observability.yml
+
 services:
-  postgres:
-    image: postgres:16-alpine
-    container_name: composer-postgres
-    environment:
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: password
-      POSTGRES_DB: composer
-    ports:
-      - "5432:5432"
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-      - ../../migrations:/migrations:ro
-      - ./init-db.sh:/docker-entrypoint-initdb.d/01-init-db.sh:ro
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
-
-  redis:
-    image: redis:7-alpine
-    container_name: composer-redis
-    ports:
-      - "6379:6379"
-    volumes:
-      - redis_data:/data
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
-      timeout: 3s
-      retries: 5
-
   coordinator:
     build:
       context: ../..
@@ -46,20 +18,25 @@ services:
     environment:
       - STORE_URL=postgres://postgres:password@postgres:5432/composer?sslmode=disable
       - COMPOSER_REDIS_ADDRS=redis:6379
-      - API_HTTP_PORT=8080
-      - API_GRPC_PORT=50051
       - LOG_LEVEL=info
-      # OpenTelemetry configuration
-      - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
-      - OTEL_EXPORTER_OTLP_PROTOCOL=grpc
-      - OTEL_SERVICE_NAME=composer-coordinator
-      - OTEL_RESOURCE_ATTRIBUTES=service.name=composer-coordinator,service.version=1.0.0
+      - OTEL_EXPORTER_OTLP_ENDPOINT=otel-collector:4317
+    command:
+      - ./coordinator
+      - --store.url=postgres://postgres:password@postgres:5432/composer?sslmode=disable
+      - --redis.addrs=redis:6379
+      - --api.http_port=8080
+      - --api.grpc_port=50051
+      - --outbox.concurrency=4
+      - --outbox.poll_interval=100ms
     ports:
-      - "8080:8080"  # HTTP API
-      - "50051:50051"  # gRPC
-    volumes:
-      - ../../migrations:/app/migrations:ro
-    command: ["./coordinator", "--store.url=postgres://postgres:password@postgres:5432/composer?sslmode=disable", "--redis.addrs=redis:6379", "--api.http_port=8080", "--api.grpc_port=50051"]
+      - "8080:8080"
+      - "50051:50051"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/health || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
 
   worker:
     build:
@@ -67,63 +44,41 @@ services:
       dockerfile: infra/docker/Dockerfile.worker
     depends_on:
       coordinator:
-        condition: service_started
+        condition: service_healthy
       redis:
         condition: service_healthy
-      otel-collector:
+      python-worker:
+        condition: service_started
+      js-worker:
         condition: service_started
     environment:
       - REDIS_ADDR=redis:6379
       - COORDINATOR_ADDR=coordinator:50051
       - STREAM_NAME=workflow.tasks
       - CONSUMER_GROUP=workflow-workers
-      - WORKER_ID=worker-${HOSTNAME}
-      # OpenTelemetry configuration
-      - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
-      - OTEL_EXPORTER_OTLP_PROTOCOL=grpc
-      - OTEL_SERVICE_NAME=composer-worker
-      - OTEL_RESOURCE_ATTRIBUTES=service.name=composer-worker,service.version=1.0.0
+      - LANG_WORKER_PYTHON_ADDR=python-worker:50051
+      - LANG_WORKER_JS_ADDR=js-worker:50052
+      - OTEL_EXPORTER_OTLP_ENDPOINT=otel-collector:4317
     deploy:
       replicas: 2
     restart: unless-stopped
 
-  worker-js:
-    build:
-      context: ../..
-      dockerfile: infra/docker/Dockerfile.language-server-js
-    container_name: composer-language-server-js
-    depends_on:
-      - coordinator
-    environment:
-      - PORT=50052
-    ports:
-      - "50052:50052"
-    restart: unless-stopped
-
-  worker-py:
+  python-worker:
     build:
       context: ../..
       dockerfile: infra/docker/Dockerfile.language-server-py
-    container_name: composer-language-server-py
-    depends_on:
-      - coordinator
+    container_name: composer-python-worker
     environment:
       - PORT=50051
-    ports:
-      - "50053:50051"  # Different port to avoid conflict with coordinator gRPC
     restart: unless-stopped
 
-  ai-service:
+  js-worker:
     build:
       context: ../..
-      dockerfile: infra/docker/Dockerfile.ai
-    container_name: composer-ai-service
+      dockerfile: infra/docker/Dockerfile.language-server-js
+    container_name: composer-js-worker
     environment:
-      - GOOGLE_API_KEY=${GOOGLE_API_KEY:-}
-      - HOST=0.0.0.0
-      - PORT=8000
-    ports:
-      - "8000:8000"
+      - PORT=50052
     restart: unless-stopped
 
   web:
@@ -132,42 +87,12 @@ services:
       dockerfile: infra/docker/Dockerfile.web
     container_name: composer-web
     depends_on:
-      - coordinator
+      coordinator:
+        condition: service_healthy
     environment:
-      - NEXT_PUBLIC_API_URL=http://coordinator:8080
-      - NEXT_PUBLIC_USE_PROXY=false
+      - API_INTERNAL_URL=http://coordinator:8080
       - NODE_ENV=production
     ports:
       - "3000:3000"
     restart: unless-stopped
 
-  # OpenTelemetry Collector
-  otel-collector:
-    image: otel/opentelemetry-collector:latest
-    container_name: composer-otel-collector
-    command: ["--config=/etc/otel-collector-config.yaml"]
-    volumes:
-      - ./otel-collector-config.yaml:/etc/otel-collector-config.yaml:ro
-    ports:
-      - "4317:4317"   # OTLP gRPC receiver
-      - "4318:4318"   # OTLP HTTP receiver
-    depends_on:
-      - jaeger
-    restart: unless-stopped
-
-  # Jaeger for distributed tracing
-  jaeger:
-    image: jaegertracing/all-in-one:latest
-    container_name: composer-jaeger
-    environment:
-      - COLLECTOR_OTLP_ENABLED=true
-    ports:
-      - "16686:16686"  # Jaeger UI
-      - "14250:14250"  # Jaeger gRPC
-      - "14268:14268"  # Jaeger HTTP
-    restart: unless-stopped
-
-
-volumes:
-  postgres_data:
-  redis_data:

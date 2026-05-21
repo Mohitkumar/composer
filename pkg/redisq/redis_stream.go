@@ -41,16 +41,6 @@ func NewRedisStream(config *RedisConfig, client ...*redis.Client) (*RedisStream,
 	return rs, nil
 }
 
-// Publish publishes a message to a Redis pub/sub channel
-func (r *RedisStream) Publish(ctx context.Context, channel string, message interface{}) error {
-	return r.client.Publish(ctx, channel, message).Err()
-}
-
-// Subscribe subscribes to a Redis pub/sub channel
-func (r *RedisStream) Subscribe(ctx context.Context, channel string) (*redis.PubSub, error) {
-	return r.client.Subscribe(ctx, channel), nil
-}
-
 // XAdd adds an entry to a Redis stream
 // stream is the stream name, values is a map of field-value pairs
 // Returns the message ID and any error
@@ -77,6 +67,12 @@ func (r *RedisStream) XAck(ctx context.Context, stream, group string, ids ...str
 	return r.client.XAck(ctx, stream, group, ids...).Result()
 }
 
+// XDel removes messages from the stream by ID.
+// XACK only removes from the PEL; XDEL is required to free stream memory.
+func (r *RedisStream) XDel(ctx context.Context, stream string, ids ...string) (int64, error) {
+	return r.client.XDel(ctx, stream, ids...).Result()
+}
+
 // XGroupCreateMkStream creates a consumer group for a stream
 func (r *RedisStream) XGroupCreateMkStream(ctx context.Context, stream, group, start string) error {
 	return r.client.XGroupCreateMkStream(ctx, stream, group, start).Err()
@@ -87,6 +83,12 @@ func (r *RedisStream) XGroupCreateMkStream(ctx context.Context, stream, group, s
 func (r *RedisStream) XAutoClaim(ctx context.Context, args *redis.XAutoClaimArgs) ([]redis.XMessage, string, error) {
 	msgs, start, err := r.client.XAutoClaim(ctx, args).Result()
 	return msgs, start, err
+}
+
+// XPendingExt returns extended pending-entry info (including per-message
+// delivery counts) for entries matching the given range/consumer filter.
+func (r *RedisStream) XPendingExt(ctx context.Context, args *redis.XPendingExtArgs) ([]redis.XPendingExt, error) {
+	return r.client.XPendingExt(ctx, args).Result()
 }
 
 // Client returns the underlying Redis client (for advanced use cases)

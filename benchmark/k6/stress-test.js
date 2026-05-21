@@ -48,8 +48,10 @@ export function setup() {
 export default function (data) {
   const { token, workflowIds } = data;
 
-  // Under stress, prefer lighter workflows to maximise concurrency
-  const wfId = pickWorkflow(workflowIds, [40, 30, 15, 10, 5]);
+  // Under stress, prefer lighter workflows to maximise concurrency.
+  // Weights: http-simple(35), http-chain(25), switch(12), fork-join(8), mixed(5),
+  //          python-code(6), js-code(6), python-http-chain(3)
+  const wfId = pickWorkflow(workflowIds, [35, 25, 12, 8, 5, 6, 6, 3]);
 
   runWorkflow(token, wfId, { benchmark: true, stress: true, vu: __VU, iter: __ITER }, {
     maxWaitMs:    90000,  // longer ceiling under load

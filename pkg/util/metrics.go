@@ -32,6 +32,30 @@ var (
 	outboxFailedCounter    metric.Int64Counter
 	outboxDLQCounter       metric.Int64Counter
 	outboxInFlightGauge    metric.Int64UpDownCounter
+
+	// Depth gauges — set by the coordinator's background sampler
+	RedisStreamDepthGauge metric.Int64Gauge
+	OutboxBacklogGauge    metric.Int64Gauge
+
+	// Process metrics (coordinator + worker)
+	ProcessRSSGauge        metric.Int64Gauge
+	ProcessHeapInuseGauge  metric.Int64Gauge
+	ProcessGoroutinesGauge metric.Int64Gauge
+
+	// DB pool metrics (coordinator only)
+	DBPoolAcquiredGauge  metric.Int64Gauge
+	DBPoolIdleGauge      metric.Int64Gauge
+	DBPoolTotalGauge     metric.Int64Gauge
+	DBPoolMaxGauge       metric.Int64Gauge
+	DBPoolWaitCountGauge metric.Int64Gauge
+
+	// Redis server memory (coordinator only)
+	RedisMemoryUsedGauge metric.Int64Gauge
+
+	// Workflow cache metrics (coordinator only)
+	WfCacheSizeGauge    metric.Int64Gauge
+	WfCacheHitsCounter  metric.Int64Counter
+	WfCacheMissesCounter metric.Int64Counter
 )
 
 // InitMetrics initializes all metrics. Should be called once at startup.
@@ -67,8 +91,9 @@ func InitMetrics() error {
 
 	workflowDurationHistogram, err = meter.Float64Histogram(
 		"workflow.duration",
-		metric.WithDescription("Duration of workflow execution in seconds"),
+		metric.WithDescription("End-to-end duration of workflow execution in seconds"),
 		metric.WithUnit("s"),
+		metric.WithExplicitBucketBoundaries(0.1, 0.5, 1, 2.5, 5, 10, 30, 60, 120, 300, 600, 1800, 3600),
 	)
 	if err != nil {
 		return err
@@ -109,8 +134,9 @@ func InitMetrics() error {
 
 	taskDurationHistogram, err = meter.Float64Histogram(
 		"task.duration",
-		metric.WithDescription("Duration of task execution in seconds"),
+		metric.WithDescription("Duration of individual task execution in seconds (started_at to completed_at)"),
 		metric.WithUnit("s"),
+		metric.WithExplicitBucketBoundaries(0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60),
 	)
 	if err != nil {
 		return err
@@ -149,138 +175,204 @@ func InitMetrics() error {
 		return err
 	}
 
+	RedisStreamDepthGauge, err = meter.Int64Gauge(
+		"redis.stream.depth",
+		metric.WithDescription("Number of messages in the Redis task stream"),
+	)
+	if err != nil {
+		return err
+	}
+
+	OutboxBacklogGauge, err = meter.Int64Gauge(
+		"outbox.backlog",
+		metric.WithDescription("Number of outbox rows waiting to be published (PENDING + RETRY)"),
+	)
+	if err != nil {
+		return err
+	}
+
+	// Process metrics (coordinator + worker)
+	ProcessRSSGauge, err = meter.Int64Gauge(
+		"process.rss_bytes",
+		metric.WithDescription("Resident set size of the process in bytes"),
+		metric.WithUnit("By"),
+	)
+	if err != nil {
+		return err
+	}
+
+	ProcessHeapInuseGauge, err = meter.Int64Gauge(
+		"process.heap_inuse_bytes",
+		metric.WithDescription("Go heap memory currently in use in bytes"),
+		metric.WithUnit("By"),
+	)
+	if err != nil {
+		return err
+	}
+
+	ProcessGoroutinesGauge, err = meter.Int64Gauge(
+		"process.goroutines",
+		metric.WithDescription("Number of goroutines currently running"),
+	)
+	if err != nil {
+		return err
+	}
+
+	// DB pool metrics (coordinator only)
+	DBPoolAcquiredGauge, err = meter.Int64Gauge(
+		"db.pool.acquired",
+		metric.WithDescription("Number of connections currently acquired from the pool"),
+	)
+	if err != nil {
+		return err
+	}
+
+	DBPoolIdleGauge, err = meter.Int64Gauge(
+		"db.pool.idle",
+		metric.WithDescription("Number of idle connections in the pool"),
+	)
+	if err != nil {
+		return err
+	}
+
+	DBPoolTotalGauge, err = meter.Int64Gauge(
+		"db.pool.total",
+		metric.WithDescription("Total number of connections in the pool (acquired + idle + constructing)"),
+	)
+	if err != nil {
+		return err
+	}
+
+	DBPoolMaxGauge, err = meter.Int64Gauge(
+		"db.pool.max",
+		metric.WithDescription("Maximum number of connections allowed in the pool"),
+	)
+	if err != nil {
+		return err
+	}
+
+	DBPoolWaitCountGauge, err = meter.Int64Gauge(
+		"db.pool.wait_count",
+		metric.WithDescription("Cumulative number of times a connection was not immediately available"),
+	)
+	if err != nil {
+		return err
+	}
+
+	// Redis server memory
+	RedisMemoryUsedGauge, err = meter.Int64Gauge(
+		"redis.memory.used_bytes",
+		metric.WithDescription("Redis server used_memory in bytes"),
+		metric.WithUnit("By"),
+	)
+	if err != nil {
+		return err
+	}
+
+	// Workflow cache metrics (coordinator only)
+	WfCacheSizeGauge, err = meter.Int64Gauge(
+		"wf_cache.size",
+		metric.WithDescription("Number of workflow DAGs currently held in the in-process cache"),
+	)
+	if err != nil {
+		return err
+	}
+
+	WfCacheHitsCounter, err = meter.Int64Counter(
+		"wf_cache.hits",
+		metric.WithDescription("Total number of workflow DAG cache hits"),
+	)
+	if err != nil {
+		return err
+	}
+
+	WfCacheMissesCounter, err = meter.Int64Counter(
+		"wf_cache.misses",
+		metric.WithDescription("Total number of workflow DAG cache misses"),
+	)
+	if err != nil {
+		return err
+	}
+
 	return nil
 }
 
-// RecordWorkflowStarted records that a workflow was started
+// RecordWorkflowStarted records that a workflow was started.
+// Only workflow.id is used as a label — run_id belongs in traces, not metrics.
 func RecordWorkflowStarted(ctx context.Context, workflowID, runID string) {
 	if workflowStartedCounter != nil {
 		workflowStartedCounter.Add(ctx, 1,
-			metric.WithAttributes(
-				attribute.String("workflow.id", workflowID),
-				attribute.String("workflow.run_id", runID),
-			),
+			metric.WithAttributes(attribute.String("workflow.id", workflowID)),
 		)
 	}
 }
 
-// RecordWorkflowCompleted records that a workflow completed successfully
+// RecordWorkflowCompleted records that a workflow completed successfully.
 func RecordWorkflowCompleted(ctx context.Context, workflowID, runID string, duration time.Duration) {
+	attrs := metric.WithAttributes(attribute.String("workflow.id", workflowID))
 	if workflowCompletedCounter != nil {
-		workflowCompletedCounter.Add(ctx, 1,
-			metric.WithAttributes(
-				attribute.String("workflow.id", workflowID),
-				attribute.String("workflow.run_id", runID),
-			),
-		)
+		workflowCompletedCounter.Add(ctx, 1, attrs)
 	}
 	if workflowDurationHistogram != nil {
-		workflowDurationHistogram.Record(ctx, duration.Seconds(),
-			metric.WithAttributes(
-				attribute.String("workflow.id", workflowID),
-				attribute.String("workflow.run_id", runID),
-			),
-		)
+		workflowDurationHistogram.Record(ctx, duration.Seconds(), attrs)
 	}
 }
 
-// RecordWorkflowFailed records that a workflow failed
+// RecordWorkflowFailed records that a workflow failed.
 func RecordWorkflowFailed(ctx context.Context, workflowID, runID string, duration time.Duration, reason string) {
+	attrs := metric.WithAttributes(
+		attribute.String("workflow.id", workflowID),
+		attribute.String("workflow.status", "failed"),
+	)
 	if workflowFailedCounter != nil {
-		workflowFailedCounter.Add(ctx, 1,
-			metric.WithAttributes(
-				attribute.String("workflow.id", workflowID),
-				attribute.String("workflow.run_id", runID),
-				attribute.String("error.reason", reason),
-			),
-		)
+		workflowFailedCounter.Add(ctx, 1, attrs)
 	}
 	if workflowDurationHistogram != nil {
-		workflowDurationHistogram.Record(ctx, duration.Seconds(),
-			metric.WithAttributes(
-				attribute.String("workflow.id", workflowID),
-				attribute.String("workflow.run_id", runID),
-				attribute.String("workflow.status", "failed"),
-			),
-		)
+		workflowDurationHistogram.Record(ctx, duration.Seconds(), attrs)
 	}
 }
 
-// RecordTaskCreated records that a task was created
+// RecordTaskCreated records that a task was created.
 func RecordTaskCreated(ctx context.Context, taskID, runID, nodeID, nodeType string) {
 	if taskCreatedCounter != nil {
 		taskCreatedCounter.Add(ctx, 1,
-			metric.WithAttributes(
-				attribute.String("task.id", taskID),
-				attribute.String("workflow.run_id", runID),
-				attribute.String("task.node_id", nodeID),
-				attribute.String("task.node_type", nodeType),
-			),
+			metric.WithAttributes(attribute.String("task.node_type", nodeType)),
 		)
 	}
 }
 
-// RecordTaskStarted records that a task was started
+// RecordTaskStarted records that a task was started.
 func RecordTaskStarted(ctx context.Context, taskID, runID, nodeID, nodeType string) {
 	if taskStartedCounter != nil {
 		taskStartedCounter.Add(ctx, 1,
-			metric.WithAttributes(
-				attribute.String("task.id", taskID),
-				attribute.String("workflow.run_id", runID),
-				attribute.String("task.node_id", nodeID),
-				attribute.String("task.node_type", nodeType),
-			),
+			metric.WithAttributes(attribute.String("task.node_type", nodeType)),
 		)
 	}
 }
 
-// RecordTaskCompleted records that a task completed successfully
+// RecordTaskCompleted records that a task completed successfully.
+// Pass duration=0 for control nodes (no worker lease) — the histogram is skipped for zero durations.
 func RecordTaskCompleted(ctx context.Context, taskID, runID, nodeID, nodeType string, duration time.Duration) {
+	attrs := metric.WithAttributes(attribute.String("task.node_type", nodeType))
 	if taskCompletedCounter != nil {
-		taskCompletedCounter.Add(ctx, 1,
-			metric.WithAttributes(
-				attribute.String("task.id", taskID),
-				attribute.String("workflow.run_id", runID),
-				attribute.String("task.node_id", nodeID),
-				attribute.String("task.node_type", nodeType),
-			),
-		)
+		taskCompletedCounter.Add(ctx, 1, attrs)
 	}
-	if taskDurationHistogram != nil {
-		taskDurationHistogram.Record(ctx, duration.Seconds(),
-			metric.WithAttributes(
-				attribute.String("task.id", taskID),
-				attribute.String("workflow.run_id", runID),
-				attribute.String("task.node_id", nodeID),
-				attribute.String("task.node_type", nodeType),
-			),
-		)
+	if taskDurationHistogram != nil && duration > 0 {
+		taskDurationHistogram.Record(ctx, duration.Seconds(), attrs)
 	}
 }
 
-// RecordTaskFailed records that a task failed
+// RecordTaskFailed records that a task failed.
 func RecordTaskFailed(ctx context.Context, taskID, runID, nodeID, nodeType string, duration time.Duration, reason string) {
+	attrs := metric.WithAttributes(
+		attribute.String("task.node_type", nodeType),
+		attribute.String("task.status", "failed"),
+	)
 	if taskFailedCounter != nil {
-		taskFailedCounter.Add(ctx, 1,
-			metric.WithAttributes(
-				attribute.String("task.id", taskID),
-				attribute.String("workflow.run_id", runID),
-				attribute.String("task.node_id", nodeID),
-				attribute.String("task.node_type", nodeType),
-				attribute.String("error.reason", reason),
-			),
-		)
+		taskFailedCounter.Add(ctx, 1, attrs)
 	}
 	if taskDurationHistogram != nil {
-		taskDurationHistogram.Record(ctx, duration.Seconds(),
-			metric.WithAttributes(
-				attribute.String("task.id", taskID),
-				attribute.String("workflow.run_id", runID),
-				attribute.String("task.node_id", nodeID),
-				attribute.String("task.node_type", nodeType),
-				attribute.String("task.status", "failed"),
-			),
-		)
+		taskDurationHistogram.Record(ctx, duration.Seconds(), attrs)
 	}
 }
 

@@ -15,6 +15,26 @@ Composer provides a robust platform for:
 - **Reliability**: Maintain workflow state and task history in PostgreSQL with ACID guarantees
 - **Observability**: Built-in tracing and metrics for monitoring workflow execution
 
+## When to Use Composer
+
+Composer is optimised for **high-throughput, short-to-medium duration workflows** where you want minimal infrastructure overhead and sub-10ms orchestration latency.
+
+### Good fit
+
+- **API orchestration** — fan-out to multiple services, aggregate results, conditional routing (SWITCH), parallel branches (FORK)
+- **Data pipelines** — fetch → transform → load chains where each step is an HTTP call or a Python/JS compute node
+- **Event-driven automation** — trigger a multi-step workflow in response to a webhook or queue message; complete in seconds
+- **Multi-language processing** — mix Python and JavaScript compute nodes with HTTP calls in one workflow definition
+- **High-concurrency workloads** — many short workflows running simultaneously; Redis stream dispatch keeps per-step overhead at ~1–5 ms
+
+### Not a good fit (yet)
+
+- **Long-running / durable flows** — workflows that need to `sleep` for hours or days, or wait indefinitely for an external signal (human approval, payment webhook with no SLA). Composer has no timer or signal-wait node type today; a step has a 90-second hard ceiling.
+- **Exactly-once semantics** — Composer provides at-least-once delivery guarded by a database lease. Duplicate execution is prevented in practice but is not structurally impossible the way Temporal's event-sourced history makes it.
+- **In-flight workflow versioning** — changing a workflow definition while runs are in progress is undefined. Temporal has built-in versioning APIs for this.
+
+For a detailed comparison with Temporal — including throughput numbers, reliability trade-offs, and the specific gaps to close — see [docs/comparison-temporal.md](docs/comparison-temporal.md).
+
 ## How to Build
 
 ### Prerequisites

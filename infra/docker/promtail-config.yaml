@@ -1,0 +1,47 @@
+server:
+  http_listen_port: 9080
+  grpc_listen_port: 0
+
+positions:
+  filename: /tmp/positions.yaml
+
+clients:
+  - url: http://loki:3100/loki/api/v1/push
+
+scrape_configs:
+  - job_name: docker
+    docker_sd_configs:
+      - host: unix:///var/run/docker.sock
+        refresh_interval: 5s
+        filters:
+          - name: status
+            values: [running]
+    relabel_configs:
+      # container name → label (strip leading slash)
+      - source_labels: [__meta_docker_container_name]
+        regex: '/?(.*)'
+        target_label: container
+      # compose service name → label
+      - source_labels: [__meta_docker_container_label_com_docker_compose_service]
+        target_label: service
+      # compose project → label
+      - source_labels: [__meta_docker_container_label_com_docker_compose_project]
+        target_label: project
+    pipeline_stages:
+      # Parse structured zerolog JSON output
+      - json:
+          expressions:
+            level: level
+            msg: message
+            error: error
+            workflow_id: workflow_id
+            run_id: run_id
+            node_id: node_id
+      # Promote level as a label so you can filter by severity in Grafana
+      - labels:
+          level:
+      # Use the log timestamp if present, otherwise keep ingestion time
+      - timestamp:
+          source: time
+          format: RFC3339
+          action_on_failure: skip

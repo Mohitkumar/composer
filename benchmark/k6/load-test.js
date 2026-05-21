@@ -49,8 +49,10 @@ export function setup() {
 export default function (data) {
   const { token, workflowIds } = data;
 
-  // Weighted pick: simple workflows run more often (cheaper), complex ones run less
-  const wfId = pickWorkflow(workflowIds, [30, 25, 20, 15, 10]);
+  // Weights match WORKFLOW_DEFINITIONS order:
+  // http-simple(25), http-chain(20), switch(15), fork-join(10), mixed(10),
+  // python-code(8), js-code(8), python-http-chain(4)
+  const wfId = pickWorkflow(workflowIds, [25, 20, 15, 10, 10, 8, 8, 4]);
 
   runWorkflow(token, wfId, { benchmark: true, vu: __VU, iter: __ITER }, {
     maxWaitMs:    45000,

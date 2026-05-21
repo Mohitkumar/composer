@@ -40,7 +40,7 @@ func NewOutboxEnqueuer(cfg EnqueuerConfig) *OutboxEnqueuer {
 		cfg.Concurrency = 1
 	}
 	if cfg.PollInterval <= 0 {
-		cfg.PollInterval = 1 * time.Second
+		cfg.PollInterval = 100 * time.Millisecond
 	}
 	if cfg.Logger.GetLevel() == zerolog.NoLevel {
 		cfg.Logger = zerolog.New(nil).Level(zerolog.InfoLevel)
@@ -60,6 +60,11 @@ func (o *OutboxEnqueuer) Run(ctx context.Context) {
 	for i := 0; i < o.cfg.Concurrency; i++ {
 		workerChan <- struct{}{}
 	}
+
+	// batchFull receives a signal when a batch was at full capacity, meaning
+	// more rows are likely waiting. The main loop skips its sleep in that case
+	// so we drain the queue without introducing artificial delay.
+	batchFull := make(chan struct{}, 1)
 
 	// Start periodic cleanup and recovery in background
 	o.wg.Add(1)
@@ -89,8 +94,15 @@ func (o *OutboxEnqueuer) Run(ctx context.Context) {
 			go func() {
 				defer func() { workerChan <- struct{}{} }()
 				defer o.wg.Done()
-				if err := o.processBatch(ctx); err != nil {
+				count, err := o.processBatch(ctx)
+				if err != nil {
 					o.cfg.Logger.Error().Err(err).Msg("processBatch failed")
+				}
+				if count >= o.cfg.BatchSize {
+					select {
+					case batchFull <- struct{}{}:
+					default:
+					}
 				}
 			}()
 		case <-ctx.Done():
@@ -98,8 +110,20 @@ func (o *OutboxEnqueuer) Run(ctx context.Context) {
 			return
 		}
 
-		// Throttle polling
-		time.Sleep(o.cfg.PollInterval)
+		// Throttle: only sleep when the queue appears empty. If the last batch
+		// was at full capacity there are likely more rows ready, so poll again
+		// immediately instead of waiting for the full PollInterval.
+		select {
+		case <-batchFull:
+			// more work pending — re-poll immediately
+		case <-time.After(o.cfg.PollInterval):
+		case <-ctx.Done():
+			o.shutdown()
+			return
+		case <-o.quit:
+			o.shutdown()
+			return
+		}
 	}
 }
 
@@ -163,10 +187,11 @@ func (o *OutboxEnqueuer) recoverStaleInFlight(ctx context.Context) {
 
 // processBatch picks a batch of outbox rows with FOR UPDATE SKIP LOCKED, marks them IN_FLIGHT,
 // commits, and processes them one by one (pushing to Redis) and updates DB accordingly.
-func (o *OutboxEnqueuer) processBatch(ctx context.Context) error {
+// Returns the number of rows processed and any error.
+func (o *OutboxEnqueuer) processBatch(ctx context.Context) (int, error) {
 	tx, err := o.cfg.DB.Begin(ctx)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	defer tx.Rollback(ctx)
 
@@ -182,7 +207,7 @@ FOR UPDATE SKIP LOCKED
 `
 	rows, err := tx.Query(ctx, query, o.cfg.BatchSize)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	defer rows.Close()
 
@@ -190,29 +215,28 @@ FOR UPDATE SKIP LOCKED
 	for rows.Next() {
 		var r outboxRow
 		if err := rows.Scan(&r.ID, &r.Stream, &r.Payload, &r.Attempt, &r.MaxRetries, &r.NextAttempt, &r.BackoffSeconds); err != nil {
-			return err
+			return 0, err
 		}
 		rowsToProcess = append(rowsToProcess, r)
 	}
 
 	if len(rowsToProcess) == 0 {
-		// nothing to do
 		if err := tx.Commit(ctx); err != nil {
-			return err
+			return 0, err
 		}
-		return nil
+		return 0, nil
 	}
 
 	// mark selected rows IN_FLIGHT
 	for _, r := range rowsToProcess {
 		if _, err := tx.Exec(ctx, `UPDATE outbox SET status='IN_FLIGHT', updated_at=NOW() WHERE id=$1`, r.ID); err != nil {
-			return err
+			return 0, err
 		}
 	}
 
 	// commit tx to release locks (we will process rows outside transaction)
 	if err := tx.Commit(ctx); err != nil {
-		return err
+		return 0, err
 	}
 
 	// process items one by one (sequentially here; could parallelize per batch)
@@ -239,7 +263,7 @@ FOR UPDATE SKIP LOCKED
 		util.RecordOutboxInFlight(ctx, r.Stream, -1)
 	}
 
-	return nil
+	return len(rowsToProcess), nil
 }
 
 // processRow pushes a single outbox row to Redis and updates DB accordingly (success -> delete, failure -> schedule retry or DLQ).
@@ -261,7 +285,7 @@ func (o *OutboxEnqueuer) processRow(ctx context.Context, r outboxRow) error {
 		stream = "workflow.tasks"
 	}
 
-	_, err := o.cfg.Redis.XAdd(ctx, stream, payloadMap)
+	err := o.cfg.Publisher.Publish(ctx, stream, payloadMap)
 	if err == nil {
 		// Successfully sent — delete the outbox row to prevent table bloat
 		_, uerr := o.cfg.DB.Exec(ctx, `DELETE FROM outbox WHERE id=$1`, r.ID)

@@ -6,33 +6,56 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"time"
 )
 
-// HTTPExecutor executes HTTP requests
-type HTTPExecutor struct{}
-
-// NewHTTPExecutor creates a new HTTP executor
-func NewHTTPExecutor() *HTTPExecutor {
-	return &HTTPExecutor{}
+// HTTPExecutor executes HTTP requests using a shared, pooled transport so TCP
+// and TLS sessions are reused across tasks.
+type HTTPExecutor struct {
+	client *http.Client
 }
 
-// Type returns the executor type
+// NewHTTPExecutor creates a new HTTP executor with a shared connection pool.
+func NewHTTPExecutor() *HTTPExecutor {
+	transport := &http.Transport{
+		DialContext: (&net.Dialer{
+			Timeout:   30 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		MaxIdleConns:          100,
+		MaxIdleConnsPerHost:   20,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+	}
+	return &HTTPExecutor{
+		// No global Timeout — each request carries its own context deadline.
+		client: &http.Client{Transport: transport},
+	}
+}
+
+// Type returns the executor type.
 func (e *HTTPExecutor) Type() string {
 	return "HTTP"
 }
 
-// Execute executes an HTTP request based on input JSON
+// Execute executes an HTTP request based on input JSON.
+//
 // Expected input format:
 //
 //	{
 //	  "url": "https://example.com/api",
-//	  "method": "GET|POST|PUT|DELETE",
+//	  "method": "GET|POST|PUT|DELETE|PATCH",
 //	  "body": {...},
 //	  "headers": {"Authorization": "Bearer token"},
 //	  "timeout_seconds": 30
 //	}
+//
+// The response body is returned as-is if it is valid JSON.
+// Non-JSON responses (plain text, HTML, etc.) are wrapped as {"body": "<text>"}.
+// Empty responses return {}.
 func (e *HTTPExecutor) Execute(ctx context.Context, input json.RawMessage) (json.RawMessage, error) {
 	var params struct {
 		URL            string            `json:"url"`
@@ -49,7 +72,6 @@ func (e *HTTPExecutor) Execute(ctx context.Context, input json.RawMessage) (json
 	if params.URL == "" {
 		return nil, fmt.Errorf("url is required")
 	}
-
 	if params.Method == "" {
 		params.Method = "GET"
 	}
@@ -72,39 +94,56 @@ func (e *HTTPExecutor) Execute(ctx context.Context, input json.RawMessage) (json
 		return nil, fmt.Errorf("failed to create HTTP request: %w", err)
 	}
 
-	// Set headers
 	for k, v := range params.Headers {
 		req.Header.Set(k, v)
 	}
 
-	// Set content-type for POST/PUT requests
-	if (params.Method == "POST" || params.Method == "PUT" || params.Method == "PATCH") && len(params.Body) > 0 {
-		if req.Header.Get("Content-Type") == "" {
+	method := params.Method
+	if method == "POST" || method == "PUT" || method == "PATCH" {
+		if req.Header.Get("Content-Type") == "" && len(params.Body) > 0 {
 			req.Header.Set("Content-Type", "application/json")
+		}
+		// Use task_instances.id as the idempotency key so services that honour
+		// the Idempotency-Key header (Stripe, many REST APIs) deduplicate
+		// retried requests automatically.  The header is only set when the task
+		// ID is present in the context and the caller has not already set one.
+		if taskID := TaskIDFromContext(ctx); taskID != "" && req.Header.Get("Idempotency-Key") == "" {
+			req.Header.Set("Idempotency-Key", taskID)
 		}
 	}
 
-	client := &http.Client{
-		Timeout: timeout,
-	}
-
-	resp, err := client.Do(req)
+	resp, err := e.client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("HTTP request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
-	// Read response body
 	out, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read response body: %w", err)
 	}
 
-	// Check for HTTP errors
 	if resp.StatusCode >= 400 {
 		return nil, fmt.Errorf("HTTP error %d: %s", resp.StatusCode, string(out))
 	}
 
-	// Return raw bytes as json.RawMessage
-	return json.RawMessage(out), nil
+	return normalizeResponseBody(out)
+}
+
+// normalizeResponseBody ensures the output is always valid JSON.
+// Valid JSON is returned as-is. Non-JSON and empty bodies are wrapped.
+func normalizeResponseBody(body []byte) (json.RawMessage, error) {
+	if len(body) == 0 {
+		return json.RawMessage("{}"), nil
+	}
+	if json.Valid(body) {
+		return json.RawMessage(body), nil
+	}
+	// Wrap plain text / HTML / binary in a JSON object so downstream
+	// CEL expressions can access it via .body
+	wrapped, err := json.Marshal(map[string]string{"body": string(body)})
+	if err != nil {
+		return nil, fmt.Errorf("failed to encode non-JSON response body: %w", err)
+	}
+	return json.RawMessage(wrapped), nil
 }

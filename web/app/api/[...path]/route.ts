@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080';
+// API_INTERNAL_URL is a server-only var used when proxying inside Docker (e.g. http://coordinator:8080).
+// Falls back to NEXT_PUBLIC_API_URL for local dev.
+const API_BASE_URL = process.env.API_INTERNAL_URL || process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080';
 
 export async function GET(
   request: NextRequest,
