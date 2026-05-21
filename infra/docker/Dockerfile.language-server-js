@@ -1,31 +1,17 @@
-# Build stage — isolated-vm requires native compilation (V8 headers + C++ toolchain)
-FROM node:22-alpine AS builder
+FROM node:22-alpine
 
-RUN apk add --no-cache python3 make g++
+# isolated-vm needs build tools to compile its native addon and libstdc++ at runtime
+RUN apk add --no-cache python3 make g++ libstdc++
 
 WORKDIR /app
 
-# Copy package files
 COPY cmd/language-server-js/package*.json ./
 RUN npm ci --omit=dev
 
-# Copy source code
-COPY cmd/language-server-js/ ./
+# Copy source files explicitly — avoids overwriting the Linux-compiled node_modules
+# with any host-built (macOS) node_modules from the source tree
+COPY cmd/language-server-js/*.js ./
 COPY pkg/api/proto ./proto
-
-# Runtime stage
-FROM node:22-alpine
-
-WORKDIR /app
-
-# isolated-vm links against libstdc++ at runtime
-RUN apk add --no-cache libstdc++
-
-# Copy dependencies and source from builder
-COPY --from=builder /app/node_modules ./node_modules
-COPY --from=builder /app/*.js ./
-COPY --from=builder /app/package.json ./
-COPY --from=builder /app/proto ./proto
 
 EXPOSE 50052
 
