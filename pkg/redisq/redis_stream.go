@@ -41,16 +41,6 @@ func NewRedisStream(config *RedisConfig, client ...*redis.Client) (*RedisStream,
 	return rs, nil
 }
 
-// Publish publishes a message to a Redis pub/sub channel
-func (r *RedisStream) Publish(ctx context.Context, channel string, message interface{}) error {
-	return r.client.Publish(ctx, channel, message).Err()
-}
-
-// Subscribe subscribes to a Redis pub/sub channel
-func (r *RedisStream) Subscribe(ctx context.Context, channel string) (*redis.PubSub, error) {
-	return r.client.Subscribe(ctx, channel), nil
-}
-
 // XAdd adds an entry to a Redis stream
 // stream is the stream name, values is a map of field-value pairs
 // Returns the message ID and any error

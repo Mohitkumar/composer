@@ -366,33 +366,60 @@ export function createWorkflow(token, wf) {
   return ok;
 }
 
-export function deployWorkflow(token, id) {
+export function deployWorkflow(token, id, version) {
+  version = version || 1;
   const res = http.post(
-    `${BASE_URL}/api/v1/workflows/${id}/deploy?version=1`,
+    `${BASE_URL}/api/v1/workflows/${id}/deploy?version=${version}`,
     null,
     { headers: authHeaders(token), timeout: '15s' }
   );
 
-  const ok = check(res, { [`deploy ${id} 200`]: (r) => r.status === 200 });
+  const ok = check(res, { [`deploy ${id} v${version} 200`]: (r) => r.status === 200 });
   if (!ok) {
-    console.warn(`[workflows] deploy ${id} → ${res.status}: ${res.body}`);
+    console.warn(`[workflows] deploy ${id} v${version} → ${res.status}: ${res.body}`);
   }
   return ok;
 }
 
 /**
- * Creates and deploys all benchmark workflows. Safe to call multiple times —
- * duplicate workflow creation is silently ignored (coordinator upserts).
+ * Creates and deploys all benchmark workflows. Idempotent:
+ *   - If already deployed → skip entirely.
+ *   - If exists but not deployed → deploy the latest version that's there.
+ *   - If missing → create version 1, then deploy it.
  * Returns the list of deployed workflow IDs.
  */
 export function setupWorkflows(token) {
   const deployed = [];
+
   for (const wf of WORKFLOW_DEFINITIONS) {
-    createWorkflow(token, wf);
-    if (deployWorkflow(token, wf.id)) {
+    // Check current state before creating to avoid version drift.
+    const getRes = http.get(
+      `${BASE_URL}/api/v1/workflows/${wf.id}?latest=true`,
+      { headers: authHeaders(token), timeout: '10s' }
+    );
+
+    if (getRes.status === 200) {
+      const existing = JSON.parse(getRes.body);
+      if (existing.deployed) {
+        // Already deployed — nothing to do.
+        deployed.push(wf.id);
+        console.log(`[workflows] ${wf.id} already deployed (v${existing.deployed_version || existing.version})`);
+        continue;
+      }
+      // Exists but not deployed — deploy the version that's there.
+      const version = existing.latest_version || existing.version;
+      if (deployWorkflow(token, wf.id, version)) {
+        deployed.push(wf.id);
+      }
+      continue;
+    }
+
+    // Workflow doesn't exist yet — create v1 then deploy.
+    if (createWorkflow(token, wf) && deployWorkflow(token, wf.id, 1)) {
       deployed.push(wf.id);
     }
   }
+
   console.log(`[workflows] ${deployed.length}/${WORKFLOW_DEFINITIONS.length} workflows ready`);
   return deployed;
 }
