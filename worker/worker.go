@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/mohitkumar/composer/pkg/stream"
+	"github.com/mohitkumar/composer/worker/executors"
 	"github.com/rs/zerolog"
 )
 
@@ -302,10 +303,14 @@ func (w *Worker) processMessage(ctx context.Context, msg *TaskMessage) error {
 	leaseCtx2, stopRenewal := context.WithCancel(ctx)
 	go w.renewLeaseLoop(leaseCtx2, msg.TaskID, logger)
 
+	// Embed the task ID so executors can use task_instances.id as an
+	// idempotency key (e.g. Idempotency-Key header on HTTP requests).
+	execCtx := executors.WithTaskID(ctx, msg.TaskID)
+
 	var execErr *string
 	start := time.Now()
 
-	execOutput, routeErr := w.router.Route(ctx, msg.NodeType, msg.Input)
+	execOutput, routeErr := w.router.Route(execCtx, msg.NodeType, msg.Input)
 	if routeErr != nil {
 		errStr := routeErr.Error()
 		execErr = &errStr

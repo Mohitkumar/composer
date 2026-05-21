@@ -97,9 +97,18 @@ func (e *HTTPExecutor) Execute(ctx context.Context, input json.RawMessage) (json
 	for k, v := range params.Headers {
 		req.Header.Set(k, v)
 	}
-	if (params.Method == "POST" || params.Method == "PUT" || params.Method == "PATCH") && len(params.Body) > 0 {
-		if req.Header.Get("Content-Type") == "" {
+
+	method := params.Method
+	if method == "POST" || method == "PUT" || method == "PATCH" {
+		if req.Header.Get("Content-Type") == "" && len(params.Body) > 0 {
 			req.Header.Set("Content-Type", "application/json")
+		}
+		// Use task_instances.id as the idempotency key so services that honour
+		// the Idempotency-Key header (Stripe, many REST APIs) deduplicate
+		// retried requests automatically.  The header is only set when the task
+		// ID is present in the context and the caller has not already set one.
+		if taskID := TaskIDFromContext(ctx); taskID != "" && req.Header.Get("Idempotency-Key") == "" {
+			req.Header.Set("Idempotency-Key", taskID)
 		}
 	}
 

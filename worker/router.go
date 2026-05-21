@@ -142,10 +142,10 @@ func (r *Router) executeLanguageTaskWithClient(ctx context.Context, runtime stri
 		timeout = int(v)
 	}
 
-	// Use a placeholder task ID - in real implementation, this should come from the task message
-	taskID := "task-id"
-	if v, ok := payload["task_id"].(string); ok {
-		taskID = v
+	taskID := executors.TaskIDFromContext(ctx)
+	if taskID == "" {
+		// Fallback: some callers embed it in the payload.
+		taskID, _ = payload["task_id"].(string)
 	}
 
 	resp, err := langClient.ExecuteInlineCode(ctx, taskID, runtime, code, filename, inputJSON, timeout)
