@@ -297,135 +297,82 @@ func InitMetrics() error {
 	return nil
 }
 
-// RecordWorkflowStarted records that a workflow was started
+// RecordWorkflowStarted records that a workflow was started.
+// Only workflow.id is used as a label — run_id belongs in traces, not metrics.
 func RecordWorkflowStarted(ctx context.Context, workflowID, runID string) {
 	if workflowStartedCounter != nil {
 		workflowStartedCounter.Add(ctx, 1,
-			metric.WithAttributes(
-				attribute.String("workflow.id", workflowID),
-				attribute.String("workflow.run_id", runID),
-			),
+			metric.WithAttributes(attribute.String("workflow.id", workflowID)),
 		)
 	}
 }
 
-// RecordWorkflowCompleted records that a workflow completed successfully
+// RecordWorkflowCompleted records that a workflow completed successfully.
 func RecordWorkflowCompleted(ctx context.Context, workflowID, runID string, duration time.Duration) {
+	attrs := metric.WithAttributes(attribute.String("workflow.id", workflowID))
 	if workflowCompletedCounter != nil {
-		workflowCompletedCounter.Add(ctx, 1,
-			metric.WithAttributes(
-				attribute.String("workflow.id", workflowID),
-				attribute.String("workflow.run_id", runID),
-			),
-		)
+		workflowCompletedCounter.Add(ctx, 1, attrs)
 	}
 	if workflowDurationHistogram != nil {
-		workflowDurationHistogram.Record(ctx, duration.Seconds(),
-			metric.WithAttributes(
-				attribute.String("workflow.id", workflowID),
-				attribute.String("workflow.run_id", runID),
-			),
-		)
+		workflowDurationHistogram.Record(ctx, duration.Seconds(), attrs)
 	}
 }
 
-// RecordWorkflowFailed records that a workflow failed
+// RecordWorkflowFailed records that a workflow failed.
 func RecordWorkflowFailed(ctx context.Context, workflowID, runID string, duration time.Duration, reason string) {
+	attrs := metric.WithAttributes(
+		attribute.String("workflow.id", workflowID),
+		attribute.String("workflow.status", "failed"),
+	)
 	if workflowFailedCounter != nil {
-		workflowFailedCounter.Add(ctx, 1,
-			metric.WithAttributes(
-				attribute.String("workflow.id", workflowID),
-				attribute.String("workflow.run_id", runID),
-				attribute.String("error.reason", reason),
-			),
-		)
+		workflowFailedCounter.Add(ctx, 1, attrs)
 	}
 	if workflowDurationHistogram != nil {
-		workflowDurationHistogram.Record(ctx, duration.Seconds(),
-			metric.WithAttributes(
-				attribute.String("workflow.id", workflowID),
-				attribute.String("workflow.run_id", runID),
-				attribute.String("workflow.status", "failed"),
-			),
-		)
+		workflowDurationHistogram.Record(ctx, duration.Seconds(), attrs)
 	}
 }
 
-// RecordTaskCreated records that a task was created
+// RecordTaskCreated records that a task was created.
 func RecordTaskCreated(ctx context.Context, taskID, runID, nodeID, nodeType string) {
 	if taskCreatedCounter != nil {
 		taskCreatedCounter.Add(ctx, 1,
-			metric.WithAttributes(
-				attribute.String("task.id", taskID),
-				attribute.String("workflow.run_id", runID),
-				attribute.String("task.node_id", nodeID),
-				attribute.String("task.node_type", nodeType),
-			),
+			metric.WithAttributes(attribute.String("task.node_type", nodeType)),
 		)
 	}
 }
 
-// RecordTaskStarted records that a task was started
+// RecordTaskStarted records that a task was started.
 func RecordTaskStarted(ctx context.Context, taskID, runID, nodeID, nodeType string) {
 	if taskStartedCounter != nil {
 		taskStartedCounter.Add(ctx, 1,
-			metric.WithAttributes(
-				attribute.String("task.id", taskID),
-				attribute.String("workflow.run_id", runID),
-				attribute.String("task.node_id", nodeID),
-				attribute.String("task.node_type", nodeType),
-			),
+			metric.WithAttributes(attribute.String("task.node_type", nodeType)),
 		)
 	}
 }
 
-// RecordTaskCompleted records that a task completed successfully
+// RecordTaskCompleted records that a task completed successfully.
+// Pass duration=0 for control nodes (no worker lease) — the histogram is skipped for zero durations.
 func RecordTaskCompleted(ctx context.Context, taskID, runID, nodeID, nodeType string, duration time.Duration) {
+	attrs := metric.WithAttributes(attribute.String("task.node_type", nodeType))
 	if taskCompletedCounter != nil {
-		taskCompletedCounter.Add(ctx, 1,
-			metric.WithAttributes(
-				attribute.String("task.id", taskID),
-				attribute.String("workflow.run_id", runID),
-				attribute.String("task.node_id", nodeID),
-				attribute.String("task.node_type", nodeType),
-			),
-		)
+		taskCompletedCounter.Add(ctx, 1, attrs)
 	}
-	if taskDurationHistogram != nil {
-		taskDurationHistogram.Record(ctx, duration.Seconds(),
-			metric.WithAttributes(
-				attribute.String("task.id", taskID),
-				attribute.String("workflow.run_id", runID),
-				attribute.String("task.node_id", nodeID),
-				attribute.String("task.node_type", nodeType),
-			),
-		)
+	if taskDurationHistogram != nil && duration > 0 {
+		taskDurationHistogram.Record(ctx, duration.Seconds(), attrs)
 	}
 }
 
-// RecordTaskFailed records that a task failed
+// RecordTaskFailed records that a task failed.
 func RecordTaskFailed(ctx context.Context, taskID, runID, nodeID, nodeType string, duration time.Duration, reason string) {
+	attrs := metric.WithAttributes(
+		attribute.String("task.node_type", nodeType),
+		attribute.String("task.status", "failed"),
+	)
 	if taskFailedCounter != nil {
-		taskFailedCounter.Add(ctx, 1,
-			metric.WithAttributes(
-				attribute.String("task.id", taskID),
-				attribute.String("workflow.run_id", runID),
-				attribute.String("task.node_id", nodeID),
-				attribute.String("task.node_type", nodeType),
-				attribute.String("error.reason", reason),
-			),
-		)
+		taskFailedCounter.Add(ctx, 1, attrs)
 	}
 	if taskDurationHistogram != nil {
-		taskDurationHistogram.Record(ctx, duration.Seconds(),
-			metric.WithAttributes(
-				attribute.String("task.id", taskID),
-				attribute.String("workflow.run_id", runID),
-				attribute.String("task.node_id", nodeID),
-				attribute.String("task.node_type", nodeType),
-				attribute.String("task.status", "failed"),
-			),
-		)
+		taskDurationHistogram.Record(ctx, duration.Seconds(), attrs)
 	}
 }
 

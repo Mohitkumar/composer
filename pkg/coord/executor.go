@@ -154,14 +154,18 @@ func (c *Coordinator) HandleNodeCompleted(ctx context.Context, taskID string, ru
 		return nil
 	}
 
-	// Record task execution duration (started_at set by lease manager when worker claimed the task).
+	// Always record task completion counter. Duration is only meaningful when the
+	// task was leased by a worker (started_at set), so pass 0 when it's missing and
+	// RecordTaskCompleted will skip the histogram observation for zero durations.
+	taskDuration := time.Duration(0)
 	if !completedStartedAt.IsZero() {
-		util.RecordTaskCompleted(ctx, completedTaskID, runID, nodeID, completedNodeType, time.Since(completedStartedAt))
-		util.SetSpanAttributes(span,
-			util.Attribute("task.id", completedTaskID),
-			util.Attribute("task.node_type", completedNodeType),
-		)
+		taskDuration = time.Since(completedStartedAt)
 	}
+	util.RecordTaskCompleted(ctx, completedTaskID, runID, nodeID, completedNodeType, taskDuration)
+	util.SetSpanAttributes(span,
+		util.Attribute("task.id", completedTaskID),
+		util.Attribute("task.node_type", completedNodeType),
+	)
 
 	// ── Build state machine ─────────────────────────────────────────────────────
 	execState := model.NewExecutionState(dag, runContext, c.Template)
