@@ -2,6 +2,7 @@ package grpc
 
 import (
 	"context"
+	"strconv"
 	"time"
 
 	workflowpb "github.com/mohitkumar/composer/pkg/api/proto/gen/go/workflow"
@@ -30,15 +31,16 @@ func (s *WorkflowService) ReportTaskResult(ctx context.Context, req *workflowpb.
 	if !ok {
 		return nil, status.Error(codes.InvalidArgument, "run_id is required in metadata")
 	}
-
 	nodeID, ok := req.Metadata["node_id"]
 	if !ok {
 		return nil, status.Error(codes.InvalidArgument, "node_id is required in metadata")
 	}
+	workflowID := req.Metadata["workflow_id"]
+	workflowVersion, _ := strconv.Atoi(req.Metadata["workflow_version"])
 
 	// Handle task completion or failure
 	if req.Status == "completed" {
-		err := s.coordinator.HandleNodeCompleted(ctx, req.TaskId, runID, nodeID, req.Output)
+		err := s.coordinator.HandleNodeCompleted(ctx, req.TaskId, runID, nodeID, workflowID, workflowVersion, req.Output)
 		if err != nil {
 			return nil, status.Error(codes.Internal, err.Error())
 		}
@@ -47,7 +49,7 @@ func (s *WorkflowService) ReportTaskResult(ctx context.Context, req *workflowpb.
 		if errMsg == "" {
 			errMsg = "task execution failed"
 		}
-		err := s.coordinator.HandleNodeFailed(ctx, runID, nodeID, errMsg)
+		err := s.coordinator.HandleNodeFailed(ctx, runID, nodeID, errMsg, workflowID)
 		if err != nil {
 			return nil, status.Error(codes.Internal, err.Error())
 		}

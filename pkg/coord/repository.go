@@ -39,7 +39,7 @@ type WorkflowRepository interface {
 	ClearTaskLease(ctx context.Context, tx pgx.Tx, runID, nodeID string, logger zerolog.Logger, span trace.Span) error
 
 	// Outbox operations
-	InsertTaskOutbox(ctx context.Context, tx pgx.Tx, taskID, runID string, node *model.Node, taskInput json.RawMessage, logger zerolog.Logger, span trace.Span) error
+	InsertTaskOutbox(ctx context.Context, tx pgx.Tx, taskID, runID, workflowID string, workflowVersion int, node *model.Node, taskInput json.RawMessage, logger zerolog.Logger, span trace.Span) error
 
 	// Parallel execution operations
 	CheckParallelBranchesComplete(ctx context.Context, tx pgx.Tx, runID string, branchNodeIDs []string) (completedCount, totalCount int, err error)
@@ -111,7 +111,6 @@ func (r *workflowRepository) InsertWorkflowRun(ctx context.Context, tx pgx.Tx, p
 		return fmt.Errorf("workflow run %s already exists (duplicate run_id)", p.RunID)
 	}
 
-	logger.Debug().Msg("created workflow run record")
 	return nil
 }
 
@@ -455,15 +454,17 @@ func (r *workflowRepository) ClearTaskLease(ctx context.Context, tx pgx.Tx, runI
 }
 
 // InsertTaskOutbox inserts a task into the outbox
-func (r *workflowRepository) InsertTaskOutbox(ctx context.Context, tx pgx.Tx, taskID, runID string, node *model.Node, taskInput json.RawMessage, logger zerolog.Logger, span trace.Span) error {
+func (r *workflowRepository) InsertTaskOutbox(ctx context.Context, tx pgx.Tx, taskID, runID, workflowID string, workflowVersion int, node *model.Node, taskInput json.RawMessage, logger zerolog.Logger, span trace.Span) error {
 	outboxID := uuid.New().String()
 	nodeTypeForRouting := node.GetNodeTypeForRouting()
 	outboxPayload := map[string]interface{}{
-		"task_id":   taskID,
-		"run_id":    runID,
-		"node_id":   node.NodeID,
-		"node_type": nodeTypeForRouting,
-		"input":     string(taskInput),
+		"task_id":          taskID,
+		"run_id":           runID,
+		"workflow_id":      workflowID,
+		"workflow_version": workflowVersion,
+		"node_id":          node.NodeID,
+		"node_type":        nodeTypeForRouting,
+		"input":            string(taskInput),
 	}
 	outboxPayloadBytes, err := json.Marshal(outboxPayload)
 	if err != nil {
@@ -479,8 +480,6 @@ func (r *workflowRepository) InsertTaskOutbox(ctx context.Context, tx pgx.Tx, ta
 		util.RecordError(span, err)
 		return fmt.Errorf("failed to create outbox entry: %w", err)
 	}
-
-	logger.Debug().Str("outbox_id", outboxID).Msg("created outbox entry for task")
 	return nil
 }
 

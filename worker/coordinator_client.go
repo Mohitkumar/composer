@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"time"
 
 	"google.golang.org/grpc"
@@ -69,7 +70,7 @@ func (c *CoordinatorClient) AcquireTaskLease(ctx context.Context, taskID, owner 
 }
 
 // ReportTaskResult reports task execution result to the coordinator
-func (c *CoordinatorClient) ReportTaskResult(ctx context.Context, taskID, runID, nodeID string, output json.RawMessage, errMsg *string) error {
+func (c *CoordinatorClient) ReportTaskResult(ctx context.Context, taskID, runID, nodeID, workflowID string, workflowVersion int, output json.RawMessage, errMsg *string) error {
 	status := "completed"
 	if errMsg != nil {
 		status = "failed"
@@ -80,8 +81,10 @@ func (c *CoordinatorClient) ReportTaskResult(ctx context.Context, taskID, runID,
 		Status: status,
 		Output: output,
 		Metadata: map[string]string{
-			"run_id":  runID,
-			"node_id": nodeID,
+			"run_id":           runID,
+			"node_id":          nodeID,
+			"workflow_id":      workflowID,
+			"workflow_version": strconv.Itoa(workflowVersion),
 		},
 	}
 
