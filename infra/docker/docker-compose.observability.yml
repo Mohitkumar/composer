@@ -1,0 +1,73 @@
+services:
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:latest
+    command: ["--config=/etc/otel-collector-config.yaml"]
+    volumes:
+      - ./otel-collector-config.yaml:/etc/otel-collector-config.yaml:ro
+    ports:
+      - "4317:4317"
+      - "4318:4318"
+      - "8889:8889"
+    depends_on:
+      - jaeger
+    restart: unless-stopped
+
+  jaeger:
+    image: jaegertracing/all-in-one:latest
+    environment:
+      - COLLECTOR_OTLP_ENABLED=true
+    ports:
+      - "16686:16686"
+      - "14250:14250"
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:latest
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9090:9090"
+    depends_on:
+      - otel-collector
+    restart: unless-stopped
+
+  loki:
+    image: grafana/loki:latest
+    command: -config.file=/etc/loki/loki-config.yaml
+    volumes:
+      - ./loki-config.yaml:/etc/loki/loki-config.yaml:ro
+      - loki_data:/loki
+    ports:
+      - "3100:3100"
+    restart: unless-stopped
+
+  promtail:
+    image: grafana/promtail:latest
+    command: -config.file=/etc/promtail/promtail-config.yaml
+    volumes:
+      - ./promtail-config.yaml:/etc/promtail/promtail-config.yaml:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    depends_on:
+      - loki
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:latest
+    environment:
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Admin
+      - GF_AUTH_DISABLE_LOGIN_FORM=true
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana_data:/var/lib/grafana
+    ports:
+      - "3001:3000"
+    depends_on:
+      - prometheus
+      - loki
+    restart: unless-stopped
+
+volumes:
+  loki_data:
+  grafana_data:

@@ -3,12 +3,14 @@ package coord
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/mohitkumar/composer/pkg/db"
 	"github.com/mohitkumar/composer/pkg/lease"
 	"github.com/mohitkumar/composer/pkg/outbox"
 	"github.com/mohitkumar/composer/pkg/redisq"
 	"github.com/mohitkumar/composer/pkg/template"
+	"github.com/mohitkumar/composer/pkg/util"
 	"github.com/rs/zerolog"
 )
 
@@ -92,7 +94,40 @@ func (b *Coordinator) Run(ctx context.Context) error {
 
 	b.Logger.Info().Msg("starting outbox enqueuer")
 	go b.Outbox.Run(ctx)
+
+	go b.depthSamplerLoop(ctx)
 	return nil
+}
+
+// depthSamplerLoop periodically records Redis stream depth and outbox backlog as OTel gauges.
+func (b *Coordinator) depthSamplerLoop(ctx context.Context) {
+	ticker := time.NewTicker(15 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			b.sampleDepths(ctx)
+		}
+	}
+}
+
+func (b *Coordinator) sampleDepths(ctx context.Context) {
+	if util.RedisStreamDepthGauge != nil {
+		n, err := b.Redis.Client().XLen(ctx, b.Config.OutboxConfig.StreamPrefix+"tasks").Result()
+		if err == nil {
+			util.RedisStreamDepthGauge.Record(ctx, n)
+		}
+	}
+	if util.OutboxBacklogGauge != nil {
+		var count int64
+		err := b.DB.QueryRow(ctx,
+			`SELECT COUNT(*) FROM outbox WHERE status IN ('PENDING','RETRY','IN_FLIGHT')`).Scan(&count)
+		if err == nil {
+			util.OutboxBacklogGauge.Record(ctx, count)
+		}
+	}
 }
 
 func (b *Coordinator) Shutdown() error {

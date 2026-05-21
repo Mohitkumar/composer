@@ -32,6 +32,10 @@ var (
 	outboxFailedCounter    metric.Int64Counter
 	outboxDLQCounter       metric.Int64Counter
 	outboxInFlightGauge    metric.Int64UpDownCounter
+
+	// Depth gauges — set by the coordinator's background sampler
+	RedisStreamDepthGauge metric.Int64Gauge
+	OutboxBacklogGauge    metric.Int64Gauge
 )
 
 // InitMetrics initializes all metrics. Should be called once at startup.
@@ -146,6 +150,22 @@ func InitMetrics() error {
 	outboxInFlightGauge, err = meter.Int64UpDownCounter(
 		"outbox.in_flight",
 		metric.WithDescription("Current number of outbox messages being processed"),
+	)
+	if err != nil {
+		return err
+	}
+
+	RedisStreamDepthGauge, err = meter.Int64Gauge(
+		"redis.stream.depth",
+		metric.WithDescription("Number of messages in the Redis task stream"),
+	)
+	if err != nil {
+		return err
+	}
+
+	OutboxBacklogGauge, err = meter.Int64Gauge(
+		"outbox.backlog",
+		metric.WithDescription("Number of outbox rows waiting to be published (PENDING + RETRY)"),
 	)
 	if err != nil {
 		return err
