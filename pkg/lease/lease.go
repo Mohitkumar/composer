@@ -59,15 +59,14 @@ func (m *Manager) AcquireTaskLease(ctx context.Context, taskID, owner string, tt
 	return id != "", nil
 }
 
-// ReleaseTaskLease releases lease and optionally set state back to PENDING or leave as-is if finished externally.
-// Here we just clear the lease_owner and leave state as-is (coordinator will update on completion)
-func (m *Manager) ReleaseTaskLease(ctx context.Context, taskID, owner string) error {
-	conn, err := m.db.Acquire(ctx)
-	if err != nil {
-		return err
-	}
-	defer conn.Release()
-
-	_, err = conn.Exec(ctx, `UPDATE task_instances SET lease_owner=NULL, lease_expires_at=NULL, updated_at=NOW() WHERE id=$1 AND lease_owner=$2`, taskID, owner)
+// ClearTaskLease nulls out the lease columns for the given task inside an
+// existing transaction. Called by the coordinator after marking a task completed
+// or failed so the row no longer looks "owned" by a worker.
+func (m *Manager) ClearTaskLease(ctx context.Context, tx pgx.Tx, runID, nodeID string) error {
+	_, err := tx.Exec(ctx,
+		`UPDATE task_instances
+		    SET lease_owner=NULL, lease_expires_at=NULL, updated_at=now()
+		  WHERE run_id=$1 AND node_id=$2`,
+		runID, nodeID)
 	return err
 }

@@ -77,7 +77,7 @@ func (c *Coordinator) StartWorkflow(ctx context.Context, p *model.StartWorkflowR
 		if err := c.Repository.InsertTaskInstance(ctx, tx, taskID, p.RunID, startNode, taskInput, scheduledAt, taskLogger, span); err != nil {
 			return err
 		}
-		c.recordTaskCreated(ctx, taskLogger, span, taskID, p.RunID, startNode)
+		c.recordTaskCreated(ctx, span, taskID, p.RunID, startNode)
 
 		return c.Repository.InsertTaskOutbox(ctx, tx, taskID, p.RunID, p.WorkflowID, p.WorkflowVersion, startNode, taskInput, taskLogger, span)
 	})
@@ -132,7 +132,7 @@ func (c *Coordinator) HandleNodeCompleted(ctx context.Context, taskID, runID, no
 			alreadyCompleted = true
 			return nil
 		}
-		if err := c.Repository.ClearTaskLease(ctx, tx, runID, nodeID, logger, span); err != nil {
+		if err := c.LeaseManager.ClearTaskLease(ctx, tx, runID, nodeID); err != nil {
 			return err
 		}
 		runContext, err = c.Repository.LoadAndUpdateRunContext(ctx, tx, runID, nodeID, output, logger, span)
@@ -280,7 +280,7 @@ func (c *Coordinator) persistRoutingResult(
 				logger.Error().Err(err).Str("node_id", cn.Node.NodeID).Msg("failed to mark control node as completed")
 				return fmt.Errorf("failed to mark control node %s as completed: %w", cn.Node.NodeID, err)
 			}
-			c.recordTaskCreated(ctx, logger, span, taskID, runID, cn.Node)
+			c.recordTaskCreated(ctx, span, taskID, runID, cn.Node)
 		}
 
 		// ── 2. Persist the updated run context ──────────────────────────────────
@@ -334,7 +334,7 @@ func (c *Coordinator) persistRoutingResult(
 				}
 				celErrors = append(celErrors, fmt.Sprintf("node %s: %v", node.NodeID, err))
 				celFailed++
-				c.recordTaskCreated(ctx, taskLogger, span, nextTaskID, runID, node)
+				c.recordTaskCreated(ctx, span, nextTaskID, runID, node)
 				continue
 			}
 
@@ -343,7 +343,7 @@ func (c *Coordinator) persistRoutingResult(
 					Msg("failed to insert task instance")
 				return fmt.Errorf("failed to create task instance for node %s: %w", node.NodeID, err)
 			}
-			c.recordTaskCreated(ctx, taskLogger, span, nextTaskID, runID, node)
+			c.recordTaskCreated(ctx, span, nextTaskID, runID, node)
 
 			if err := c.Repository.InsertTaskOutbox(ctx, tx, nextTaskID, runID, workflowID, workflowVersion, node, taskInput, taskLogger, span); err != nil {
 				taskLogger.Error().Err(err).Str("error_type", "OUTBOX_CREATION_ERROR").
@@ -400,7 +400,7 @@ func (c *Coordinator) HandleNodeFailed(ctx context.Context, runID, nodeID, error
 			return nil
 		}
 
-		if err := c.Repository.ClearTaskLease(ctx, tx, runID, nodeID, logger, span); err != nil {
+		if err := c.LeaseManager.ClearTaskLease(ctx, tx, runID, nodeID); err != nil {
 			return err
 		}
 
@@ -549,7 +549,7 @@ func (c *Coordinator) RetryWorkflowInstance(ctx context.Context, p *model.RetryW
 		if err := c.Repository.InsertTaskInstance(ctx, tx, taskID, p.RunID, restartNode, taskInput, time.Now(), taskLogger, span); err != nil {
 			return err
 		}
-		c.recordTaskCreated(ctx, taskLogger, span, taskID, p.RunID, restartNode)
+		c.recordTaskCreated(ctx, span, taskID, p.RunID, restartNode)
 		return c.Repository.InsertTaskOutbox(ctx, tx, taskID, p.RunID, workflowID, workflowVersion, restartNode, taskInput, taskLogger, span)
 	})
 	if err != nil {
@@ -591,7 +591,7 @@ func (c *Coordinator) newRunContext(input json.RawMessage, config json.RawMessag
 	}
 }
 
-func (c *Coordinator) recordTaskCreated(ctx context.Context, logger zerolog.Logger, span trace.Span, taskID, runID string, node *model.Node) {
+func (c *Coordinator) recordTaskCreated(ctx context.Context, span trace.Span, taskID, runID string, node *model.Node) {
 	nodeTypeForRouting := node.GetNodeTypeForRouting()
 	util.RecordTaskCreated(ctx, taskID, runID, node.NodeID, nodeTypeForRouting)
 	util.SetSpanAttributes(span,
