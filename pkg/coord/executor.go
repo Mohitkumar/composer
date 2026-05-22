@@ -91,13 +91,6 @@ func (c *Coordinator) StartWorkflow(ctx context.Context, p *model.StartWorkflowR
 	return nil
 }
 
-// HandleNodeCompleted is the hot path. Structure:
-//
-//  1. Txn A  — record completion, load updated RunContext
-//  2. Build ExecutionState (no DB)
-//  3. If branch node: Txn B (FOR UPDATE) — count completed siblings
-//  4. NextNodes — pure state machine, no DB
-//  5. Txn C  — persist RoutingResult (control nodes + executable tasks)
 func (c *Coordinator) HandleNodeCompleted(ctx context.Context, taskID, runID, nodeID, workflowID string, workflowVersion int, output json.RawMessage) error {
 	ctx, span := util.StartTaskSpan(ctx, "completed", "", runID, nodeID)
 	defer util.EndSpan(span, nil)
@@ -111,7 +104,6 @@ func (c *Coordinator) HandleNodeCompleted(ctx context.Context, taskID, runID, no
 	logger.Info().Msg("handling node completion")
 	startTime := time.Now()
 
-	// ── Txn A: record completion ────────────────────────────────────────────────
 	dag, err := c.loadDAG(ctx, workflowID, workflowVersion)
 	if err != nil {
 		return err
@@ -160,7 +152,6 @@ func (c *Coordinator) HandleNodeCompleted(ctx context.Context, taskID, runID, no
 		util.Attribute("task.node_type", completedNodeType),
 	)
 
-	// ── Build state machine ─────────────────────────────────────────────────────
 	execState := model.NewExecutionState(dag, runContext, c.Template)
 
 	completedNode := execState.GetNode(nodeID)
