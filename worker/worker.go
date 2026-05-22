@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"sync"
 	"time"
 
@@ -22,11 +23,13 @@ type Worker struct {
 
 // TaskMessage is the fields we expect in each stream message.
 type TaskMessage struct {
-	TaskID   string          `json:"task_id"`
-	RunID    string          `json:"run_id"`
-	NodeID   string          `json:"node_id"`
-	NodeType string          `json:"node_type"` // e.g. "http", "python", "js"
-	Input    json.RawMessage `json:"input"`
+	TaskID          string          `json:"task_id"`
+	RunID           string          `json:"run_id"`
+	NodeID          string          `json:"node_id"`
+	NodeType        string          `json:"node_type"` // e.g. "http", "python", "js"
+	WorkflowID      string          `json:"workflow_id"`
+	WorkflowVersion int             `json:"workflow_version"`
+	Input           json.RawMessage `json:"input"`
 }
 
 // NewWorker creates a new Worker.
@@ -206,7 +209,7 @@ func (w *Worker) deadLetter(ctx context.Context, msg stream.Message, maxDeliveri
 
 	errStr := fmt.Sprintf("task exceeded max delivery attempts (%d)", maxDeliveries)
 	if reportErr := w.coordClient.ReportTaskResult(
-		ctx, taskMsg.TaskID, taskMsg.RunID, taskMsg.NodeID, nil, &errStr,
+		ctx, taskMsg.TaskID, taskMsg.RunID, taskMsg.NodeID, taskMsg.WorkflowID, taskMsg.WorkflowVersion, nil, &errStr,
 	); reportErr != nil {
 		w.cfg.Logger.Error().
 			Err(reportErr).
@@ -275,6 +278,14 @@ func parseTaskMessage(values map[string]any) (TaskMessage, error) {
 	} else {
 		t.NodeType = "http"
 	}
+	if s, ok := get("workflow_id"); ok {
+		t.WorkflowID = s
+	}
+	if s, ok := get("workflow_version"); ok {
+		if v, err := strconv.Atoi(s); err == nil {
+			t.WorkflowVersion = v
+		}
+	}
 	if s, ok := get("input"); ok {
 		t.Input = json.RawMessage(s)
 	}
@@ -324,7 +335,7 @@ func (w *Worker) processMessage(ctx context.Context, msg *TaskMessage) error {
 		Bool("success", execErr == nil).
 		Msg("task executed")
 
-	if err := w.coordClient.ReportTaskResult(ctx, msg.TaskID, msg.RunID, msg.NodeID, execOutput, execErr); err != nil {
+	if err := w.coordClient.ReportTaskResult(ctx, msg.TaskID, msg.RunID, msg.NodeID, msg.WorkflowID, msg.WorkflowVersion, execOutput, execErr); err != nil {
 		logger.Error().Err(err).Msg("failed to report task result to coordinator")
 		return fmt.Errorf("failed to report result: %w", err)
 	}

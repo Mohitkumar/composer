@@ -77,35 +77,21 @@ func (c *Coordinator) StartWorkflow(ctx context.Context, p *model.StartWorkflowR
 		if err := c.Repository.InsertTaskInstance(ctx, tx, taskID, p.RunID, startNode, taskInput, scheduledAt, taskLogger, span); err != nil {
 			return err
 		}
-		c.recordTaskCreated(ctx, taskLogger, span, taskID, p.RunID, startNode)
+		c.recordTaskCreated(ctx, span, taskID, p.RunID, startNode)
 
-		return c.Repository.InsertTaskOutbox(ctx, tx, taskID, p.RunID, startNode, taskInput, taskLogger, span)
+		return c.Repository.InsertTaskOutbox(ctx, tx, taskID, p.RunID, p.WorkflowID, p.WorkflowVersion, startNode, taskInput, taskLogger, span)
 	})
 	if err != nil {
 		return err
 	}
 
 	duration := time.Since(startTime)
-	logger.Info().Dur("duration_ms", duration).Msg("workflow started successfully")
 	util.RecordWorkflowStarted(ctx, p.WorkflowID, p.RunID)
 	util.SetSpanAttributes(span, util.AttributeInt("workflow.duration_ms", duration.Milliseconds()))
 	return nil
 }
 
-// HandleNodeCompleted is the hot path. Structure:
-//
-//  1. Txn A  — record completion, load updated RunContext
-//  2. Build ExecutionState (no DB)
-//  3. If branch node: Txn B (FOR UPDATE) — count completed siblings
-//  4. NextNodes — pure state machine, no DB
-//  5. Txn C  — persist RoutingResult (control nodes + executable tasks)
-func (c *Coordinator) HandleNodeCompleted(ctx context.Context, taskID string, runID string, nodeID string, output json.RawMessage) error {
-	workflowID, workflowVersion, err := c.Repository.GetWorkflowRunInfo(ctx, runID)
-	if err != nil {
-		c.Logger.Error().Err(err).Str("run_id", runID).Msg("failed to get workflow run")
-		return fmt.Errorf("failed to get workflow run: %w", err)
-	}
-
+func (c *Coordinator) HandleNodeCompleted(ctx context.Context, taskID, runID, nodeID, workflowID string, workflowVersion int, output json.RawMessage) error {
 	ctx, span := util.StartTaskSpan(ctx, "completed", "", runID, nodeID)
 	defer util.EndSpan(span, nil)
 
@@ -118,7 +104,6 @@ func (c *Coordinator) HandleNodeCompleted(ctx context.Context, taskID string, ru
 	logger.Info().Msg("handling node completion")
 	startTime := time.Now()
 
-	// ── Txn A: record completion ────────────────────────────────────────────────
 	dag, err := c.loadDAG(ctx, workflowID, workflowVersion)
 	if err != nil {
 		return err
@@ -139,7 +124,7 @@ func (c *Coordinator) HandleNodeCompleted(ctx context.Context, taskID string, ru
 			alreadyCompleted = true
 			return nil
 		}
-		if err := c.Repository.ClearTaskLease(ctx, tx, runID, nodeID, logger, span); err != nil {
+		if err := c.LeaseManager.ClearTaskLease(ctx, tx, runID, nodeID); err != nil {
 			return err
 		}
 		runContext, err = c.Repository.LoadAndUpdateRunContext(ctx, tx, runID, nodeID, output, logger, span)
@@ -167,7 +152,6 @@ func (c *Coordinator) HandleNodeCompleted(ctx context.Context, taskID string, ru
 		util.Attribute("task.node_type", completedNodeType),
 	)
 
-	// ── Build state machine ─────────────────────────────────────────────────────
 	execState := model.NewExecutionState(dag, runContext, c.Template)
 
 	completedNode := execState.GetNode(nodeID)
@@ -176,7 +160,6 @@ func (c *Coordinator) HandleNodeCompleted(ctx context.Context, taskID string, ru
 		return fmt.Errorf("node %s not found in workflow spec", nodeID)
 	}
 
-	// ── Txn B (branch nodes only): count completed siblings ─────────────────────
 	completedBranchCount := 0
 	if execState.IsBranchNode(nodeID) {
 		siblings := execState.BranchSiblingIDs(nodeID)
@@ -190,7 +173,6 @@ func (c *Coordinator) HandleNodeCompleted(ctx context.Context, taskID string, ru
 		}
 	}
 
-	// ── Route (pure state machine, no DB) ───────────────────────────────────────
 	routing, err := execState.NextNodes(nodeID, completedBranchCount)
 	if err != nil {
 		logger.Error().Err(err).Str("node_type", string(completedNode.Type)).Msg("routing failed")
@@ -203,7 +185,6 @@ func (c *Coordinator) HandleNodeCompleted(ctx context.Context, taskID string, ru
 		Int("control_nodes", len(routing.ControlNodes)).
 		Msg("routing resolved")
 
-	// ── Persist result ──────────────────────────────────────────────────────────
 	if routing.IsEmpty() {
 		err = c.ExecuteWithTransaction(ctx, span, logger, func(ctx context.Context, tx pgx.Tx) error {
 			done, pending, err := c.finalizeWorkflowIfComplete(ctx, tx, runID, workflowID, span, logger)
@@ -219,7 +200,7 @@ func (c *Coordinator) HandleNodeCompleted(ctx context.Context, taskID string, ru
 			logger.Error().Err(err).Msg("failed to finalize workflow completion check")
 		}
 	} else {
-		celFailed, totalExec, persistErr := c.persistRoutingResult(ctx, span, logger, runID, execState, routing)
+		celFailed, totalExec, persistErr := c.persistRoutingResult(ctx, span, logger, runID, workflowID, workflowVersion, execState, routing)
 		if persistErr != nil {
 			failedNodeID := "unknown"
 			if len(routing.ExecutableNodes) > 0 {
@@ -262,12 +243,12 @@ func (c *Coordinator) persistRoutingResult(
 	ctx context.Context,
 	span trace.Span,
 	logger zerolog.Logger,
-	runID string,
+	runID, workflowID string,
+	workflowVersion int,
 	execState *model.ExecutionState,
 	routing *model.RoutingResult,
 ) (celFailed, totalExec int, err error) {
 	err = c.ExecuteWithTransaction(ctx, span, logger, func(ctx context.Context, tx pgx.Tx) error {
-		// ── 1. Persist control nodes as instantly-completed ──────────────────────
 		for _, cn := range routing.ControlNodes {
 			exists, existingTaskID, existingState, err := c.Repository.TaskInstanceExists(ctx, tx, runID, cn.Node.NodeID)
 			if err != nil {
@@ -290,7 +271,7 @@ func (c *Coordinator) persistRoutingResult(
 				logger.Error().Err(err).Str("node_id", cn.Node.NodeID).Msg("failed to mark control node as completed")
 				return fmt.Errorf("failed to mark control node %s as completed: %w", cn.Node.NodeID, err)
 			}
-			c.recordTaskCreated(ctx, logger, span, taskID, runID, cn.Node)
+			c.recordTaskCreated(ctx, span, taskID, runID, cn.Node)
 		}
 
 		// ── 2. Persist the updated run context ──────────────────────────────────
@@ -344,7 +325,7 @@ func (c *Coordinator) persistRoutingResult(
 				}
 				celErrors = append(celErrors, fmt.Sprintf("node %s: %v", node.NodeID, err))
 				celFailed++
-				c.recordTaskCreated(ctx, taskLogger, span, nextTaskID, runID, node)
+				c.recordTaskCreated(ctx, span, nextTaskID, runID, node)
 				continue
 			}
 
@@ -353,9 +334,9 @@ func (c *Coordinator) persistRoutingResult(
 					Msg("failed to insert task instance")
 				return fmt.Errorf("failed to create task instance for node %s: %w", node.NodeID, err)
 			}
-			c.recordTaskCreated(ctx, taskLogger, span, nextTaskID, runID, node)
+			c.recordTaskCreated(ctx, span, nextTaskID, runID, node)
 
-			if err := c.Repository.InsertTaskOutbox(ctx, tx, nextTaskID, runID, node, taskInput, taskLogger, span); err != nil {
+			if err := c.Repository.InsertTaskOutbox(ctx, tx, nextTaskID, runID, workflowID, workflowVersion, node, taskInput, taskLogger, span); err != nil {
 				taskLogger.Error().Err(err).Str("error_type", "OUTBOX_CREATION_ERROR").
 					Msg("failed to create outbox entry")
 				return fmt.Errorf("failed to create outbox entry for node %s: %w", node.NodeID, err)
@@ -380,10 +361,7 @@ func (c *Coordinator) persistRoutingResult(
 }
 
 // HandleNodeFailed marks a node as failed and propagates workflow failure if no tasks remain.
-func (c *Coordinator) HandleNodeFailed(ctx context.Context, runID string, nodeID string, errorMsg string) error {
-	var workflowID string
-	_ = c.DB.QueryRow(ctx, `SELECT workflow_definition_id FROM workflow_runs WHERE id=$1`, runID).Scan(&workflowID)
-
+func (c *Coordinator) HandleNodeFailed(ctx context.Context, runID, nodeID, errorMsg, workflowID string) error {
 	ctx, span := util.StartTaskSpan(ctx, "failed", "", runID, nodeID)
 	defer util.EndSpan(span, nil)
 
@@ -413,7 +391,7 @@ func (c *Coordinator) HandleNodeFailed(ctx context.Context, runID string, nodeID
 			return nil
 		}
 
-		if err := c.Repository.ClearTaskLease(ctx, tx, runID, nodeID, logger, span); err != nil {
+		if err := c.LeaseManager.ClearTaskLease(ctx, tx, runID, nodeID); err != nil {
 			return err
 		}
 
@@ -562,8 +540,8 @@ func (c *Coordinator) RetryWorkflowInstance(ctx context.Context, p *model.RetryW
 		if err := c.Repository.InsertTaskInstance(ctx, tx, taskID, p.RunID, restartNode, taskInput, time.Now(), taskLogger, span); err != nil {
 			return err
 		}
-		c.recordTaskCreated(ctx, taskLogger, span, taskID, p.RunID, restartNode)
-		return c.Repository.InsertTaskOutbox(ctx, tx, taskID, p.RunID, restartNode, taskInput, taskLogger, span)
+		c.recordTaskCreated(ctx, span, taskID, p.RunID, restartNode)
+		return c.Repository.InsertTaskOutbox(ctx, tx, taskID, p.RunID, workflowID, workflowVersion, restartNode, taskInput, taskLogger, span)
 	})
 	if err != nil {
 		return err
@@ -604,8 +582,7 @@ func (c *Coordinator) newRunContext(input json.RawMessage, config json.RawMessag
 	}
 }
 
-func (c *Coordinator) recordTaskCreated(ctx context.Context, logger zerolog.Logger, span trace.Span, taskID, runID string, node *model.Node) {
-	logger.Info().Msg("created task instance")
+func (c *Coordinator) recordTaskCreated(ctx context.Context, span trace.Span, taskID, runID string, node *model.Node) {
 	nodeTypeForRouting := node.GetNodeTypeForRouting()
 	util.RecordTaskCreated(ctx, taskID, runID, node.NodeID, nodeTypeForRouting)
 	util.SetSpanAttributes(span,
