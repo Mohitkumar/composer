@@ -27,15 +27,8 @@ var (
 	taskFailedCounter     metric.Int64Counter
 	taskDurationHistogram metric.Float64Histogram
 
-	// System metrics
-	outboxProcessedCounter metric.Int64Counter
-	outboxFailedCounter    metric.Int64Counter
-	outboxDLQCounter       metric.Int64Counter
-	outboxInFlightGauge    metric.Int64UpDownCounter
-
-	// Depth gauges — set by the coordinator's background sampler
-	RedisStreamDepthGauge metric.Int64Gauge
-	OutboxBacklogGauge    metric.Int64Gauge
+	// Matching service depth gauge — set by the coordinator's background sampler
+	MatchingServiceDepthGauge metric.Int64Gauge
 
 	// Process metrics (coordinator + worker)
 	ProcessRSSGauge        metric.Int64Gauge
@@ -48,9 +41,6 @@ var (
 	DBPoolTotalGauge     metric.Int64Gauge
 	DBPoolMaxGauge       metric.Int64Gauge
 	DBPoolWaitCountGauge metric.Int64Gauge
-
-	// Redis server memory (coordinator only)
-	RedisMemoryUsedGauge metric.Int64Gauge
 
 	// Workflow cache metrics (coordinator only)
 	WfCacheSizeGauge    metric.Int64Gauge
@@ -142,50 +132,9 @@ func InitMetrics() error {
 		return err
 	}
 
-	// Outbox metrics
-	outboxProcessedCounter, err = meter.Int64Counter(
-		"outbox.processed",
-		metric.WithDescription("Total number of outbox messages processed"),
-	)
-	if err != nil {
-		return err
-	}
-
-	outboxFailedCounter, err = meter.Int64Counter(
-		"outbox.failed",
-		metric.WithDescription("Total number of outbox messages that failed to process"),
-	)
-	if err != nil {
-		return err
-	}
-
-	outboxDLQCounter, err = meter.Int64Counter(
-		"outbox.dlq",
-		metric.WithDescription("Total number of outbox messages moved to dead-letter queue"),
-	)
-	if err != nil {
-		return err
-	}
-
-	outboxInFlightGauge, err = meter.Int64UpDownCounter(
-		"outbox.in_flight",
-		metric.WithDescription("Current number of outbox messages being processed"),
-	)
-	if err != nil {
-		return err
-	}
-
-	RedisStreamDepthGauge, err = meter.Int64Gauge(
-		"redis.stream.depth",
-		metric.WithDescription("Number of messages in the Redis task stream"),
-	)
-	if err != nil {
-		return err
-	}
-
-	OutboxBacklogGauge, err = meter.Int64Gauge(
-		"outbox.backlog",
-		metric.WithDescription("Number of outbox rows waiting to be published (PENDING + RETRY)"),
+	MatchingServiceDepthGauge, err = meter.Int64Gauge(
+		"matching.queue.depth",
+		metric.WithDescription("Number of tasks queued in the in-memory matching service"),
 	)
 	if err != nil {
 		return err
@@ -254,16 +203,6 @@ func InitMetrics() error {
 	DBPoolWaitCountGauge, err = meter.Int64Gauge(
 		"db.pool.wait_count",
 		metric.WithDescription("Cumulative number of times a connection was not immediately available"),
-	)
-	if err != nil {
-		return err
-	}
-
-	// Redis server memory
-	RedisMemoryUsedGauge, err = meter.Int64Gauge(
-		"redis.memory.used_bytes",
-		metric.WithDescription("Redis server used_memory in bytes"),
-		metric.WithUnit("By"),
 	)
 	if err != nil {
 		return err
@@ -376,47 +315,3 @@ func RecordTaskFailed(ctx context.Context, taskID, runID, nodeID, nodeType strin
 	}
 }
 
-// RecordOutboxProcessed records that an outbox message was processed
-func RecordOutboxProcessed(ctx context.Context, stream string) {
-	if outboxProcessedCounter != nil {
-		outboxProcessedCounter.Add(ctx, 1,
-			metric.WithAttributes(
-				attribute.String("outbox.stream", stream),
-			),
-		)
-	}
-}
-
-// RecordOutboxFailed records that an outbox message failed to process
-func RecordOutboxFailed(ctx context.Context, stream string, reason string) {
-	if outboxFailedCounter != nil {
-		outboxFailedCounter.Add(ctx, 1,
-			metric.WithAttributes(
-				attribute.String("outbox.stream", stream),
-				attribute.String("error.reason", reason),
-			),
-		)
-	}
-}
-
-// RecordOutboxDLQ records that an outbox message was moved to DLQ
-func RecordOutboxDLQ(ctx context.Context, stream string) {
-	if outboxDLQCounter != nil {
-		outboxDLQCounter.Add(ctx, 1,
-			metric.WithAttributes(
-				attribute.String("outbox.stream", stream),
-			),
-		)
-	}
-}
-
-// RecordOutboxInFlight increments or decrements the in-flight counter
-func RecordOutboxInFlight(ctx context.Context, stream string, delta int64) {
-	if outboxInFlightGauge != nil {
-		outboxInFlightGauge.Add(ctx, delta,
-			metric.WithAttributes(
-				attribute.String("outbox.stream", stream),
-			),
-		)
-	}
-}

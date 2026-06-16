@@ -249,7 +249,7 @@ func (c *Coordinator) HandleNodeCompleted(ctx context.Context, taskID, runID, no
 //
 // Control nodes (SWITCH/FORK) are created as instantly-completed task instances.
 // The updated RunContext (which reflects SWITCH pass-through outputs) is written.
-// Executable nodes get task instances and outbox entries; CEL failures become FAILED instances.
+// Executable nodes get task instances dispatched to the matching service; CEL failures become FAILED instances.
 func (c *Coordinator) persistRoutingResult(
 	ctx context.Context,
 	span trace.Span,

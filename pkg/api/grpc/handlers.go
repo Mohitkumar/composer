@@ -89,25 +89,6 @@ func (s *WorkflowService) ReportTaskResult(ctx context.Context, req *workflowpb.
 	}, nil
 }
 
-// ExecuteTask is not used in current architecture (workers pull from Redis)
-func (s *WorkflowService) ExecuteTask(ctx context.Context, req *workflowpb.ExecuteTaskRequest) (*workflowpb.ExecuteTaskResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "ExecuteTask is not implemented - workers pull tasks from Redis streams")
-}
-
-// GetTaskStatus retrieves task status
-func (s *WorkflowService) GetTaskStatus(ctx context.Context, req *workflowpb.GetTaskStatusRequest) (*workflowpb.GetTaskStatusResponse, error) {
-	// TODO: Implement task status retrieval
-	return nil, status.Error(codes.Unimplemented, "GetTaskStatus is not yet implemented")
-}
-
-// Heartbeat handles worker heartbeats
-func (s *WorkflowService) Heartbeat(ctx context.Context, req *workflowpb.HeartbeatRequest) (*workflowpb.HeartbeatResponse, error) {
-	// TODO: Implement heartbeat tracking
-	return &workflowpb.HeartbeatResponse{
-		Acknowledged: true,
-	}, nil
-}
-
 // AcquireTaskLease allows a worker to claim a lease before executing a task.
 func (s *WorkflowService) AcquireTaskLease(ctx context.Context, req *workflowpb.AcquireTaskLeaseRequest) (*workflowpb.AcquireTaskLeaseResponse, error) {
 	if req.GetTaskId() == "" || req.GetOwner() == "" {
