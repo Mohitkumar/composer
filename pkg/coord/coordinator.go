@@ -2,31 +2,25 @@ package coord
 
 import (
 	"context"
-	"fmt"
-	"strconv"
-	"strings"
 	"time"
 
 	"github.com/mohitkumar/composer/pkg/db"
 	"github.com/mohitkumar/composer/pkg/lease"
-	"github.com/mohitkumar/composer/pkg/outbox"
-	"github.com/mohitkumar/composer/pkg/redisq"
-	redisstream "github.com/mohitkumar/composer/pkg/stream/redis"
+	"github.com/mohitkumar/composer/pkg/matching"
 	"github.com/mohitkumar/composer/pkg/template"
 	"github.com/mohitkumar/composer/pkg/util"
 	"github.com/rs/zerolog"
 )
 
 type Coordinator struct {
-	Config       *Config
-	Logger       *zerolog.Logger
-	Redis        *redisq.RedisStream
-	DB           db.DB
-	LeaseManager *lease.Manager
-	Outbox       *outbox.OutboxEnqueuer
-	Template     *template.Resolver
-	Repository   WorkflowRepository // Repository for database operations
-	wfCache      *workflowCache
+	Config         *Config
+	Logger         *zerolog.Logger
+	DB             db.DB
+	LeaseManager   *lease.Manager
+	MatchingService *matching.Service
+	Template       *template.Resolver
+	Repository     WorkflowRepository
+	wfCache        *workflowCache
 
 	// last-seen cumulative values for cache hit/miss delta counters
 	lastCacheHits   uint64
@@ -34,33 +28,14 @@ type Coordinator struct {
 }
 
 func NewCoordinator(config *Config, logger *zerolog.Logger) (*Coordinator, error) {
-	// Create Redis stream
-	redisStream, err := redisq.NewRedisStream(&config.RedisConfig)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create redis stream: %w", err)
-	}
-
-	// Create database connection pool
 	dbPool, err := db.NewPool(context.Background(), &config.DBConfig, *logger)
 	if err != nil {
 		return nil, err
 	}
 
-	// Create lease manager
 	leaseManager := lease.NewManager(dbPool)
+	matchingService := matching.NewService(*logger)
 
-	// Create outbox enqueuer
-	outboxEnqueuer := outbox.NewOutboxEnqueuer(outbox.EnqueuerConfig{
-		DB:           dbPool,
-		Publisher:    redisstream.NewPublisher(redisStream),
-		Logger:       *logger,
-		BatchSize:    config.OutboxConfig.BatchSize,
-		Concurrency:  config.OutboxConfig.Concurrency,
-		PollInterval: config.OutboxConfig.PollInterval,
-		StreamPrefix: config.OutboxConfig.StreamPrefix,
-	})
-
-	// Create template resolver
 	templateResolver, err := template.NewResolver()
 	if err != nil {
 		dbPool.Close()
@@ -70,21 +45,19 @@ func NewCoordinator(config *Config, logger *zerolog.Logger) (*Coordinator, error
 	wfCache, err := newWorkflowCache(defaultCacheTTL)
 	if err != nil {
 		dbPool.Close()
-		return nil, fmt.Errorf("failed to create workflow cache: %w", err)
+		return nil, err
 	}
 
 	coordinator := &Coordinator{
-		Config:       config,
-		Logger:       logger,
-		Redis:        redisStream,
-		DB:           dbPool,
-		LeaseManager: leaseManager,
-		Outbox:       outboxEnqueuer,
-		Template:     templateResolver,
-		wfCache:      wfCache,
+		Config:          config,
+		Logger:          logger,
+		DB:              dbPool,
+		LeaseManager:    leaseManager,
+		MatchingService: matchingService,
+		Template:        templateResolver,
+		wfCache:         wfCache,
 	}
 
-	// Create repository
 	coordinator.Repository = NewWorkflowRepository(dbPool, coordinator)
 
 	return coordinator, nil
@@ -93,14 +66,20 @@ func NewCoordinator(config *Config, logger *zerolog.Logger) (*Coordinator, error
 func (b *Coordinator) Run(ctx context.Context) error {
 	b.Logger.Info().Msg("starting coordinator")
 
-	// Recover any tasks orphaned by a previous coordinator crash before starting
-	// the outbox enqueuer, so recovered outbox entries are picked up in the first poll.
-	if err := b.Repository.RecoverOrphanedTasks(ctx, *b.Logger); err != nil {
+	// Recover tasks orphaned by a previous coordinator crash: reset expired
+	// RUNNING tasks to PENDING, then dispatch all PENDING tasks into the
+	// in-memory matching service so waiting workers pick them up immediately.
+	tasks, err := b.Repository.RecoverOrphanedTasks(ctx, *b.Logger)
+	if err != nil {
 		b.Logger.Error().Err(err).Msg("startup recovery failed — continuing anyway")
+	} else {
+		for _, t := range tasks {
+			b.MatchingService.Dispatch(t)
+		}
+		if len(tasks) > 0 {
+			b.Logger.Info().Int("count", len(tasks)).Msg("re-dispatched orphaned tasks to matching service")
+		}
 	}
-
-	b.Logger.Info().Msg("starting outbox enqueuer")
-	go b.Outbox.Run(ctx)
 
 	go b.metricsSamplerLoop(ctx)
 	return nil
@@ -121,20 +100,12 @@ func (b *Coordinator) metricsSamplerLoop(ctx context.Context) {
 }
 
 func (b *Coordinator) sampleMetrics(ctx context.Context) {
-	// Redis stream depth
-	if util.RedisStreamDepthGauge != nil {
-		if n, err := b.Redis.Client().XLen(ctx, b.Config.OutboxConfig.StreamPrefix+"tasks").Result(); err == nil {
-			util.RedisStreamDepthGauge.Record(ctx, n)
-		}
-	}
-
-	// Outbox backlog
-	if util.OutboxBacklogGauge != nil {
-		var count int64
-		if err := b.DB.QueryRow(ctx,
-			`SELECT COUNT(*) FROM outbox WHERE status IN ('PENDING','RETRY','IN_FLIGHT')`).Scan(&count); err == nil {
-			util.OutboxBacklogGauge.Record(ctx, count)
-		}
+	// Matching service queue depth per task type
+	for tt, depth := range b.MatchingService.QueueDepth() {
+		b.Logger.Debug().
+			Str("task_type", tt).
+			Int("depth", depth).
+			Msg("matching service queue depth")
 	}
 
 	// DB connection pool stats
@@ -154,20 +125,6 @@ func (b *Coordinator) sampleMetrics(ctx context.Context) {
 		}
 		if util.DBPoolWaitCountGauge != nil {
 			util.DBPoolWaitCountGauge.Record(ctx, stat.EmptyAcquireCount())
-		}
-	}
-
-	// Redis server memory
-	if util.RedisMemoryUsedGauge != nil {
-		if info, err := b.Redis.Client().Info(ctx, "memory").Result(); err == nil {
-			for _, line := range strings.Split(info, "\r\n") {
-				if strings.HasPrefix(line, "used_memory:") {
-					if v, err := strconv.ParseInt(strings.TrimPrefix(line, "used_memory:"), 10, 64); err == nil {
-						util.RedisMemoryUsedGauge.Record(ctx, v)
-					}
-					break
-				}
-			}
 		}
 	}
 
@@ -191,25 +148,17 @@ func (b *Coordinator) sampleMetrics(ctx context.Context) {
 		b.lastCacheMisses = stats.Misses()
 	}
 
-	// Process metrics
 	util.SampleProcessMetrics(ctx)
 }
 
 func (b *Coordinator) Shutdown() error {
-	b.Logger.Info().Msg("stopping outbox enqueuer")
-	b.Outbox.Stop()
-
 	b.Logger.Info().Msg("closing connections")
 	if b.wfCache != nil {
 		b.wfCache.close()
 	}
-	if b.Redis != nil {
-		b.Redis.Close()
-	}
 	if b.DB != nil {
 		b.DB.Close()
 	}
-
 	b.Logger.Info().Msg("coordinator shutdown complete")
 	return nil
 }

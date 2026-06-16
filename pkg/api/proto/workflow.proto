@@ -7,18 +7,23 @@ option go_package = "github.com/mohitkumar/composer/pkg/api/proto/gen/go/workflo
 service WorkflowService {
   // ExecuteTask requests a worker to execute a task
   rpc ExecuteTask(ExecuteTaskRequest) returns (ExecuteTaskResponse);
-  
+
   // GetTaskStatus retrieves the status of a running task
   rpc GetTaskStatus(GetTaskStatusRequest) returns (GetTaskStatusResponse);
-  
+
   // ReportTaskResult allows workers to report task execution results
   rpc ReportTaskResult(ReportTaskResultRequest) returns (ReportTaskResultResponse);
-  
+
   // Heartbeat allows workers to send periodic heartbeats
   rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
 
-  // AcquireTaskLease lets workers claim a task lease before execution
+  // AcquireTaskLease lets workers claim a lease on a task before execution
   rpc AcquireTaskLease(AcquireTaskLeaseRequest) returns (AcquireTaskLeaseResponse);
+
+  // PollTaskQueue is a long-polling RPC. The server blocks until a task
+  // matching one of the requested task types is available, then returns it.
+  // Workers should set a deadline (e.g. 30 s) and re-poll on timeout.
+  rpc PollTaskQueue(PollTaskQueueRequest) returns (TaskAssignment);
 }
 
 // ExecuteTaskRequest contains task execution details
@@ -85,4 +90,21 @@ message AcquireTaskLeaseRequest {
 message AcquireTaskLeaseResponse {
   bool acquired = 1;
   string message = 2;
+}
+
+// PollTaskQueueRequest registers a worker to receive tasks.
+message PollTaskQueueRequest {
+  string worker_id = 1;
+  repeated string task_types = 2;
+}
+
+// TaskAssignment carries all fields a worker needs to execute a task.
+message TaskAssignment {
+  string task_id = 1;
+  string run_id = 2;
+  string node_id = 3;
+  string node_type = 4;
+  string workflow_id = 5;
+  int32  workflow_version = 6;
+  bytes  input = 7;
 }

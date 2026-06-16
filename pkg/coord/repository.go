@@ -7,9 +7,9 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/mohitkumar/composer/pkg/db"
+	"github.com/mohitkumar/composer/pkg/matching"
 	"github.com/mohitkumar/composer/pkg/model"
 	"github.com/mohitkumar/composer/pkg/util"
 	"github.com/rs/zerolog"
@@ -37,9 +37,6 @@ type WorkflowRepository interface {
 	TaskInstanceExists(ctx context.Context, tx pgx.Tx, runID, nodeID string) (bool, string, string, error)
 	GetTaskInstanceInfo(ctx context.Context, tx pgx.Tx, runID, nodeID string) (taskID string, nodeType string, taskStartTime time.Time, err error)
 
-	// Outbox operations
-	InsertTaskOutbox(ctx context.Context, tx pgx.Tx, taskID, runID, workflowID string, workflowVersion int, node *model.Node, taskInput json.RawMessage, logger zerolog.Logger, span trace.Span) error
-
 	// Parallel execution operations
 	CheckParallelBranchesComplete(ctx context.Context, tx pgx.Tx, runID string, branchNodeIDs []string) (completedCount, totalCount int, err error)
 	// CountCompletedBranches counts completed branch nodes inside a transaction.
@@ -53,10 +50,10 @@ type WorkflowRepository interface {
 	UpdateWorkflowInput(ctx context.Context, tx pgx.Tx, runID string, input json.RawMessage) error
 	DeleteTaskInstances(ctx context.Context, tx pgx.Tx, runID string, nodeIDs []string, logger zerolog.Logger, span trace.Span) error
 
-	// RecoverOrphanedTasks is called on startup to re-queue tasks orphaned by a coordinator crash.
-	// It resets RUNNING tasks with expired leases to PENDING, then creates missing outbox entries
-	// for any PENDING task that has no active outbox row.
-	RecoverOrphanedTasks(ctx context.Context, logger zerolog.Logger) error
+	// RecoverOrphanedTasks is called on startup. It resets expired RUNNING tasks
+	// to PENDING and returns all PENDING tasks so the coordinator can dispatch
+	// them into the in-memory matching service.
+	RecoverOrphanedTasks(ctx context.Context, logger zerolog.Logger) ([]*matching.Task, error)
 }
 
 // workflowRepository implements WorkflowRepository
@@ -435,35 +432,6 @@ func (r *workflowRepository) GetTaskInstanceInfo(ctx context.Context, tx pgx.Tx,
 	return taskID, nodeType, taskStartTime, nil
 }
 
-// InsertTaskOutbox inserts a task into the outbox
-func (r *workflowRepository) InsertTaskOutbox(ctx context.Context, tx pgx.Tx, taskID, runID, workflowID string, workflowVersion int, node *model.Node, taskInput json.RawMessage, logger zerolog.Logger, span trace.Span) error {
-	outboxID := uuid.New().String()
-	nodeTypeForRouting := node.GetNodeTypeForRouting()
-	outboxPayload := map[string]interface{}{
-		"task_id":          taskID,
-		"run_id":           runID,
-		"workflow_id":      workflowID,
-		"workflow_version": workflowVersion,
-		"node_id":          node.NodeID,
-		"node_type":        nodeTypeForRouting,
-		"input":            string(taskInput),
-	}
-	outboxPayloadBytes, err := json.Marshal(outboxPayload)
-	if err != nil {
-		logger.Error().Err(err).Msg("failed to marshal outbox payload")
-		return fmt.Errorf("failed to marshal outbox payload: %w", err)
-	}
-
-	_, err = tx.Exec(ctx, `INSERT INTO outbox (id, stream, payload, type, status, next_attempt_at, attempt_count, max_retries, created_at, updated_at)
-        VALUES ($1,'workflow.tasks',$2::jsonb,'TASK_EXECUTION','PENDING',NOW(),0,5,NOW(),NOW())`,
-		outboxID, outboxPayloadBytes)
-	if err != nil {
-		logger.Error().Err(err).Msg("failed to create outbox entry")
-		util.RecordError(span, err)
-		return fmt.Errorf("failed to create outbox entry: %w", err)
-	}
-	return nil
-}
 
 // CheckParallelBranchesComplete checks if all parallel branches are complete.
 // Uses FOR UPDATE to serialize concurrent join checks and prevent duplicate join node creation.
@@ -573,90 +541,53 @@ func (r *workflowRepository) DeleteTaskInstances(ctx context.Context, tx pgx.Tx,
 	return nil
 }
 
-// RecoverOrphanedTasks resets expired RUNNING tasks to PENDING and creates outbox entries for
-// any PENDING task that has no active outbox row. Called once on coordinator startup.
-func (r *workflowRepository) RecoverOrphanedTasks(ctx context.Context, logger zerolog.Logger) error {
-	// Step 1: Reset RUNNING tasks with expired leases back to PENDING.
-	// These belong to workers that died or a previous coordinator crash.
+// RecoverOrphanedTasks resets expired RUNNING tasks to PENDING, then returns
+// every PENDING task (joined with its workflow run) so the coordinator can
+// dispatch them directly into the in-memory matching service.
+func (r *workflowRepository) RecoverOrphanedTasks(ctx context.Context, logger zerolog.Logger) ([]*matching.Task, error) {
+	// Step 1: Reset RUNNING tasks whose lease has expired back to PENDING.
 	result, err := r.db.Exec(ctx,
 		`UPDATE task_instances
 		 SET state='PENDING', lease_owner=NULL, lease_expires_at=NULL, started_at=NULL, updated_at=NOW()
 		 WHERE state='RUNNING' AND (lease_expires_at IS NULL OR lease_expires_at < NOW())`)
 	if err != nil {
-		return fmt.Errorf("failed to reset expired running tasks: %w", err)
+		return nil, fmt.Errorf("failed to reset expired running tasks: %w", err)
 	}
 	if n := result.RowsAffected(); n > 0 {
 		logger.Warn().Int64("count", n).Msg("reset expired RUNNING tasks to PENDING for recovery")
 	}
 
-	// Step 2: Find PENDING tasks whose outbox entry was never created or was already consumed
-	// (coordinator crashed between task creation and outbox insert — they're in the same tx,
-	// so this mainly covers reset tasks from step 1 above).
+	// Step 2: Return all PENDING tasks so the coordinator can dispatch them.
+	// JOIN with workflow_runs to get the workflow_id and workflow_version that
+	// workers need when calling ReportTaskResult.
 	rows, err := r.db.Query(ctx,
-		`SELECT ti.id, ti.run_id, ti.node_id, ti.node_type, ti.input_json
+		`SELECT ti.id, ti.run_id, ti.node_id, ti.node_type, ti.input_json,
+		        wr.workflow_definition_id, wr.workflow_version
 		 FROM task_instances ti
-		 WHERE ti.state = 'PENDING'
-		 AND NOT EXISTS (
-			 SELECT 1 FROM outbox o
-			 WHERE o.payload->>'task_id' = ti.id
-			   AND o.status IN ('PENDING','RETRY','IN_FLIGHT')
-		 )`)
+		 JOIN workflow_runs wr ON wr.id = ti.run_id
+		 WHERE ti.state = 'PENDING'`)
 	if err != nil {
-		return fmt.Errorf("failed to query orphaned pending tasks: %w", err)
+		return nil, fmt.Errorf("failed to query pending tasks: %w", err)
 	}
 	defer rows.Close()
 
-	type orphanRow struct {
-		taskID   string
-		runID    string
-		nodeID   string
-		nodeType string
-		input    json.RawMessage
-	}
-
-	var orphans []orphanRow
+	var tasks []*matching.Task
 	for rows.Next() {
-		var o orphanRow
-		if err := rows.Scan(&o.taskID, &o.runID, &o.nodeID, &o.nodeType, &o.input); err != nil {
-			return fmt.Errorf("failed to scan orphaned task row: %w", err)
+		t := &matching.Task{}
+		if err := rows.Scan(&t.TaskID, &t.RunID, &t.NodeID, &t.NodeType, &t.Input,
+			&t.WorkflowID, &t.WorkflowVersion); err != nil {
+			return nil, fmt.Errorf("failed to scan pending task row: %w", err)
 		}
-		orphans = append(orphans, o)
+		tasks = append(tasks, t)
 	}
 	if err := rows.Err(); err != nil {
-		return fmt.Errorf("error iterating orphaned tasks: %w", err)
+		return nil, fmt.Errorf("error iterating pending tasks: %w", err)
 	}
 
-	if len(orphans) == 0 {
-		logger.Info().Msg("startup recovery: no orphaned tasks found")
-		return nil
+	if len(tasks) == 0 {
+		logger.Info().Msg("startup recovery: no pending tasks found")
+	} else {
+		logger.Warn().Int("count", len(tasks)).Msg("startup recovery: dispatching pending tasks to matching service")
 	}
-
-	logger.Warn().Int("count", len(orphans)).Msg("startup recovery: re-queuing orphaned tasks")
-
-	for _, o := range orphans {
-		payload := map[string]interface{}{
-			"task_id":   o.taskID,
-			"run_id":    o.runID,
-			"node_id":   o.nodeID,
-			"node_type": o.nodeType,
-			"input":     string(o.input),
-		}
-		payloadBytes, err := json.Marshal(payload)
-		if err != nil {
-			logger.Error().Err(err).Str("task_id", o.taskID).Msg("recovery: failed to marshal outbox payload")
-			continue
-		}
-		outboxID := uuid.New().String()
-		_, err = r.db.Exec(ctx,
-			`INSERT INTO outbox (id, stream, payload, type, status, next_attempt_at, attempt_count, max_retries, created_at, updated_at)
-			 VALUES ($1,'workflow.tasks',$2::jsonb,'TASK_EXECUTION','PENDING',NOW(),0,5,NOW(),NOW())`,
-			outboxID, payloadBytes)
-		if err != nil {
-			logger.Error().Err(err).Str("task_id", o.taskID).Msg("recovery: failed to create outbox entry")
-			continue
-		}
-		logger.Info().Str("task_id", o.taskID).Str("run_id", o.runID).Str("node_id", o.nodeID).Msg("recovery: re-queued orphaned task")
-	}
-
-	return nil
+	return tasks, nil
 }

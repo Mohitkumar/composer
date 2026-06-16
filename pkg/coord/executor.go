@@ -10,6 +10,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/mohitkumar/composer/pkg/matching"
 	"github.com/mohitkumar/composer/pkg/model"
 	"github.com/mohitkumar/composer/pkg/util"
 	"github.com/rs/zerolog"
@@ -45,6 +46,7 @@ func (c *Coordinator) StartWorkflow(ctx context.Context, p *model.StartWorkflowR
 	runContext := c.newRunContext(p.Input, p.ExecutionOptions)
 	execState := model.NewExecutionState(dag, runContext, c.Template)
 
+	var startTask *matching.Task
 	err = c.ExecuteWithTransaction(ctx, span, logger, func(ctx context.Context, tx pgx.Tx) error {
 		if err := c.Repository.InsertWorkflowRun(ctx, tx, p, logger, span); err != nil {
 			return err
@@ -78,12 +80,21 @@ func (c *Coordinator) StartWorkflow(ctx context.Context, p *model.StartWorkflowR
 			return err
 		}
 		c.recordTaskCreated(ctx, span, taskID, p.RunID, startNode)
-
-		return c.Repository.InsertTaskOutbox(ctx, tx, taskID, p.RunID, p.WorkflowID, p.WorkflowVersion, startNode, taskInput, taskLogger, span)
+		startTask = &matching.Task{
+			TaskID:          taskID,
+			RunID:           p.RunID,
+			NodeID:          startNode.NodeID,
+			NodeType:        startNode.GetNodeTypeForRouting(),
+			WorkflowID:      p.WorkflowID,
+			WorkflowVersion: p.WorkflowVersion,
+			Input:           taskInput,
+		}
+		return nil
 	})
 	if err != nil {
 		return err
 	}
+	c.MatchingService.Dispatch(startTask)
 
 	duration := time.Since(startTime)
 	util.RecordWorkflowStarted(ctx, p.WorkflowID, p.RunID)
@@ -248,6 +259,7 @@ func (c *Coordinator) persistRoutingResult(
 	execState *model.ExecutionState,
 	routing *model.RoutingResult,
 ) (celFailed, totalExec int, err error) {
+	var tasksToDispatch []*matching.Task
 	err = c.ExecuteWithTransaction(ctx, span, logger, func(ctx context.Context, tx pgx.Tx) error {
 		for _, cn := range routing.ControlNodes {
 			exists, existingTaskID, existingState, err := c.Repository.TaskInstanceExists(ctx, tx, runID, cn.Node.NodeID)
@@ -336,11 +348,15 @@ func (c *Coordinator) persistRoutingResult(
 			}
 			c.recordTaskCreated(ctx, span, nextTaskID, runID, node)
 
-			if err := c.Repository.InsertTaskOutbox(ctx, tx, nextTaskID, runID, workflowID, workflowVersion, node, taskInput, taskLogger, span); err != nil {
-				taskLogger.Error().Err(err).Str("error_type", "OUTBOX_CREATION_ERROR").
-					Msg("failed to create outbox entry")
-				return fmt.Errorf("failed to create outbox entry for node %s: %w", node.NodeID, err)
-			}
+			tasksToDispatch = append(tasksToDispatch, &matching.Task{
+				TaskID:          nextTaskID,
+				RunID:           runID,
+				NodeID:          node.NodeID,
+				NodeType:        node.GetNodeTypeForRouting(),
+				WorkflowID:      workflowID,
+				WorkflowVersion: workflowVersion,
+				Input:           taskInput,
+			})
 		}
 
 		if len(celErrors) > 0 {
@@ -357,6 +373,11 @@ func (c *Coordinator) persistRoutingResult(
 			Msg("routing result persisted")
 		return nil
 	})
+	if err == nil {
+		for _, t := range tasksToDispatch {
+			c.MatchingService.Dispatch(t)
+		}
+	}
 	return celFailed, totalExec, err
 }
 
@@ -475,6 +496,7 @@ func (c *Coordinator) RetryWorkflowInstance(ctx context.Context, p *model.RetryW
 	}
 
 	// ExecutionState is constructed inside the transaction so it has the loaded RunContext.
+	var retryTask *matching.Task
 	err = c.ExecuteWithTransaction(ctx, span, logger, func(ctx context.Context, tx pgx.Tx) error {
 		runContext, err := c.Repository.LoadRunContext(ctx, tx, p.RunID, logger, span)
 		if err != nil {
@@ -541,11 +563,21 @@ func (c *Coordinator) RetryWorkflowInstance(ctx context.Context, p *model.RetryW
 			return err
 		}
 		c.recordTaskCreated(ctx, span, taskID, p.RunID, restartNode)
-		return c.Repository.InsertTaskOutbox(ctx, tx, taskID, p.RunID, workflowID, workflowVersion, restartNode, taskInput, taskLogger, span)
+		retryTask = &matching.Task{
+			TaskID:          taskID,
+			RunID:           p.RunID,
+			NodeID:          restartNode.NodeID,
+			NodeType:        restartNode.GetNodeTypeForRouting(),
+			WorkflowID:      workflowID,
+			WorkflowVersion: workflowVersion,
+			Input:           taskInput,
+		}
+		return nil
 	})
 	if err != nil {
 		return err
 	}
+	c.MatchingService.Dispatch(retryTask)
 
 	duration := time.Since(startTime)
 	logger.Info().Dur("duration_ms", duration).Msg("workflow retry started successfully")

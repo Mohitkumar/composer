@@ -11,6 +11,33 @@ import (
 	"google.golang.org/grpc/status"
 )
 
+// PollTaskQueue blocks until a task matching the worker's requested types is
+// available, then returns it. Workers should set a deadline on the call (e.g.
+// 30 s) and re-poll on DeadlineExceeded.
+func (s *WorkflowService) PollTaskQueue(ctx context.Context, req *workflowpb.PollTaskQueueRequest) (*workflowpb.TaskAssignment, error) {
+	if req.GetWorkerId() == "" {
+		return nil, status.Error(codes.InvalidArgument, "worker_id is required")
+	}
+
+	task, err := s.coordinator.MatchingService.Poll(ctx, req.GetWorkerId(), req.GetTaskTypes())
+	if err != nil {
+		if err == context.DeadlineExceeded || err == context.Canceled {
+			return nil, status.Error(codes.DeadlineExceeded, "poll timeout")
+		}
+		return nil, status.Error(codes.Internal, err.Error())
+	}
+
+	return &workflowpb.TaskAssignment{
+		TaskId:          task.TaskID,
+		RunId:           task.RunID,
+		NodeId:          task.NodeID,
+		NodeType:        task.NodeType,
+		WorkflowId:      task.WorkflowID,
+		WorkflowVersion: int32(task.WorkflowVersion),
+		Input:           task.Input,
+	}, nil
+}
+
 // WorkflowService implements the gRPC service for worker-coordinator communication
 type WorkflowService struct {
 	workflowpb.UnimplementedWorkflowServiceServer

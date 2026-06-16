@@ -10,20 +10,18 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
-	// Note: This import path assumes proto files are generated
-	// Update this path based on actual generated code location
 	workflowpb "github.com/mohitkumar/composer/pkg/api/proto/gen/go/workflow"
 	"github.com/rs/zerolog"
 )
 
-// CoordinatorClient wraps a gRPC client connection to the coordinator
+// CoordinatorClient wraps a gRPC client connection to the coordinator.
 type CoordinatorClient struct {
 	conn   *grpc.ClientConn
 	client workflowpb.WorkflowServiceClient
 	logger zerolog.Logger
 }
 
-// NewCoordinatorClient creates a new coordinator gRPC client
+// NewCoordinatorClient creates a new coordinator gRPC client.
 func NewCoordinatorClient(addr string, logger zerolog.Logger) (*CoordinatorClient, error) {
 	if addr == "" {
 		return nil, fmt.Errorf("coordinator address is required")
@@ -34,16 +32,14 @@ func NewCoordinatorClient(addr string, logger zerolog.Logger) (*CoordinatorClien
 		return nil, fmt.Errorf("failed to connect to coordinator: %w", err)
 	}
 
-	client := workflowpb.NewWorkflowServiceClient(conn)
-
 	return &CoordinatorClient{
 		conn:   conn,
-		client: client,
+		client: workflowpb.NewWorkflowServiceClient(conn),
 		logger: logger,
 	}, nil
 }
 
-// Close closes the gRPC connection
+// Close closes the gRPC connection.
 func (c *CoordinatorClient) Close() error {
 	if c.conn != nil {
 		return c.conn.Close()
@@ -51,34 +47,46 @@ func (c *CoordinatorClient) Close() error {
 	return nil
 }
 
+// PollTaskQueue long-polls the coordinator for a task assignment. The call
+// blocks on the server until a matching task is available or the 30-second
+// deadline expires (DeadlineExceeded is the normal timeout signal; the caller
+// should re-poll immediately).
+func (c *CoordinatorClient) PollTaskQueue(ctx context.Context, workerID string, taskTypes []string) (*workflowpb.TaskAssignment, error) {
+	pollCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	return c.client.PollTaskQueue(pollCtx, &workflowpb.PollTaskQueueRequest{
+		WorkerId:  workerID,
+		TaskTypes: taskTypes,
+	})
+}
+
 // AcquireTaskLease asks coordinator to claim a lease for this task.
 func (c *CoordinatorClient) AcquireTaskLease(ctx context.Context, taskID, owner string, ttlSeconds int64) (bool, error) {
-	req := &workflowpb.AcquireTaskLeaseRequest{
+	leaseCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	resp, err := c.client.AcquireTaskLease(leaseCtx, &workflowpb.AcquireTaskLeaseRequest{
 		TaskId:     taskID,
 		Owner:      owner,
 		TtlSeconds: ttlSeconds,
-	}
-
-	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-
-	resp, err := c.client.AcquireTaskLease(ctx, req)
+	})
 	if err != nil {
 		return false, fmt.Errorf("acquire lease failed: %w", err)
 	}
 	return resp.GetAcquired(), nil
 }
 
-// ReportTaskResult reports task execution result to the coordinator
+// ReportTaskResult reports task execution result to the coordinator.
 func (c *CoordinatorClient) ReportTaskResult(ctx context.Context, taskID, runID, nodeID, workflowID string, workflowVersion int, output json.RawMessage, errMsg *string) error {
-	status := "completed"
+	reqStatus := "completed"
 	if errMsg != nil {
-		status = "failed"
+		reqStatus = "failed"
 	}
 
 	req := &workflowpb.ReportTaskResultRequest{
 		TaskId: taskID,
-		Status: status,
+		Status: reqStatus,
 		Output: output,
 		Metadata: map[string]string{
 			"run_id":           runID,
@@ -87,22 +95,19 @@ func (c *CoordinatorClient) ReportTaskResult(ctx context.Context, taskID, runID,
 			"workflow_version": strconv.Itoa(workflowVersion),
 		},
 	}
-
 	if errMsg != nil {
 		req.Error = *errMsg
 	}
 
-	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	reportCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
-	resp, err := c.client.ReportTaskResult(ctx, req)
+	resp, err := c.client.ReportTaskResult(reportCtx, req)
 	if err != nil {
 		return fmt.Errorf("failed to report task result: %w", err)
 	}
-
 	if !resp.Acknowledged {
 		return fmt.Errorf("coordinator did not acknowledge task result")
 	}
-
 	return nil
 }
