@@ -11,7 +11,7 @@ Composer provides a robust platform for:
 - **Workflow Orchestration**: Define and execute complex, multi-step workflows with dependencies, conditional logic, and parallel execution
 - **Distributed Task Execution**: Scale horizontally with multiple workers consuming tasks from Redis streams
 - **Multi-Language Support**: Execute tasks written in Python, JavaScript, and Go within the same workflow
-- **Execution Guarantees**: Ensure exactly-once or at-least-once execution semantics through database-backed leases
+- **Execution Guarantees**: Ensure best effort exactly-once or at-least-once execution semantics through database-backed leases
 - **Reliability**: Maintain workflow state and task history in PostgreSQL with ACID guarantees
 - **Observability**: Built-in tracing and metrics for monitoring workflow execution
 
@@ -41,7 +41,7 @@ For a detailed comparison with Temporal — including throughput numbers, reliab
 
 - **Go 1.21+** - Core runtime and coordinator/worker services
 - **Node.js 20+** - JavaScript language server
-- **Python 3.11+ with UV** - Python language server and AI service
+- **Python 3.11+ with UV** - Python language server
 - **PostgreSQL 16+** - Persistent state storage
 - **Redis 7+** - Task queue and stream processing
 - **Docker & Docker Compose** (optional) - For containerized deployment
@@ -114,7 +114,6 @@ cd infra/docker && docker-compose down
 - **Worker** (2 replicas) - Task execution
 - **JavaScript Language Server** (port 50052) - Executes JS/Node.js tasks
 - **Python Language Server** (port 50053) - Executes Python tasks
-- **AI Service** (port 8000) - AI-powered workflow assistance
 - **Web UI** (port 3000) - Dashboard for workflow management
 - **Jaeger** (port 16686) - Distributed tracing UI
 - **OpenTelemetry Collector** - Metrics and trace collection
@@ -158,20 +157,6 @@ npm run dev
 ```
 
 The UI will be available at `http://localhost:3000`.
-
-### Web UI Features
-
-- **Workflow Management**: Create, edit, and deploy workflow definitions
-- **Visual Workflow Editor**: Drag-and-drop interface for building workflows
-- **Execution Monitoring**: View real-time workflow execution status
-- **Execution History**: Browse past workflow runs with detailed logs
-- **Task Details**: Inspect individual task inputs, outputs, and errors
-- **Configuration Management**: Manage workflow configurations and credentials
-- **Template Library**: Browse and use pre-built workflow and node templates
-
-### Authentication
-
-The web UI supports JWT-based authentication. Default credentials may be configured in your environment. Check the coordinator logs for authentication setup instructions.
 
 ## Workflow YAML Specification
 
@@ -681,16 +666,6 @@ edges:
 
 ### Creating and Running Workflows
 
-#### Via Web UI
-
-1. Navigate to `http://localhost:3000`
-2. Click "Create Workflow" or "New Workflow"
-3. Use the visual editor or paste YAML directly
-4. Click "Deploy" to make the workflow available for execution
-5. Click "Run" to execute with input data
-
-#### Via API
-
 ```bash
 # Create workflow
 curl -X POST http://localhost:8080/api/v1/workflows \
@@ -713,9 +688,6 @@ curl -X POST http://localhost:8080/api/v1/workflows/my-workflow/execute \
   }'
 ```
 
-#### Via YAML File
-
-Save your workflow to a file (e.g., `my-workflow.yaml`) and use the API or UI to import it.
 
 ## Architecture
 
