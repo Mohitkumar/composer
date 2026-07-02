@@ -11,7 +11,7 @@ Composer provides a robust platform for:
 - **Workflow Orchestration**: Define and execute complex, multi-step workflows with dependencies, conditional logic, and parallel execution
 - **Distributed Task Execution**: Scale horizontally with multiple workers consuming tasks from Redis streams
 - **Multi-Language Support**: Execute tasks written in Python, JavaScript, and Go within the same workflow
-- **Execution Guarantees**: Ensure best effort exactly-once or at-least-once execution semantics through database-backed leases
+- **Execution Guarantees**: Ensure at-least-once execution semantics through database-backed leases
 - **Reliability**: Maintain workflow state and task history in PostgreSQL with ACID guarantees
 - **Observability**: Built-in tracing and metrics for monitoring workflow execution
 
@@ -30,7 +30,7 @@ Composer is optimised for **high-throughput, short-to-medium duration workflows*
 ### Not a good fit (yet)
 
 - **Long-running / durable flows** — workflows that need to `sleep` for hours or days, or wait indefinitely for an external signal (human approval, payment webhook with no SLA). Composer has no timer or signal-wait node type today; a step has a 90-second hard ceiling.
-- **Exactly-once semantics** — Composer provides at-least-once delivery guarded by a database lease. Duplicate execution is prevented in practice but is not structurally impossible the way Temporal's event-sourced history makes it.
+- **Execution semantics** — Composer provides at-least-once delivery guarded by a database lease. Duplicate execution is prevented in practice but is not structurally impossible the way Temporal's event-sourced history makes it.
 - **In-flight workflow versioning** — changing a workflow definition while runs are in progress is undefined. Temporal has built-in versioning APIs for this.
 
 For a detailed comparison with Temporal — including throughput numbers, reliability trade-offs, and the specific gaps to close — see [docs/comparison-temporal.md](docs/comparison-temporal.md).
@@ -934,14 +934,7 @@ The outbox pattern ensures that task creation and message publishing are atomic:
 - Updates status to `SENT` on success, `RETRY` on failure
 - Moves to `outbox_dlq` after max retries
 
-#### 3. **Exactly-Once Semantics**
-
-For critical workflows:
-- **Database State**: Single source of truth in PostgreSQL
-- **Lease Mechanism**: Prevents duplicate execution
-- **Idempotent Operations**: Task execution results are idempotent (can be safely retried)
-
-#### 4. **At-Least-Once Semantics**
+#### 3. **At-Least-Once Semantics**
 
 For non-critical tasks:
 - **Redis Streams**: Messages are redelivered if not acknowledged
