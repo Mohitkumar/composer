@@ -31,6 +31,9 @@ type WorkerConfig struct {
 	// reclaims orphaned messages after TTL seconds of idle time.
 	LeaseTTLSeconds int64
 
+	// Concurrency is the number of tasks executed in parallel. 0 uses 1.
+	Concurrency int
+
 	// MaxDeliveries is the maximum number of times a stream message may be
 	// redelivered before it is dead-lettered (reported as failed to the
 	// coordinator and removed from the stream).  0 uses the default of 5.

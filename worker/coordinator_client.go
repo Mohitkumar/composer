@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"strconv"
 	"time"
 
 	"google.golang.org/grpc"
@@ -51,44 +50,45 @@ func (c *CoordinatorClient) Close() error {
 	return nil
 }
 
-// AcquireTaskLease asks coordinator to claim a lease for this task.
+// AcquireTaskLease asks the coordinator to claim a task for owner.
 func (c *CoordinatorClient) AcquireTaskLease(ctx context.Context, taskID, owner string, ttlSeconds int64) (bool, error) {
-	req := &workflowpb.AcquireTaskLeaseRequest{
-		TaskId:     taskID,
-		Owner:      owner,
-		TtlSeconds: ttlSeconds,
-	}
+	return c.lease(ctx, c.client.AcquireTaskLease, taskID, owner, ttlSeconds)
+}
 
+// RenewTaskLease extends a lease owner holds; false means the lease was lost.
+func (c *CoordinatorClient) RenewTaskLease(ctx context.Context, taskID, owner string, ttlSeconds int64) (bool, error) {
+	return c.lease(ctx, c.client.RenewTaskLease, taskID, owner, ttlSeconds)
+}
+
+type leaseRPC func(context.Context, *workflowpb.AcquireTaskLeaseRequest, ...grpc.CallOption) (*workflowpb.AcquireTaskLeaseResponse, error)
+
+func (c *CoordinatorClient) lease(ctx context.Context, rpc leaseRPC, taskID, owner string, ttlSeconds int64) (bool, error) {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
-	resp, err := c.client.AcquireTaskLease(ctx, req)
+	resp, err := rpc(ctx, &workflowpb.AcquireTaskLeaseRequest{
+		TaskId:     taskID,
+		Owner:      owner,
+		TtlSeconds: ttlSeconds,
+	})
 	if err != nil {
-		return false, fmt.Errorf("acquire lease failed: %w", err)
+		return false, fmt.Errorf("task lease rpc: %w", err)
 	}
 	return resp.GetAcquired(), nil
 }
 
-// ReportTaskResult reports task execution result to the coordinator
-func (c *CoordinatorClient) ReportTaskResult(ctx context.Context, taskID, runID, nodeID, workflowID string, workflowVersion int, output json.RawMessage, errMsg *string) error {
-	status := "completed"
-	if errMsg != nil {
-		status = "failed"
-	}
-
+// ReportTaskResult reports the outcome of one task attempt. errMsg is nil on success.
+func (c *CoordinatorClient) ReportTaskResult(ctx context.Context, msg *TaskMessage, output json.RawMessage, errMsg *string) error {
 	req := &workflowpb.ReportTaskResultRequest{
-		TaskId: taskID,
-		Status: status,
-		Output: output,
-		Metadata: map[string]string{
-			"run_id":           runID,
-			"node_id":          nodeID,
-			"workflow_id":      workflowID,
-			"workflow_version": strconv.Itoa(workflowVersion),
-		},
+		TaskId:  msg.TaskID,
+		RunId:   msg.RunID,
+		NodeId:  msg.NodeID,
+		Attempt: int32(msg.Attempt),
+		Status:  "completed",
+		Output:  output,
 	}
-
 	if errMsg != nil {
+		req.Status = "failed"
 		req.Error = *errMsg
 	}
 
@@ -99,10 +99,8 @@ func (c *CoordinatorClient) ReportTaskResult(ctx context.Context, taskID, runID,
 	if err != nil {
 		return fmt.Errorf("failed to report task result: %w", err)
 	}
-
-	if !resp.Acknowledged {
+	if !resp.GetAcknowledged() {
 		return fmt.Errorf("coordinator did not acknowledge task result")
 	}
-
 	return nil
 }

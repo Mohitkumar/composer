@@ -11,6 +11,15 @@ const (
 	WorkflowInstanceStatusFailed    WorkflowInstanceStatus = "FAILED"
 )
 
+// IsTerminal reports whether no further nodes should be scheduled for the run.
+func (s WorkflowInstanceStatus) IsTerminal() bool {
+	switch s {
+	case WorkflowInstanceStatusSucceeded, WorkflowInstanceStatusCompleted, WorkflowInstanceStatusFailed:
+		return true
+	}
+	return false
+}
+
 // TaskInstanceStatus represents the status of a task instance
 type TaskInstanceStatus string
 
@@ -21,7 +30,15 @@ const (
 	TaskInstanceStatusSucceeded TaskInstanceStatus = "SUCCEEDED"
 	TaskInstanceStatusCompleted TaskInstanceStatus = "COMPLETED"
 	TaskInstanceStatusFailed    TaskInstanceStatus = "FAILED"
+	// TaskInstanceStatusSkipped marks a node on a branch that was not taken
+	// (an unselected SWITCH edge, or downstream of one).
+	TaskInstanceStatusSkipped TaskInstanceStatus = "SKIPPED"
 )
+
+// IsCompleted reports whether the task finished successfully.
+func (s TaskInstanceStatus) IsCompleted() bool {
+	return s == TaskInstanceStatusCompleted || s == TaskInstanceStatusSucceeded
+}
 
 // NodeType represents the type of a workflow node
 type NodeType string
@@ -35,8 +52,15 @@ const (
 	NodeTypeSwitch NodeType = "SWITCH"
 	// FORK - Fork execution into parallel branches
 	NodeTypeFork NodeType = "FORK"
-	// JOIN - Join parallel branches (handled automatically)
+	// JOIN - Explicit join point; any node with several incoming edges already
+	// waits for all of them, so JOIN is a no-op pass-through.
 	NodeTypeJoin NodeType = "JOIN"
 	// WAIT - Wait for external event
 	NodeTypeWait NodeType = "WAIT"
 )
+
+// IsControlFlow reports whether the coordinator resolves this node inline
+// instead of dispatching it to a worker.
+func (t NodeType) IsControlFlow() bool {
+	return t == NodeTypeSwitch || t == NodeTypeFork || t == NodeTypeJoin
+}

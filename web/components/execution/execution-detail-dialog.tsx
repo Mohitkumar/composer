@@ -6,7 +6,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { format, formatDistance } from 'date-fns';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
-import { X, CheckCircle2, XCircle, Clock, PlayCircle, AlertCircle, ChevronDown, RotateCw } from 'lucide-react';
+import { X, CheckCircle2, XCircle, Clock, PlayCircle, AlertCircle, ChevronDown, RotateCw, MinusCircle } from 'lucide-react';
 import { toast } from 'sonner';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
@@ -124,6 +124,8 @@ export function ExecutionDetailDialog({
       case 'PENDING':
       case 'QUEUED':
         return <Clock className="h-4 w-4 text-yellow-500" />;
+      case 'SKIPPED':
+        return <MinusCircle className="h-4 w-4 text-gray-400" />;
       default:
         return <AlertCircle className="h-4 w-4 text-gray-500" />;
     }

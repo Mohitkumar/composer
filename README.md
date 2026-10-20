@@ -258,7 +258,7 @@ edges:
     condition: "{{tasks.check_condition.output.value < 100}}"
 ```
 
-**Note:** SWITCH nodes require conditional edges. The first matching condition determines the execution path.
+**Note:** Every outgoing edge whose condition is true (or that has no condition) is followed. The decision is recorded with the SWITCH's result, and nodes on branches that were not taken are marked `SKIPPED`.
 
 #### 4. FORK Node
 
@@ -280,7 +280,31 @@ edges:
     to: task_c
 ```
 
-**Note:** All branches execute in parallel. Use a JOIN node (automatic) to wait for all branches to complete.
+**Note:** All branches execute in parallel and may be any length.
+
+#### Joins and skipped branches
+
+A node with several incoming edges waits for all of them; no explicit JOIN node is needed (a `JOIN` node is accepted and acts as a pass-through). The rule the coordinator applies to every node:
+
+- An incoming edge is **active** when its source completed (for a SWITCH: and selected this target), and **inactive** when its source was skipped or the SWITCH chose another branch.
+- Once every incoming edge is resolved, the node **runs** if at least one is active, and is marked **`SKIPPED`** otherwise. Skips propagate down the untaken branch.
+
+So `fork → a1 → a2 → join` / `fork → b1 → join` runs `join` once, after both `a2` and `b1`; and a SWITCH whose branches re-converge runs the merge node as soon as the taken branch finishes.
+
+#### Retries
+
+Any worker node (HTTP, CODE) can declare a retry policy. Failed executions are re-dispatched after an exponential backoff (`backoff_seconds × 2^(retry-1)`, capped at 10 minutes) until `max_attempts` executions have been made; only then is the node marked `FAILED`.
+
+```yaml
+  - node_id: call_api
+    type: HTTP
+    retry:
+      max_attempts: 3      # total executions, including the first
+      backoff_seconds: 5
+    spec: { url: "https://api.example.com/x", method: GET }
+```
+
+Without a `retry` block a node executes once.
 
 ### Template Expressions
 
@@ -859,9 +883,11 @@ The following sequence diagram illustrates the complete flow of a workflow execu
 13. **Acknowledgment**: Worker acknowledges Redis message after successful execution
 
 **Error Handling:**
-- If lease acquisition fails, worker leaves message in Redis for retry
-- If task execution fails, error is reported and workflow may be marked FAILED
-- Expired leases allow other workers to retry tasks
+- Steps 11–12 happen in one transaction holding the workflow run's row lock, so a crash can never leave a node completed without its successors scheduled, and concurrent branch completions always see each other when deciding a join
+- If lease acquisition fails (another worker holds a live lease, or the task already finished) the message is dropped
+- If task execution fails, the node's retry policy decides between re-dispatch and `FAILED`; the run fails once nothing is left in flight
+- If a worker dies, its lease expires: another worker may take the task over, and every coordinator sweeps expired leases every 30 s and re-dispatches those tasks
+- Results carry the attempt number; a late report from a superseded attempt is ignored
 - Outbox retry logic handles transient Redis failures
 
 ### Why PostgreSQL?
@@ -875,8 +901,8 @@ The `outbox` table leverages PostgreSQL features:
 
 #### 2. **Lease Management**
 Task leases use PostgreSQL's atomic updates:
-- **Atomic Lease Acquisition**: `UPDATE ... WHERE state IN ('PENDING','QUEUED')` ensures only one worker can claim a task
-- **Lease Expiration**: `lease_expires_at` timestamps with automatic cleanup queries
+- **Atomic Lease Acquisition**: a single `UPDATE ... WHERE state IN ('PENDING','QUEUED') OR (state='RUNNING' AND lease_expires_at < NOW())` ensures only one worker can claim a task
+- **Lease Expiration**: a periodic sweeper re-dispatches tasks whose lease expired
 - **Concurrent Safety**: Row-level locking prevents double-execution
 
 ### Why Redis?
@@ -900,22 +926,26 @@ Composer provides strong execution guarantees through a combination of database 
 2. Worker calls coordinator's `AcquireTaskLease` gRPC method
 3. Coordinator atomically updates `task_instances`:
    ```sql
-   UPDATE task_instances 
-   SET state='RUNNING', 
-       lease_owner=$1, 
-       lease_expires_at=NOW() + $2::interval,
+   UPDATE task_instances
+   SET state='RUNNING',
+       lease_owner=$1,
+       lease_expires_at=NOW() + make_interval(secs => $2),
        started_at=NOW()
-   WHERE id=$3 AND state IN ('PENDING','QUEUED')
+   WHERE id=$3
+     AND (state IN ('PENDING','QUEUED')
+          OR (state='RUNNING' AND lease_expires_at < NOW()))
    RETURNING id
    ```
-4. If the UPDATE returns a row, the lease is acquired; otherwise, another worker already claimed it
-5. Worker executes the task only if lease acquisition succeeds
+4. If the UPDATE returns a row, the lease is acquired; otherwise another worker holds a live lease or the task already finished
+5. Worker executes the task only if lease acquisition succeeds, renewing the lease every TTL/3 through `RenewTaskLease`
+6. If a renewal reports the lease lost, the worker cancels the execution and discards its result
 
 **Lease Properties:**
 - **Atomic**: Only one worker can acquire a lease for a given task
 - **Time-Bounded**: Leases expire after a configurable TTL (default: 90 seconds)
 - **Idempotent**: Multiple workers can attempt to acquire the same lease; only one succeeds
-- **Recoverable**: Expired leases can be reclaimed by other workers
+- **Recoverable**: Expired leases can be taken over by other workers, and are swept and re-dispatched by the coordinator
+- **Non-reentrant**: An owner cannot re-acquire a lease it already holds, so a redelivered message never starts a second concurrent execution
 
 #### 2. **Outbox Pattern for Task Dispatch**
 
@@ -931,15 +961,15 @@ The outbox pattern ensures that task creation and message publishing are atomic:
 **Outbox Processing:**
 - Uses `FOR UPDATE SKIP LOCKED` to allow concurrent processing
 - Marks rows as `IN_FLIGHT` during processing
-- Updates status to `SENT` on success, `RETRY` on failure
+- Deletes rows once published, sets `RETRY` with backoff on failure
 - Moves to `outbox_dlq` after max retries
 
 #### 3. **At-Least-Once Semantics**
 
 For non-critical tasks:
 - **Redis Streams**: Messages are redelivered if not acknowledged
-- **Lease Expiration**: Expired leases allow retry by other workers
-- **Error Handling**: Failed tasks can be retried with exponential backoff
+- **Lease Expiration**: Expired leases are taken over or swept and re-dispatched
+- **Error Handling**: Failed tasks are retried according to the node's retry policy
 
 ### Worker Communication via gRPC
 
@@ -957,11 +987,18 @@ Workers communicate with the coordinator and language servers using gRPC for eff
   - Request includes: `task_id`, `owner` (worker ID), `ttl_seconds`
   - Response indicates whether lease was acquired
 
+- **`RenewTaskLease`**: Worker extends a lease it holds while the task runs
+  ```protobuf
+  rpc RenewTaskLease(AcquireTaskLeaseRequest) returns (AcquireTaskLeaseResponse);
+  ```
+  - `acquired=false` means the lease was lost and the worker must abandon the task
+
 - **`ReportTaskResult`**: Worker reports task execution completion
   ```protobuf
   rpc ReportTaskResult(ReportTaskResultRequest) returns (ReportTaskResultResponse);
   ```
-  - Request includes: `task_id`, `run_id`, `node_id`, `output` (JSON), `error` (optional)
+  - Request includes: `task_id`, `run_id`, `node_id`, `attempt`, `output` (JSON), `error` (optional)
+  - `attempt` is a fencing token: results for any other attempt of the task are ignored
   - Coordinator updates task state and triggers next nodes in workflow
 
 

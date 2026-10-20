@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 	"sync"
@@ -13,12 +14,28 @@ import (
 	"github.com/rs/zerolog"
 )
 
-// Worker processes tasks from a stream and reports results via gRPC.
+const (
+	// taskTimeout bounds a single task execution.
+	taskTimeout = 90 * time.Second
+	// defaultConcurrency is used when WorkerConfig.Concurrency is unset.
+	defaultConcurrency = 1
+	// defaultMaxDeliveries is used when WorkerConfig.MaxDeliveries is unset.
+	defaultMaxDeliveries = 5
+)
+
+// errLeaseLost cancels an execution whose lease was taken over or released.
+var errLeaseLost = errors.New("task lease lost")
+
+// Worker executes tasks from a stream and reports results to the coordinator.
+// Up to Concurrency tasks run at once; each holds a lease for its duration.
 type Worker struct {
 	cfg           WorkerConfig
 	router        *Router
 	coordClient   *CoordinatorClient
 	langClientMgr *LangClientManager
+
+	slots    chan struct{} // one token per free execution slot
+	inflight sync.WaitGroup
 }
 
 // TaskMessage is the fields we expect in each stream message.
@@ -29,6 +46,7 @@ type TaskMessage struct {
 	NodeType        string          `json:"node_type"` // e.g. "http", "python", "js"
 	WorkflowID      string          `json:"workflow_id"`
 	WorkflowVersion int             `json:"workflow_version"`
+	Attempt         int             `json:"attempt"`
 	Input           json.RawMessage `json:"input"`
 }
 
@@ -37,11 +55,16 @@ func NewWorker(cfg WorkerConfig) (*Worker, error) {
 	if cfg.Logger.GetLevel() == zerolog.NoLevel {
 		cfg.Logger = zerolog.New(nil).Level(zerolog.InfoLevel)
 	}
+	if cfg.Concurrency < 1 {
+		cfg.Concurrency = defaultConcurrency
+	}
+	if cfg.MaxDeliveries <= 0 {
+		cfg.MaxDeliveries = defaultMaxDeliveries
+	}
 
 	var langClientMgr *LangClientManager
-	var err error
-
 	if len(cfg.LangWorkerAddrs) > 0 {
+		var err error
 		langClientMgr, err = NewLangClientManager(cfg.LangWorkerAddrs, cfg.Logger)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create language client manager: %w", err)
@@ -50,9 +73,7 @@ func NewWorker(cfg WorkerConfig) (*Worker, error) {
 		for runtime := range cfg.LangWorkerAddrs {
 			runtimeNames = append(runtimeNames, runtime)
 		}
-		cfg.Logger.Info().
-			Strs("runtimes", runtimeNames).
-			Msg("language client manager created with multiple runtimes")
+		cfg.Logger.Info().Strs("runtimes", runtimeNames).Msg("language client manager created")
 	}
 
 	coordClient, err := NewCoordinatorClient(cfg.CoordinatorAddr, cfg.Logger)
@@ -60,13 +81,17 @@ func NewWorker(cfg WorkerConfig) (*Worker, error) {
 		return nil, fmt.Errorf("failed to create coordinator client: %w", err)
 	}
 
-	router := NewRouter(langClientMgr, cfg.Logger)
+	slots := make(chan struct{}, cfg.Concurrency)
+	for range cfg.Concurrency {
+		slots <- struct{}{}
+	}
 
 	return &Worker{
 		cfg:           cfg,
-		router:        router,
+		router:        NewRouter(langClientMgr, cfg.Logger),
 		coordClient:   coordClient,
 		langClientMgr: langClientMgr,
+		slots:         slots,
 	}, nil
 }
 
@@ -74,19 +99,12 @@ func NewWorker(cfg WorkerConfig) (*Worker, error) {
 func (w *Worker) Close() error {
 	var errs []error
 	if w.coordClient != nil {
-		if err := w.coordClient.Close(); err != nil {
-			errs = append(errs, err)
-		}
+		errs = append(errs, w.coordClient.Close())
 	}
 	if w.langClientMgr != nil {
-		if err := w.langClientMgr.Close(); err != nil {
-			errs = append(errs, err)
-		}
+		errs = append(errs, w.langClientMgr.Close())
 	}
-	if len(errs) > 0 {
-		return fmt.Errorf("errors closing connections: %v", errs)
-	}
-	return nil
+	return errors.Join(errs...)
 }
 
 // EnsureConsumerGroup delegates to the stream consumer's Setup method.
@@ -95,48 +113,82 @@ func (w *Worker) EnsureConsumerGroup(ctx context.Context) error {
 	return w.cfg.Stream.Setup(ctx)
 }
 
-// Run starts the worker loop: reads new messages and reclaims orphaned pending
-// messages in parallel.
+// Run reads new messages into free execution slots, and reclaims messages
+// orphaned by crashed workers, until ctx is canceled. It returns after all
+// in-flight tasks have finished.
 func (w *Worker) Run(ctx context.Context) {
 	w.cfg.Logger.Info().
 		Str("consumer", w.cfg.ConsumerName).
+		Int("concurrency", w.cfg.Concurrency).
 		Msg("starting worker")
 
-	var wg sync.WaitGroup
-	wg.Add(1)
+	var loops sync.WaitGroup
+	loops.Add(1)
 	go func() {
-		defer wg.Done()
+		defer loops.Done()
 		w.reclaimPendingLoop(ctx)
 	}()
 
-	for {
-		select {
-		case <-ctx.Done():
-			w.cfg.Logger.Info().Msg("context canceled, stopping worker")
-			wg.Wait()
-			return
-		default:
+	for ctx.Err() == nil {
+		free := w.acquireSlots(ctx)
+		if free == 0 {
+			break
 		}
-
-		msgs, err := w.cfg.Stream.ReadNew(ctx)
-		if err != nil {
+		msgs, err := w.cfg.Stream.ReadNew(ctx, int64(free))
+		if err != nil && ctx.Err() == nil {
 			w.cfg.Logger.Error().Err(err).Msg("read new messages failed")
-			time.Sleep(1 * time.Second)
-			continue
+			time.Sleep(time.Second)
 		}
 		for _, msg := range msgs {
-			w.handleMessage(ctx, msg)
+			w.spawn(ctx, msg)
+		}
+		w.releaseSlots(free - len(msgs))
+	}
+
+	w.cfg.Logger.Info().Msg("context canceled, waiting for in-flight tasks")
+	loops.Wait()
+	w.inflight.Wait()
+}
+
+// acquireSlots blocks until at least one execution slot is free, then takes
+// every free slot. It returns 0 when ctx is canceled.
+func (w *Worker) acquireSlots(ctx context.Context) int {
+	select {
+	case <-w.slots:
+	case <-ctx.Done():
+		return 0
+	}
+	n := 1
+	for {
+		select {
+		case <-w.slots:
+			n++
+		default:
+			return n
 		}
 	}
+}
+
+func (w *Worker) releaseSlots(n int) {
+	for range n {
+		w.slots <- struct{}{}
+	}
+}
+
+// spawn runs msg in its own goroutine; the caller must hold a slot for it.
+func (w *Worker) spawn(ctx context.Context, msg stream.Message) {
+	w.inflight.Add(1)
+	go func() {
+		defer w.inflight.Done()
+		defer w.releaseSlots(1)
+		w.handleMessage(ctx, msg)
+	}()
 }
 
 // reclaimPendingLoop periodically reclaims messages that have been pending too
 // long (e.g. from crashed workers).
 func (w *Worker) reclaimPendingLoop(ctx context.Context) {
-	reclaimInterval := time.Duration(w.cfg.LeaseTTLSeconds/2) * time.Second
-	if reclaimInterval < 10*time.Second {
-		reclaimInterval = 10 * time.Second
-	}
+	reclaimInterval := max(time.Duration(w.cfg.LeaseTTLSeconds/2)*time.Second, 10*time.Second)
 	minIdleTime := time.Duration(w.cfg.LeaseTTLSeconds) * time.Second
 
 	ticker := time.NewTicker(reclaimInterval)
@@ -170,58 +222,51 @@ func (w *Worker) reclaimPendingMessages(ctx context.Context, minIdleTime time.Du
 		w.cfg.Logger.Info().Int("reclaimed", len(msgs)).Msg("reclaimed orphaned pending messages")
 	}
 
-	maxDeliveries := w.cfg.MaxDeliveries
-	if maxDeliveries <= 0 {
-		maxDeliveries = 5
-	}
-
 	for _, msg := range msgs {
-		if msg.DeliveryCount > maxDeliveries {
-			w.deadLetter(ctx, msg, maxDeliveries)
+		if msg.DeliveryCount > w.cfg.MaxDeliveries {
+			w.deadLetter(ctx, msg)
 			continue
 		}
-		w.handleMessage(ctx, msg)
+		if w.acquireSlot(ctx) {
+			w.spawn(ctx, msg)
+		}
+	}
+}
+
+func (w *Worker) acquireSlot(ctx context.Context) bool {
+	select {
+	case <-w.slots:
+		return true
+	case <-ctx.Done():
+		return false
 	}
 }
 
 // deadLetter reports a message as permanently failed to the coordinator and
 // removes it from the stream so it is never redelivered.
-// If ReportTaskResult fails the message is not acked so the next reclaim cycle
-// will retry the DLQ report.
-func (w *Worker) deadLetter(ctx context.Context, msg stream.Message, maxDeliveries int64) {
+// If the report fails the message is not acked so the next reclaim cycle
+// retries the DLQ report.
+func (w *Worker) deadLetter(ctx context.Context, msg stream.Message) {
+	logger := w.cfg.Logger.With().Str("msg_id", msg.ID).Int64("delivery_count", msg.DeliveryCount).Logger()
+
 	taskMsg, err := parseTaskMessage(msg.Values)
 	if err != nil {
-		w.cfg.Logger.Error().
-			Err(err).
-			Str("msg_id", msg.ID).
-			Int64("delivery_count", msg.DeliveryCount).
-			Msg("dead-letter: unparseable message payload, discarding")
+		logger.Error().Err(err).Msg("dead-letter: unparseable message payload, discarding")
 		_ = w.cfg.Stream.Ack(ctx, msg.ID)
 		return
 	}
 
-	w.cfg.Logger.Error().
-		Str("msg_id", msg.ID).
-		Str("task_id", taskMsg.TaskID).
-		Int64("delivery_count", msg.DeliveryCount).
-		Int64("max_deliveries", maxDeliveries).
-		Msg("dead-lettering task: exceeded max delivery attempts")
-
-	errStr := fmt.Sprintf("task exceeded max delivery attempts (%d)", maxDeliveries)
-	if reportErr := w.coordClient.ReportTaskResult(
-		ctx, taskMsg.TaskID, taskMsg.RunID, taskMsg.NodeID, taskMsg.WorkflowID, taskMsg.WorkflowVersion, nil, &errStr,
-	); reportErr != nil {
-		w.cfg.Logger.Error().
-			Err(reportErr).
-			Str("task_id", taskMsg.TaskID).
-			Msg("failed to report dead-lettered task; will retry on next reclaim cycle")
-		return // do not ack — retry DLQ report next cycle
+	logger.Error().Str("task_id", taskMsg.TaskID).Msg("dead-lettering task: exceeded max delivery attempts")
+	errStr := fmt.Sprintf("task exceeded max delivery attempts (%d)", w.cfg.MaxDeliveries)
+	if err := w.coordClient.ReportTaskResult(ctx, &taskMsg, nil, &errStr); err != nil {
+		logger.Error().Err(err).Msg("failed to report dead-lettered task; will retry on next reclaim cycle")
+		return
 	}
-
 	_ = w.cfg.Stream.Ack(ctx, msg.ID)
 }
 
-// handleMessage parses and processes a single message.
+// handleMessage processes one message and acks it once the outcome is durable
+// at the coordinator (or the message turned out to be stale or invalid).
 func (w *Worker) handleMessage(ctx context.Context, msg stream.Message) {
 	taskMsg, err := parseTaskMessage(msg.Values)
 	if err != nil {
@@ -230,19 +275,93 @@ func (w *Worker) handleMessage(ctx context.Context, msg stream.Message) {
 		return
 	}
 
-	processCtx, cancel := context.WithTimeout(ctx, 90*time.Second)
-	defer cancel()
+	if err := w.processMessage(ctx, &taskMsg); err != nil {
+		w.cfg.Logger.Error().Err(err).Str("task_id", taskMsg.TaskID).Msg("task processing failed")
+		return // not acked — redelivered via reclaim
+	}
+	_ = w.cfg.Stream.Ack(ctx, msg.ID)
+}
 
-	if err := w.processMessage(processCtx, &taskMsg); err != nil {
-		w.cfg.Logger.Error().Err(err).Str("task", taskMsg.TaskID).Msg("task processing failed")
-		// Do NOT ack — will be retried via reclaim.
-	} else {
-		_ = w.cfg.Stream.Ack(ctx, msg.ID)
+func (w *Worker) processMessage(ctx context.Context, msg *TaskMessage) error {
+	logger := w.cfg.Logger.With().
+		Str("task_id", msg.TaskID).
+		Str("node_id", msg.NodeID).
+		Str("run_id", msg.RunID).
+		Int("attempt", msg.Attempt).
+		Logger()
+
+	acquired, err := w.coordClient.AcquireTaskLease(ctx, msg.TaskID, w.cfg.ConsumerName, w.cfg.LeaseTTLSeconds)
+	if err != nil {
+		return fmt.Errorf("acquire task lease: %w", err)
+	}
+	if !acquired {
+		// Running elsewhere under a live lease, already finished, or superseded.
+		logger.Debug().Msg("task lease not acquired, dropping message")
+		return nil
+	}
+
+	execCtx, cancel := context.WithTimeout(ctx, taskTimeout)
+	defer cancel()
+	leaseCtx, stopRenewal := context.WithCancelCause(execCtx)
+	defer stopRenewal(nil)
+	go w.renewLeaseLoop(leaseCtx, msg.TaskID, stopRenewal, logger)
+
+	// Embed the task ID so executors can use task_instances.id as an
+	// idempotency key (e.g. Idempotency-Key header on HTTP requests).
+	start := time.Now()
+	output, execErr := w.router.Route(executors.WithTaskID(leaseCtx, msg.TaskID), msg.NodeType, msg.Input)
+	stopRenewal(nil)
+
+	if errors.Is(context.Cause(leaseCtx), errLeaseLost) {
+		// Another worker owns the task now; its result is the one that counts.
+		logger.Warn().Msg("lease lost during execution, discarding result")
+		return nil
+	}
+	if ctx.Err() != nil {
+		// Shutting down: don't report the interruption as a task failure. The
+		// lease expires and the coordinator re-dispatches the task.
+		return fmt.Errorf("worker stopped during execution: %w", ctx.Err())
+	}
+
+	var errStr *string
+	if execErr != nil {
+		s := execErr.Error()
+		errStr = &s
+	}
+	logger.Info().Dur("duration", time.Since(start)).Bool("success", execErr == nil).Msg("task executed")
+
+	if err := w.coordClient.ReportTaskResult(ctx, msg, output, errStr); err != nil {
+		return fmt.Errorf("report result: %w", err)
+	}
+	return nil
+}
+
+// renewLeaseLoop renews the task lease every TTL/3 until ctx is canceled. If
+// the lease is lost it cancels the execution with errLeaseLost.
+func (w *Worker) renewLeaseLoop(ctx context.Context, taskID string, cancel context.CancelCauseFunc, logger zerolog.Logger) {
+	renewInterval := max(time.Duration(w.cfg.LeaseTTLSeconds/3)*time.Second, 5*time.Second)
+	ticker := time.NewTicker(renewInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			renewed, err := w.coordClient.RenewTaskLease(ctx, taskID, w.cfg.ConsumerName, w.cfg.LeaseTTLSeconds)
+			switch {
+			case err != nil:
+				// Transient; the lease survives until its TTL, so keep trying.
+				logger.Warn().Err(err).Msg("failed to renew task lease")
+			case !renewed:
+				cancel(errLeaseLost)
+				return
+			}
+		}
 	}
 }
 
 func parseTaskMessage(values map[string]any) (TaskMessage, error) {
-	var t TaskMessage
 	get := func(k string) (string, bool) {
 		v, ok := values[k]
 		if !ok {
@@ -261,116 +380,27 @@ func parseTaskMessage(values map[string]any) (TaskMessage, error) {
 			return string(b), true
 		}
 	}
+	getInt := func(k string) int {
+		s, _ := get(k)
+		n, _ := strconv.Atoi(s)
+		return n
+	}
 
-	if s, ok := get("task_id"); ok {
-		t.TaskID = s
-	} else {
+	var t TaskMessage
+	var ok bool
+	if t.TaskID, ok = get("task_id"); !ok {
 		return t, fmt.Errorf("missing task_id")
 	}
-	if s, ok := get("run_id"); ok {
-		t.RunID = s
-	}
-	if s, ok := get("node_id"); ok {
-		t.NodeID = s
-	}
-	if s, ok := get("node_type"); ok {
-		t.NodeType = s
-	} else {
+	t.RunID, _ = get("run_id")
+	t.NodeID, _ = get("node_id")
+	if t.NodeType, ok = get("node_type"); !ok {
 		t.NodeType = "http"
 	}
-	if s, ok := get("workflow_id"); ok {
-		t.WorkflowID = s
-	}
-	if s, ok := get("workflow_version"); ok {
-		if v, err := strconv.Atoi(s); err == nil {
-			t.WorkflowVersion = v
-		}
-	}
+	t.WorkflowID, _ = get("workflow_id")
+	t.WorkflowVersion = getInt("workflow_version")
+	t.Attempt = getInt("attempt")
 	if s, ok := get("input"); ok {
 		t.Input = json.RawMessage(s)
 	}
 	return t, nil
-}
-
-func (w *Worker) processMessage(ctx context.Context, msg *TaskMessage) error {
-	logger := w.cfg.Logger.With().
-		Str("task", msg.TaskID).
-		Str("node", msg.NodeID).
-		Str("run", msg.RunID).
-		Logger()
-
-	leaseCtx, cancelLease := context.WithTimeout(ctx, 5*time.Second)
-	acquired, err := w.coordClient.AcquireTaskLease(leaseCtx, msg.TaskID, w.cfg.ConsumerName, w.cfg.LeaseTTLSeconds)
-	cancelLease()
-	if err != nil {
-		logger.Error().Err(err).Msg("failed to acquire task lease")
-		return err
-	}
-	if !acquired {
-		logger.Warn().Msg("task lease not acquired (already running or completed), acking message")
-		return nil
-	}
-
-	leaseCtx2, stopRenewal := context.WithCancel(ctx)
-	go w.renewLeaseLoop(leaseCtx2, msg.TaskID, logger)
-
-	// Embed the task ID so executors can use task_instances.id as an
-	// idempotency key (e.g. Idempotency-Key header on HTTP requests).
-	execCtx := executors.WithTaskID(ctx, msg.TaskID)
-
-	var execErr *string
-	start := time.Now()
-
-	execOutput, routeErr := w.router.Route(execCtx, msg.NodeType, msg.Input)
-	if routeErr != nil {
-		errStr := routeErr.Error()
-		execErr = &errStr
-	}
-
-	stopRenewal()
-
-	duration := time.Since(start)
-	logger.Info().
-		Dur("duration", duration).
-		Bool("success", execErr == nil).
-		Msg("task executed")
-
-	if err := w.coordClient.ReportTaskResult(ctx, msg.TaskID, msg.RunID, msg.NodeID, msg.WorkflowID, msg.WorkflowVersion, execOutput, execErr); err != nil {
-		logger.Error().Err(err).Msg("failed to report task result to coordinator")
-		return fmt.Errorf("failed to report result: %w", err)
-	}
-
-	logger.Info().Msg("reported completion to coordinator")
-	return nil
-}
-
-// renewLeaseLoop periodically renews the task lease until ctx is canceled.
-func (w *Worker) renewLeaseLoop(ctx context.Context, taskID string, logger zerolog.Logger) {
-	renewInterval := time.Duration(w.cfg.LeaseTTLSeconds/3) * time.Second
-	if renewInterval < 5*time.Second {
-		renewInterval = 5 * time.Second
-	}
-
-	ticker := time.NewTicker(renewInterval)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			renewCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-			acquired, err := w.coordClient.AcquireTaskLease(renewCtx, taskID, w.cfg.ConsumerName, w.cfg.LeaseTTLSeconds)
-			cancel()
-			if err != nil {
-				logger.Warn().Err(err).Str("task_id", taskID).Msg("failed to renew task lease")
-				continue
-			}
-			if !acquired {
-				logger.Warn().Str("task_id", taskID).Msg("lease renewal failed: task no longer in leasable state")
-				return
-			}
-			logger.Debug().Str("task_id", taskID).Msg("task lease renewed")
-		}
-	}
 }

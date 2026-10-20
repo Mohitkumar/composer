@@ -2,6 +2,7 @@ package http
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strconv"
 	"time"
@@ -32,44 +33,34 @@ func (h *handlers) createWorkflow(w http.ResponseWriter, r *http.Request) {
 		Spec       string `json:"spec"` // YAML string
 	}
 	if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid JSON: " + err.Error()})
+		writeError(w, http.StatusBadRequest, "Invalid JSON: "+err.Error())
 		return
 	}
 
 	// Validate that spec is not empty
 	if p.Spec == "" {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(map[string]string{"error": "spec field is required and cannot be empty"})
+		writeError(w, http.StatusBadRequest, "spec field is required and cannot be empty")
 		return
 	}
 
 	// Validate that spec is valid YAML by parsing it
 	var specObj interface{}
 	if err := yaml.Unmarshal([]byte(p.Spec), &specObj); err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid YAML in spec field: " + err.Error()})
+		writeError(w, http.StatusBadRequest, "Invalid YAML in spec field: "+err.Error())
 		return
 	}
 
 	// Convert YAML spec to JSON for storage in database
 	specJSON, err := json.Marshal(specObj)
 	if err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to convert spec to JSON: " + err.Error()})
+		writeError(w, http.StatusBadRequest, "Failed to convert spec to JSON: "+err.Error())
 		return
 	}
 
 	// Get authenticated user ID from JWT token (set by middleware)
 	userID := GetUserID(r)
 	if userID == "" {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusUnauthorized)
-		json.NewEncoder(w).Encode(map[string]string{"error": "user ID not found in request context"})
+		writeError(w, http.StatusUnauthorized, "user ID not found in request context")
 		return
 	}
 
@@ -83,14 +74,10 @@ func (h *handlers) createWorkflow(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := h.coordinator.RegisterWorkflow(r.Context(), &req); err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusCreated)
-	json.NewEncoder(w).Encode(map[string]string{"message": "Workflow created successfully"})
+	writeJSON(w, http.StatusCreated, map[string]string{"message": "Workflow created successfully"})
 }
 
 func (h *handlers) listWorkflows(w http.ResponseWriter, r *http.Request) {
@@ -113,9 +100,7 @@ func (h *handlers) listWorkflows(w http.ResponseWriter, r *http.Request) {
 
 	result, err := h.coordinator.ListWorkflowsWithStats(r.Context(), enabledOnly, search, page, pageSize)
 	if err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
@@ -124,18 +109,14 @@ func (h *handlers) listWorkflows(w http.ResponseWriter, r *http.Request) {
 	for i, wf := range result.Workflows {
 		var specObj interface{}
 		if err := json.Unmarshal(wf.Spec, &specObj); err != nil {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]string{"error": "Failed to parse spec for workflow " + wf.ID + ": " + err.Error()})
+			writeError(w, http.StatusInternalServerError, "Failed to parse spec for workflow "+wf.ID+": "+err.Error())
 			return
 		}
 
 		var specYAML interface{}
 		err = yaml.Unmarshal([]byte(wf.Spec), &specYAML)
 		if err != nil {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]string{"error": "Failed to convert spec to YAML for workflow " + wf.ID + ": " + err.Error()})
+			writeError(w, http.StatusInternalServerError, "Failed to convert spec to YAML for workflow "+wf.ID+": "+err.Error())
 			return
 		}
 
@@ -171,8 +152,7 @@ func (h *handlers) listWorkflows(w http.ResponseWriter, r *http.Request) {
 		"total_pages": result.TotalPages,
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(response)
+	writeJSON(w, http.StatusOK, response)
 }
 
 func (h *handlers) getWorkflow(w http.ResponseWriter, r *http.Request) {
@@ -199,9 +179,7 @@ func (h *handlers) getWorkflow(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusNotFound)
-		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		writeError(w, http.StatusNotFound, err.Error())
 		return
 	}
 
@@ -209,9 +187,7 @@ func (h *handlers) getWorkflow(w http.ResponseWriter, r *http.Request) {
 	var specObj interface{}
 	err = yaml.Unmarshal([]byte(wf.Spec), &specObj)
 	if err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to convert spec to YAML: " + err.Error()})
+		writeError(w, http.StatusInternalServerError, "Failed to convert spec to YAML: "+err.Error())
 		return
 	}
 
@@ -233,8 +209,7 @@ func (h *handlers) getWorkflow(w http.ResponseWriter, r *http.Request) {
 		response["deployed_at"] = wf.DeployedAt.Time.Format(time.RFC3339)
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(response)
+	writeJSON(w, http.StatusOK, response)
 }
 
 func (h *handlers) updateWorkflow(w http.ResponseWriter, r *http.Request) {
@@ -261,14 +236,10 @@ func (h *handlers) updateWorkflow(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := h.coordinator.UpdateWorkflow(r.Context(), id, version, payload.Name, payload.Enabled, payload.WebhookURL); err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(map[string]string{"message": "Workflow updated successfully"})
+	writeJSON(w, http.StatusOK, map[string]string{"message": "Workflow updated successfully"})
 }
 
 func (h *handlers) deleteWorkflow(w http.ResponseWriter, r *http.Request) {
@@ -286,121 +257,90 @@ func (h *handlers) deleteWorkflow(w http.ResponseWriter, r *http.Request) {
 	hardDelete := r.URL.Query().Get("hard") == "true"
 
 	if err := h.coordinator.DeleteWorkflow(r.Context(), id, version, hardDelete); err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(map[string]string{"message": "Workflow deleted successfully"})
+	writeJSON(w, http.StatusOK, map[string]string{"message": "Workflow deleted successfully"})
 }
 
 func (h *handlers) deployWorkflow(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	versionStr := r.URL.Query().Get("version")
 	if versionStr == "" {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(map[string]string{"error": "version parameter is required"})
+		writeError(w, http.StatusBadRequest, "version parameter is required")
 		return
 	}
 
 	version, err := strconv.Atoi(versionStr)
 	if err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(map[string]string{"error": "invalid version"})
+		writeError(w, http.StatusBadRequest, "invalid version")
 		return
 	}
 
 	if err := h.coordinator.DeployWorkflow(r.Context(), id, version); err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(map[string]string{"message": "Workflow deployed successfully"})
+	writeJSON(w, http.StatusOK, map[string]string{"message": "Workflow deployed successfully"})
 }
 
 func (h *handlers) rollbackWorkflow(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	versionStr := r.URL.Query().Get("version")
 	if versionStr == "" {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(map[string]string{"error": "version parameter is required"})
+		writeError(w, http.StatusBadRequest, "version parameter is required")
 		return
 	}
 
 	version, err := strconv.Atoi(versionStr)
 	if err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(map[string]string{"error": "invalid version"})
+		writeError(w, http.StatusBadRequest, "invalid version")
 		return
 	}
 
 	if err := h.coordinator.RollbackWorkflow(r.Context(), id, version); err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(map[string]string{"message": "Workflow rolled back successfully"})
+	writeJSON(w, http.StatusOK, map[string]string{"message": "Workflow rolled back successfully"})
 }
 
 func (h *handlers) getPreviousDeployedVersions(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	versionStr := r.URL.Query().Get("version")
 	if versionStr == "" {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(map[string]string{"error": "version parameter is required"})
+		writeError(w, http.StatusBadRequest, "version parameter is required")
 		return
 	}
 
 	version, err := strconv.Atoi(versionStr)
 	if err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(map[string]string{"error": "invalid version"})
+		writeError(w, http.StatusBadRequest, "invalid version")
 		return
 	}
 
 	versions, err := h.coordinator.GetPreviousDeployedVersions(r.Context(), id, version)
 	if err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{"versions": versions})
+	writeJSON(w, http.StatusOK, map[string]interface{}{"versions": versions})
 }
 
 func (h *handlers) executeWorkflow(w http.ResponseWriter, r *http.Request) {
 	// Get workflow ID from path parameter
 	workflowID := chi.URLParam(r, "id")
 	if workflowID == "" {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(map[string]string{"error": "workflow ID is required in path"})
+		writeError(w, http.StatusBadRequest, "workflow ID is required in path")
 		return
 	}
 
 	var p model.StartWorkflowRequest
 	if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	// Use workflow ID from path parameter (ignore if provided in body)
@@ -410,24 +350,18 @@ func (h *handlers) executeWorkflow(w http.ResponseWriter, r *http.Request) {
 	if p.WorkflowVersion == 0 {
 		deployedWorkflow, err := h.coordinator.GetWorkflow(r.Context(), workflowID, 0)
 		if err != nil {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusNotFound)
-			json.NewEncoder(w).Encode(map[string]string{"error": "workflow not found or no deployed version"})
+			writeError(w, http.StatusNotFound, "workflow not found or no deployed version")
 			return
 		}
 		if !deployedWorkflow.Deployed {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]string{"error": "workflow has no deployed version"})
+			writeError(w, http.StatusBadRequest, "workflow has no deployed version")
 			return
 		}
 		p.WorkflowVersion = deployedWorkflow.Version
 	}
 
 	if err := h.coordinator.StartWorkflow(r.Context(), &p); err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
@@ -435,9 +369,7 @@ func (h *handlers) executeWorkflow(w http.ResponseWriter, r *http.Request) {
 	response := map[string]string{
 		"run_id": p.RunID,
 	}
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusAccepted)
-	json.NewEncoder(w).Encode(response)
+	writeJSON(w, http.StatusAccepted, response)
 }
 
 func (h *handlers) getWorkflowStatus(w http.ResponseWriter, r *http.Request) {
@@ -449,13 +381,10 @@ func (h *handlers) getWorkflowStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	status, err := h.coordinator.GetWorkflowInstanceStatus(r.Context(), runID)
 	if err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusNotFound)
-		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		writeError(w, http.StatusNotFound, err.Error())
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(status)
+	writeJSON(w, http.StatusOK, status)
 }
 
 // Execution handlers
@@ -492,13 +421,10 @@ func (h *handlers) listExecutions(w http.ResponseWriter, r *http.Request) {
 
 	result, err := h.coordinator.ListWorkflowInstances(r.Context(), wfID, status, search, page, pageSize)
 	if err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(result)
+	writeJSON(w, http.StatusOK, result)
 }
 
 func (h *handlers) getExecution(w http.ResponseWriter, r *http.Request) {
@@ -511,24 +437,18 @@ func (h *handlers) getExecution(w http.ResponseWriter, r *http.Request) {
 		// Return comprehensive execution details
 		details, err := h.coordinator.GetExecutionDetails(r.Context(), id)
 		if err != nil {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusNotFound)
-			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			writeError(w, http.StatusNotFound, err.Error())
 			return
 		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(details)
+		writeJSON(w, http.StatusOK, details)
 	} else {
 		// Return basic execution info (backward compatible)
 		instance, err := h.coordinator.GetWorkflowInstance(r.Context(), id)
 		if err != nil {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusNotFound)
-			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			writeError(w, http.StatusNotFound, err.Error())
 			return
 		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(instance)
+		writeJSON(w, http.StatusOK, instance)
 	}
 }
 
@@ -540,30 +460,22 @@ func (h *handlers) cancelExecution(w http.ResponseWriter, r *http.Request) {
 	json.NewDecoder(r.Body).Decode(&payload)
 
 	if err := h.coordinator.CancelWorkflowInstance(r.Context(), id, payload.Reason); err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(map[string]string{"message": "Execution cancelled successfully"})
+	writeJSON(w, http.StatusOK, map[string]string{"message": "Execution cancelled successfully"})
 }
 
 func (h *handlers) retryExecution(w http.ResponseWriter, r *http.Request) {
 	runID := chi.URLParam(r, "id")
 	if runID == "" {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(map[string]string{"error": "run_id is required in path"})
+		writeError(w, http.StatusBadRequest, "run_id is required in path")
 		return
 	}
 
 	var p model.RetryWorkflowRequest
 	if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
@@ -572,22 +484,20 @@ func (h *handlers) retryExecution(w http.ResponseWriter, r *http.Request) {
 
 	// Validate that node_id is provided
 	if p.NodeID == "" {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(map[string]string{"error": "node_id is required"})
+		writeError(w, http.StatusBadRequest, "node_id is required")
 		return
 	}
 
 	if err := h.coordinator.RetryWorkflowInstance(r.Context(), &p); err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		status := http.StatusInternalServerError
+		if errors.Is(err, coord.ErrRunActive) {
+			status = http.StatusConflict
+		}
+		writeError(w, status, err.Error())
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusAccepted)
-	json.NewEncoder(w).Encode(map[string]string{"message": "Workflow retry started successfully", "run_id": runID})
+	writeJSON(w, http.StatusAccepted, map[string]string{"message": "Workflow retry started successfully", "run_id": runID})
 }
 
 // Template handlers
@@ -598,26 +508,20 @@ func (h *handlers) listNodeTemplates(w http.ResponseWriter, r *http.Request) {
 
 	templates, err := h.coordinator.ListNodeTemplates(r.Context(), runtime, category)
 	if err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(templates)
+	writeJSON(w, http.StatusOK, templates)
 }
 
 func (h *handlers) getNodeTemplate(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	template, err := h.coordinator.GetNodeTemplate(r.Context(), id)
 	if err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusNotFound)
-		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		writeError(w, http.StatusNotFound, err.Error())
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(template)
+	writeJSON(w, http.StatusOK, template)
 }
 
 func (h *handlers) listWorkflowTemplates(w http.ResponseWriter, r *http.Request) {
@@ -625,26 +529,20 @@ func (h *handlers) listWorkflowTemplates(w http.ResponseWriter, r *http.Request)
 
 	templates, err := h.coordinator.ListWorkflowTemplates(r.Context(), category)
 	if err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(templates)
+	writeJSON(w, http.StatusOK, templates)
 }
 
 func (h *handlers) getWorkflowTemplate(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	template, err := h.coordinator.GetWorkflowTemplate(r.Context(), id)
 	if err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusNotFound)
-		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		writeError(w, http.StatusNotFound, err.Error())
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(template)
+	writeJSON(w, http.StatusOK, template)
 }
 
 // Configuration handlers
@@ -654,34 +552,26 @@ func (h *handlers) listConfigurations(w http.ResponseWriter, r *http.Request) {
 
 	configs, err := h.coordinator.ListConfigurations(r.Context(), configType)
 	if err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(configs)
+	writeJSON(w, http.StatusOK, configs)
 }
 
 func (h *handlers) getConfiguration(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	config, err := h.coordinator.GetConfiguration(r.Context(), id)
 	if err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusNotFound)
-		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		writeError(w, http.StatusNotFound, err.Error())
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(config)
+	writeJSON(w, http.StatusOK, config)
 }
 
 func (h *handlers) createConfiguration(w http.ResponseWriter, r *http.Request) {
 	var req model.CreateConfigurationRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
@@ -692,51 +582,37 @@ func (h *handlers) createConfiguration(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := h.coordinator.CreateConfiguration(r.Context(), &req); err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusCreated)
-	json.NewEncoder(w).Encode(map[string]string{"message": "Configuration created successfully"})
+	writeJSON(w, http.StatusCreated, map[string]string{"message": "Configuration created successfully"})
 }
 
 func (h *handlers) updateConfiguration(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	var req model.UpdateConfigurationRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
 	if err := h.coordinator.UpdateConfiguration(r.Context(), id, &req); err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(map[string]string{"message": "Configuration updated successfully"})
+	writeJSON(w, http.StatusOK, map[string]string{"message": "Configuration updated successfully"})
 }
 
 func (h *handlers) deleteConfiguration(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	if err := h.coordinator.DeleteConfiguration(r.Context(), id); err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(map[string]string{"message": "Configuration deleted successfully"})
+	writeJSON(w, http.StatusOK, map[string]string{"message": "Configuration deleted successfully"})
 }
 
 // Auth handlers
@@ -744,16 +620,12 @@ func (h *handlers) deleteConfiguration(w http.ResponseWriter, r *http.Request) {
 func (h *handlers) login(w http.ResponseWriter, r *http.Request) {
 	var req model.LoginRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(map[string]string{"error": "invalid request body"})
+		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
 
 	if req.Username == "" || req.Password == "" {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(map[string]string{"error": "username and password are required"})
+		writeError(w, http.StatusBadRequest, "username and password are required")
 		return
 	}
 
@@ -761,23 +633,17 @@ func (h *handlers) login(w http.ResponseWriter, r *http.Request) {
 	user, err := h.userService.Authenticate(r.Context(), req.Username, req.Password)
 	if err != nil {
 		if err == auth.ErrUserNotFound || err == auth.ErrInvalidPassword {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusUnauthorized)
-			json.NewEncoder(w).Encode(map[string]string{"error": "invalid username or password"})
+			writeError(w, http.StatusUnauthorized, "invalid username or password")
 			return
 		}
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(map[string]string{"error": "authentication failed"})
+		writeError(w, http.StatusInternalServerError, "authentication failed")
 		return
 	}
 
 	// Generate JWT token
 	token, err := h.jwtService.GenerateToken(user.ID, user.Username)
 	if err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(map[string]string{"error": "failed to generate token"})
+		writeError(w, http.StatusInternalServerError, "failed to generate token")
 		return
 	}
 
@@ -786,15 +652,23 @@ func (h *handlers) login(w http.ResponseWriter, r *http.Request) {
 		User:  *user,
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(response)
+	writeJSON(w, http.StatusOK, response)
 }
 
 func (h *handlers) logout(w http.ResponseWriter, r *http.Request) {
 	// For JWT-based auth, logout is handled client-side by removing the token
 	// This endpoint exists for consistency and potential future token blacklisting
+	writeJSON(w, http.StatusOK, map[string]string{"message": "logged out successfully"})
+}
+
+// writeJSON writes v as a JSON response with the given status code.
+func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(map[string]string{"message": "logged out successfully"})
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(v)
+}
+
+// writeError writes a {"error": msg} JSON response.
+func writeError(w http.ResponseWriter, status int, msg string) {
+	writeJSON(w, status, map[string]string{"error": msg})
 }

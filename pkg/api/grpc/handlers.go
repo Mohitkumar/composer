@@ -2,7 +2,6 @@ package grpc
 
 import (
 	"context"
-	"strconv"
 	"time"
 
 	workflowpb "github.com/mohitkumar/composer/pkg/api/proto/gen/go/workflow"
@@ -11,7 +10,11 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-// WorkflowService implements the gRPC service for worker-coordinator communication
+const defaultLeaseTTL = 90 * time.Second
+
+// WorkflowService implements the gRPC service for worker-coordinator communication.
+// RPCs not overridden here (ExecuteTask, GetTaskStatus) return Unimplemented
+// via the embedded server: workers pull tasks from the stream instead.
 type WorkflowService struct {
 	workflowpb.UnimplementedWorkflowServiceServer
 	coordinator *coord.Coordinator
@@ -19,86 +22,75 @@ type WorkflowService struct {
 
 // NewWorkflowService creates a new workflow gRPC service
 func NewWorkflowService(coordinator *coord.Coordinator) *WorkflowService {
-	return &WorkflowService{
-		coordinator: coordinator,
-	}
+	return &WorkflowService{coordinator: coordinator}
 }
 
-// ReportTaskResult handles task result reports from workers
+// ReportTaskResult applies a worker's result for one task attempt.
 func (s *WorkflowService) ReportTaskResult(ctx context.Context, req *workflowpb.ReportTaskResultRequest) (*workflowpb.ReportTaskResultResponse, error) {
-	// Extract metadata
-	runID, ok := req.Metadata["run_id"]
-	if !ok {
-		return nil, status.Error(codes.InvalidArgument, "run_id is required in metadata")
+	res := coord.TaskResult{
+		TaskID:  req.GetTaskId(),
+		RunID:   firstNonEmpty(req.GetRunId(), req.GetMetadata()["run_id"]),
+		NodeID:  firstNonEmpty(req.GetNodeId(), req.GetMetadata()["node_id"]),
+		Attempt: int(req.GetAttempt()),
+		Output:  req.GetOutput(),
 	}
-	nodeID, ok := req.Metadata["node_id"]
-	if !ok {
-		return nil, status.Error(codes.InvalidArgument, "node_id is required in metadata")
+	if res.TaskID == "" || res.RunID == "" || res.NodeID == "" {
+		return nil, status.Error(codes.InvalidArgument, "task_id, run_id and node_id are required")
 	}
-	workflowID := req.Metadata["workflow_id"]
-	workflowVersion, _ := strconv.Atoi(req.Metadata["workflow_version"])
 
-	// Handle task completion or failure
-	if req.Status == "completed" {
-		err := s.coordinator.HandleNodeCompleted(ctx, req.TaskId, runID, nodeID, workflowID, workflowVersion, req.Output)
-		if err != nil {
-			return nil, status.Error(codes.Internal, err.Error())
-		}
-	} else if req.Status == "failed" {
-		errMsg := req.Error
-		if errMsg == "" {
-			errMsg = "task execution failed"
-		}
-		err := s.coordinator.HandleNodeFailed(ctx, runID, nodeID, errMsg, workflowID)
-		if err != nil {
-			return nil, status.Error(codes.Internal, err.Error())
-		}
-	} else {
+	var err error
+	switch req.GetStatus() {
+	case "completed":
+		err = s.coordinator.HandleNodeCompleted(ctx, res)
+	case "failed":
+		res.Error = firstNonEmpty(req.GetError(), "task execution failed")
+		err = s.coordinator.HandleNodeFailed(ctx, res)
+	default:
 		return nil, status.Error(codes.InvalidArgument, "status must be 'completed' or 'failed'")
 	}
-
-	return &workflowpb.ReportTaskResultResponse{
-		Acknowledged: true,
-	}, nil
-}
-
-// ExecuteTask is not used in current architecture (workers pull from Redis)
-func (s *WorkflowService) ExecuteTask(ctx context.Context, req *workflowpb.ExecuteTaskRequest) (*workflowpb.ExecuteTaskResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "ExecuteTask is not implemented - workers pull tasks from Redis streams")
-}
-
-// GetTaskStatus retrieves task status
-func (s *WorkflowService) GetTaskStatus(ctx context.Context, req *workflowpb.GetTaskStatusRequest) (*workflowpb.GetTaskStatusResponse, error) {
-	// TODO: Implement task status retrieval
-	return nil, status.Error(codes.Unimplemented, "GetTaskStatus is not yet implemented")
-}
-
-// Heartbeat handles worker heartbeats
-func (s *WorkflowService) Heartbeat(ctx context.Context, req *workflowpb.HeartbeatRequest) (*workflowpb.HeartbeatResponse, error) {
-	// TODO: Implement heartbeat tracking
-	return &workflowpb.HeartbeatResponse{
-		Acknowledged: true,
-	}, nil
-}
-
-// AcquireTaskLease allows a worker to claim a lease before executing a task.
-func (s *WorkflowService) AcquireTaskLease(ctx context.Context, req *workflowpb.AcquireTaskLeaseRequest) (*workflowpb.AcquireTaskLeaseResponse, error) {
-	if req.GetTaskId() == "" || req.GetOwner() == "" {
-		return nil, status.Error(codes.InvalidArgument, "task_id and owner are required")
-	}
-
-	ttl := time.Duration(req.GetTtlSeconds()) * time.Second
-	if ttl <= 0 {
-		ttl = 90 * time.Second
-	}
-
-	acquired, err := s.coordinator.LeaseManager.AcquireTaskLease(ctx, req.GetTaskId(), req.GetOwner(), ttl)
 	if err != nil {
 		return nil, status.Error(codes.Internal, err.Error())
 	}
+	return &workflowpb.ReportTaskResultResponse{Acknowledged: true}, nil
+}
 
-	return &workflowpb.AcquireTaskLeaseResponse{
-		Acquired: acquired,
-		Message:  "",
-	}, nil
+// Heartbeat acknowledges worker heartbeats; liveness is tracked through task leases.
+func (s *WorkflowService) Heartbeat(ctx context.Context, req *workflowpb.HeartbeatRequest) (*workflowpb.HeartbeatResponse, error) {
+	return &workflowpb.HeartbeatResponse{Acknowledged: true}, nil
+}
+
+// AcquireTaskLease lets a worker claim a task before executing it.
+func (s *WorkflowService) AcquireTaskLease(ctx context.Context, req *workflowpb.AcquireTaskLeaseRequest) (*workflowpb.AcquireTaskLeaseResponse, error) {
+	return s.lease(ctx, req, s.coordinator.LeaseManager.Acquire)
+}
+
+// RenewTaskLease extends a lease the worker holds while the task runs.
+func (s *WorkflowService) RenewTaskLease(ctx context.Context, req *workflowpb.AcquireTaskLeaseRequest) (*workflowpb.AcquireTaskLeaseResponse, error) {
+	return s.lease(ctx, req, s.coordinator.LeaseManager.Renew)
+}
+
+type leaseFunc func(ctx context.Context, taskID, owner string, ttl time.Duration) (bool, error)
+
+func (s *WorkflowService) lease(ctx context.Context, req *workflowpb.AcquireTaskLeaseRequest, fn leaseFunc) (*workflowpb.AcquireTaskLeaseResponse, error) {
+	if req.GetTaskId() == "" || req.GetOwner() == "" {
+		return nil, status.Error(codes.InvalidArgument, "task_id and owner are required")
+	}
+	ttl := time.Duration(req.GetTtlSeconds()) * time.Second
+	if ttl <= 0 {
+		ttl = defaultLeaseTTL
+	}
+	acquired, err := fn(ctx, req.GetTaskId(), req.GetOwner(), ttl)
+	if err != nil {
+		return nil, status.Error(codes.Internal, err.Error())
+	}
+	return &workflowpb.AcquireTaskLeaseResponse{Acquired: acquired}, nil
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, v := range values {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
 }

@@ -20,6 +20,7 @@ import (
 	"github.com/mohitkumar/composer/pkg/model"
 	"github.com/mohitkumar/composer/pkg/outbox"
 	"github.com/mohitkumar/composer/pkg/redisq"
+	redisstream "github.com/mohitkumar/composer/pkg/stream/redis"
 	"github.com/mohitkumar/composer/worker"
 	"github.com/rs/zerolog"
 )
@@ -95,7 +96,7 @@ func TestEndToEndWorkflowExecution(t *testing.T) {
 	// Create outbox enqueuer
 	outboxEnqueuer := outbox.NewOutboxEnqueuer(outbox.EnqueuerConfig{
 		DB:           infra.DBPool,
-		Redis:        infra.RedisStream,
+		Publisher:    redisstream.NewPublisher(infra.RedisStream),
 		Logger:       coordLogger,
 		BatchSize:    50,
 		Concurrency:  2,
@@ -148,10 +149,12 @@ func TestEndToEndWorkflowExecution(t *testing.T) {
 	// Setup worker
 	workerLogger := zerolog.New(infra.Logger).With().Str("component", "worker").Logger()
 	workerConfig := worker.WorkerConfig{
-		Redis:           infra.RedisStream,
+		Stream: redisstream.NewConsumer(redisstream.ConsumerConfig{
+			StreamName:    "workflow.tasks",
+			ConsumerGroup: "test-workers",
+			ConsumerName:  "test-worker-1",
+		}, infra.RedisStream, zerolog.Nop()),
 		CoordinatorAddr: grpcAddr,
-		StreamName:      "workflow.tasks",
-		ConsumerGroup:   "test-workers",
 		ConsumerName:    "test-worker-1",
 		Logger:          workerLogger,
 	}
@@ -357,7 +360,7 @@ func TestEndToEndParameterResolutionAndLease(t *testing.T) {
 
 	outboxEnqueuer := outbox.NewOutboxEnqueuer(outbox.EnqueuerConfig{
 		DB:           infra.DBPool,
-		Redis:        infra.RedisStream,
+		Publisher:    redisstream.NewPublisher(infra.RedisStream),
 		Logger:       coordLogger,
 		BatchSize:    50,
 		Concurrency:  2,
@@ -419,10 +422,12 @@ func TestEndToEndParameterResolutionAndLease(t *testing.T) {
 
 	workerLogger := zerolog.New(infra.Logger).With().Str("component", "worker").Logger()
 	workerConfig := worker.WorkerConfig{
-		Redis:           infra.RedisStream,
+		Stream: redisstream.NewConsumer(redisstream.ConsumerConfig{
+			StreamName:    "workflow.tasks",
+			ConsumerGroup: "lease-workers",
+			ConsumerName:  "lease-worker-1",
+		}, infra.RedisStream, zerolog.Nop()),
 		CoordinatorAddr: grpcAddr,
-		StreamName:      "workflow.tasks",
-		ConsumerGroup:   "lease-workers",
 		ConsumerName:    "lease-worker-1",
 		LeaseTTLSeconds: 60,
 		Logger:          workerLogger,

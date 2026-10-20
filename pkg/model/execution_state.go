@@ -3,6 +3,7 @@ package model
 import (
 	"encoding/json"
 	"fmt"
+	"slices"
 )
 
 // TemplateResolver evaluates CEL expressions against a RunContext.
@@ -12,48 +13,68 @@ type TemplateResolver interface {
 	ResolveTemplates(spec interface{}, ctx *RunContext) (interface{}, error)
 }
 
-// ControlNode is a SWITCH or FORK that was resolved inline during routing.
+// NodeStates maps node ID → task state for every node of a run that has a
+// task instance. Nodes without an entry have not been reached yet.
+type NodeStates map[string]TaskInstanceStatus
+
+// ControlNode is a SWITCH, FORK or JOIN that was resolved inline during routing.
 // These nodes are instantly completed by the coordinator (no worker execution).
 type ControlNode struct {
 	Node   *Node
 	Output json.RawMessage // output to persist; predecessor pass-through for SWITCH
 }
 
-// RoutingResult is returned by ExecutionState.NextNodes.
-// It separates what the executor needs to persist into two categories.
+// RoutingResult is everything a routing step decided; the executor persists it.
 type RoutingResult struct {
 	// ExecutableNodes are worker tasks to create and enqueue.
 	ExecutableNodes []*Node
-	// ControlNodes are SWITCH/FORK nodes to persist as instantly-completed.
+	// ControlNodes are control-flow nodes to persist as instantly completed.
 	ControlNodes []ControlNode
+	// SkippedNodes are nodes on branches that can no longer be taken.
+	SkippedNodes []*Node
 }
 
-// IsEmpty reports whether there are no nodes to process in either category.
+// IsEmpty reports whether the routing step produced nothing to persist.
 func (r *RoutingResult) IsEmpty() bool {
-	return len(r.ExecutableNodes) == 0 && len(r.ControlNodes) == 0
+	return len(r.ExecutableNodes) == 0 && len(r.ControlNodes) == 0 && len(r.SkippedNodes) == 0
 }
 
-// ExecutionState is the workflow state machine for a single execution.
-// It combines a cached, immutable WorkflowDAG with the mutable RunContext for
-// one run. All routing logic lives here; the executor is responsible only for
-// persisting the returned actions to the database.
+// ExecutionState is the workflow state machine for a single run.
+// It combines the cached, immutable WorkflowDAG with the run's mutable
+// RunContext and the current state of each node. All routing logic lives here;
+// the executor only persists the returned RoutingResult.
 //
-// ExecutionState is not safe for concurrent use — create one per HandleNodeCompleted call.
+// Scheduling rule: a node becomes ready once every incoming edge is resolved.
+// An edge is active when its source completed (and, for a SWITCH, selected
+// this target); it is inactive when the source was skipped or the SWITCH
+// selected another branch. A ready node runs if any incoming edge is active
+// and is skipped otherwise, which propagates skips down untaken branches.
+// This gives fork/join, diamonds, and SWITCH re-convergence one uniform
+// semantics, regardless of branch length.
+//
+// The caller must serialize ExecutionState use per run (the coordinator holds
+// the workflow_runs row lock); it is not safe for concurrent use.
 type ExecutionState struct {
-	dag  *WorkflowDAG
-	ctx  *RunContext
-	tmpl TemplateResolver
+	dag    *WorkflowDAG
+	ctx    *RunContext
+	tmpl   TemplateResolver
+	states NodeStates
 }
 
-// NewExecutionState creates an ExecutionState for a single workflow execution.
-// dag is the cached topology; ctx is the run-specific state loaded from the DB.
-func NewExecutionState(dag *WorkflowDAG, ctx *RunContext, tmpl TemplateResolver) *ExecutionState {
-	return &ExecutionState{dag: dag, ctx: ctx, tmpl: tmpl}
+// NewExecutionState creates an ExecutionState for one run. states holds the
+// persisted state of every node that already has a task instance.
+func NewExecutionState(dag *WorkflowDAG, ctx *RunContext, tmpl TemplateResolver, states NodeStates) *ExecutionState {
+	if states == nil {
+		states = NodeStates{}
+	}
+	if ctx.Tasks == nil {
+		ctx.Tasks = map[string]*StepResult{}
+	}
+	return &ExecutionState{dag: dag, ctx: ctx, tmpl: tmpl, states: states}
 }
 
-// RunContext returns the current run context.
-// After NextNodes is called, the context may contain updated SWITCH pass-through
-// entries that the executor must persist to the database.
+// RunContext returns the current run context, including SWITCH pass-through
+// entries added during routing that the executor must persist.
 func (e *ExecutionState) RunContext() *RunContext {
 	return e.ctx
 }
@@ -73,65 +94,173 @@ func (e *ExecutionState) Descendants(nodeID string) []string {
 	return e.dag.Descendants(nodeID)
 }
 
-// IsBranchNode reports whether nodeID is a direct child of a FORK node.
-// When true the caller must query the DB for the completed-branch count
-// and pass it to NextNodes.
-func (e *ExecutionState) IsBranchNode(nodeID string) bool {
-	return e.dag.ForkParent(nodeID) != nil
-}
-
-// BranchSiblingIDs returns all sibling branch IDs for a FORK branch (including nodeID itself).
-// Used by the executor to scope the completed-branch count query.
-// Returns nil if nodeID is not a branch node.
-func (e *ExecutionState) BranchSiblingIDs(nodeID string) []string {
-	forkParent := e.dag.ForkParent(nodeID)
-	if forkParent == nil {
-		return nil
+// Begin activates node unconditionally (the run's start node, or the node a
+// retry restarts from) and resolves everything that becomes ready as a result.
+func (e *ExecutionState) Begin(node *Node) (*RoutingResult, error) {
+	result := &RoutingResult{}
+	next, err := e.activate(node, result)
+	if err != nil {
+		return nil, err
 	}
-	return e.dag.BranchesOf(forkParent.NodeID)
+	if err := e.propagate(next, result); err != nil {
+		return nil, err
+	}
+	return result, nil
 }
 
-// NextNodes determines which nodes should execute after completedNodeID finishes.
-//
-// completedBranchCount is the number of branches (siblings of completedNodeID under
-// the same FORK) that are in COMPLETED/SUCCEEDED state in the DB.
-// This must be queried by the caller before calling NextNodes when IsBranchNode is true;
-// pass 0 for non-branch nodes.
-//
-// The returned RoutingResult separates:
-//   - ExecutableNodes: worker tasks to create and enqueue
-//   - ControlNodes: SWITCH/FORK nodes to persist as instantly-completed
-//
-// NextNodes also updates the in-memory RunContext as SWITCH nodes are traversed,
-// so RunContext() reflects the state after full routing resolution.
-func (e *ExecutionState) NextNodes(completedNodeID string, completedBranchCount int) (*RoutingResult, error) {
-	node := e.dag.GetNode(completedNodeID)
-	if node == nil {
+// Advance records that completedNodeID finished successfully and resolves
+// every downstream node that became ready.
+func (e *ExecutionState) Advance(completedNodeID string) (*RoutingResult, error) {
+	if e.dag.GetNode(completedNodeID) == nil {
 		return nil, fmt.Errorf("node %s not found in workflow definition", completedNodeID)
 	}
+	e.states[completedNodeID] = TaskInstanceStatusCompleted
 
-	switch node.Type {
-	case NodeTypeSwitch:
-		branches, err := e.dag.SuccessorsConditional(completedNodeID, e.evalCondition)
-		if err != nil {
-			return nil, fmt.Errorf("switch %s: %w", completedNodeID, err)
+	result := &RoutingResult{}
+	if err := e.propagate(e.dag.Successors(completedNodeID), result); err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+// propagate walks forward from candidates, running or skipping each node whose
+// incoming edges are all resolved. Nodes that are still waiting are left alone;
+// a later completion re-examines them.
+func (e *ExecutionState) propagate(candidates []*Node, result *RoutingResult) error {
+	queue := slices.Clone(candidates)
+	for len(queue) > 0 {
+		n := queue[0]
+		queue = queue[1:]
+		if _, reached := e.states[n.NodeID]; reached {
+			continue
 		}
-		return e.expandNodes(branches)
 
-	case NodeTypeFork:
-		return e.expandNodes(e.dag.Successors(completedNodeID))
+		switch e.readiness(n) {
+		case nodeWaiting:
+			continue
+		case nodeSkip:
+			e.states[n.NodeID] = TaskInstanceStatusSkipped
+			result.SkippedNodes = append(result.SkippedNodes, n)
+			queue = append(queue, e.dag.Successors(n.NodeID)...)
+		case nodeRun:
+			next, err := e.activate(n, result)
+			if err != nil {
+				return err
+			}
+			queue = append(queue, next...)
+		}
+	}
+	return nil
+}
+
+// activate starts a node. Worker nodes are queued for dispatch; control-flow
+// nodes complete inline and return their successors for further propagation.
+func (e *ExecutionState) activate(n *Node, result *RoutingResult) ([]*Node, error) {
+	switch n.Type {
+	case NodeTypeSwitch:
+		output := e.dag.PredecessorOutput(n.NodeID, e.ctx.Tasks)
+		if output == nil {
+			output = json.RawMessage("{}")
+		}
+		branches, err := e.selectBranches(n)
+		if err != nil {
+			return nil, fmt.Errorf("switch %s: %w", n.NodeID, err)
+		}
+		// Record the pass-through output and the decision so downstream
+		// conditions and later join checks see them.
+		e.ctx.Tasks[n.NodeID] = &StepResult{
+			Status:   TaskInstanceStatusCompleted,
+			Output:   output,
+			Branches: branches,
+		}
+		e.states[n.NodeID] = TaskInstanceStatusCompleted
+		result.ControlNodes = append(result.ControlNodes, ControlNode{Node: n, Output: output})
+		return e.dag.Successors(n.NodeID), nil
+
+	case NodeTypeFork, NodeTypeJoin:
+		e.states[n.NodeID] = TaskInstanceStatusCompleted
+		result.ControlNodes = append(result.ControlNodes, ControlNode{Node: n, Output: json.RawMessage("{}")})
+		return e.dag.Successors(n.NodeID), nil
 
 	default:
-		if forkParent := e.dag.ForkParent(completedNodeID); forkParent != nil {
-			totalBranches := len(e.dag.BranchesOf(forkParent.NodeID))
-			if completedBranchCount < totalBranches {
-				// Other branches still running — nothing to do yet
-				return &RoutingResult{}, nil
-			}
-			return e.expandNodes(e.dag.JoinNodes(e.dag.BranchesOf(forkParent.NodeID)))
-		}
-		return e.expandNodes(e.dag.Successors(completedNodeID))
+		e.states[n.NodeID] = TaskInstanceStatusPending
+		result.ExecutableNodes = append(result.ExecutableNodes, n)
+		return nil, nil
 	}
+}
+
+type readiness int
+
+const (
+	nodeWaiting readiness = iota // some incoming edge is unresolved
+	nodeRun                      // all edges resolved, at least one active
+	nodeSkip                     // all edges resolved, none active
+)
+
+func (e *ExecutionState) readiness(n *Node) readiness {
+	anyActive := false
+	for _, edge := range e.dag.IncomingEdges(n.NodeID) {
+		active, resolved := e.edgeState(edge)
+		if !resolved {
+			return nodeWaiting
+		}
+		anyActive = anyActive || active
+	}
+	if anyActive {
+		return nodeRun
+	}
+	return nodeSkip
+}
+
+// edgeState reports whether an edge is resolved and, if so, whether it is active.
+func (e *ExecutionState) edgeState(edge *Edge) (active, resolved bool) {
+	state, reached := e.states[edge.From]
+	switch {
+	case !reached:
+		return false, false
+	case state == TaskInstanceStatusSkipped:
+		return false, true
+	case !state.IsCompleted():
+		return false, false // pending, running or failed
+	}
+
+	from := e.dag.GetNode(edge.From)
+	if from == nil || from.Type != NodeTypeSwitch {
+		return true, true
+	}
+	return slices.Contains(e.switchBranches(from), edge.To), true
+}
+
+// switchBranches returns the successors a completed SWITCH selected. Runs
+// persisted before decisions were recorded fall back to re-evaluation.
+func (e *ExecutionState) switchBranches(n *Node) []string {
+	if res := e.ctx.Tasks[n.NodeID]; res != nil && res.Branches != nil {
+		return res.Branches
+	}
+	branches, err := e.selectBranches(n)
+	if err != nil {
+		return nil
+	}
+	return branches
+}
+
+// selectBranches evaluates a SWITCH's edge conditions. Unconditional edges are
+// always selected. The result is non-nil so an empty decision is still recorded.
+func (e *ExecutionState) selectBranches(n *Node) ([]string, error) {
+	branches := []string{}
+	for _, edge := range e.dag.OutgoingEdges(n.NodeID) {
+		if edge.Condition != "" {
+			ok, err := e.evalCondition(edge.Condition)
+			if err != nil {
+				return nil, fmt.Errorf("condition eval for edge %s→%s: %w", edge.From, edge.To, err)
+			}
+			if !ok {
+				continue
+			}
+		}
+		branches = append(branches, edge.To)
+	}
+	return branches, nil
 }
 
 // ResolveInput resolves CEL template expressions in node.Spec against the current RunContext.
@@ -151,59 +280,9 @@ func (e *ExecutionState) ResolveInput(node *Node) (json.RawMessage, error) {
 
 	out, err := json.Marshal(resolved)
 	if err != nil {
-		return json.RawMessage("{}"), nil
+		return nil, fmt.Errorf("marshal resolved input for node %s: %w", node.NodeID, err)
 	}
 	return out, nil
-}
-
-// expandNodes recursively resolves SWITCH/FORK control-flow nodes into their eventual
-// executable descendants. It updates the in-memory RunContext for each SWITCH traversed
-// so that subsequent condition evaluations see the correct pass-through output.
-func (e *ExecutionState) expandNodes(nodes []*Node) (*RoutingResult, error) {
-	result := &RoutingResult{}
-	for _, n := range nodes {
-		switch n.Type {
-		case NodeTypeSwitch:
-			// SWITCH passes through its predecessor's output
-			output := e.dag.PredecessorOutput(n.NodeID, e.ctx.Tasks)
-			if output == nil {
-				output = json.RawMessage("{}")
-			}
-			// Update in-memory context so downstream condition evaluations are accurate
-			if e.ctx.Tasks == nil {
-				e.ctx.Tasks = make(map[string]*StepResult)
-			}
-			e.ctx.Tasks[n.NodeID] = &StepResult{
-				Status: TaskInstanceStatusCompleted,
-				Output: output,
-			}
-			result.ControlNodes = append(result.ControlNodes, ControlNode{Node: n, Output: output})
-
-			branches, err := e.dag.SuccessorsConditional(n.NodeID, e.evalCondition)
-			if err != nil {
-				return nil, fmt.Errorf("switch %s: %w", n.NodeID, err)
-			}
-			sub, err := e.expandNodes(branches)
-			if err != nil {
-				return nil, err
-			}
-			result.ExecutableNodes = append(result.ExecutableNodes, sub.ExecutableNodes...)
-			result.ControlNodes = append(result.ControlNodes, sub.ControlNodes...)
-
-		case NodeTypeFork:
-			result.ControlNodes = append(result.ControlNodes, ControlNode{Node: n, Output: json.RawMessage("{}")})
-			sub, err := e.expandNodes(e.dag.Successors(n.NodeID))
-			if err != nil {
-				return nil, err
-			}
-			result.ExecutableNodes = append(result.ExecutableNodes, sub.ExecutableNodes...)
-			result.ControlNodes = append(result.ControlNodes, sub.ControlNodes...)
-
-		default:
-			result.ExecutableNodes = append(result.ExecutableNodes, n)
-		}
-	}
-	return result, nil
 }
 
 // evalCondition evaluates a CEL condition string against the current RunContext.
@@ -222,6 +301,6 @@ func (e *ExecutionState) evalCondition(condition string) (bool, error) {
 	case nil:
 		return false, nil
 	default:
-		return v != nil, nil
+		return true, nil
 	}
 }

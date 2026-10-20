@@ -12,13 +12,13 @@
 
 | Scenario | Temporal | Composer |
 |---|---|---|
-| Worker crash mid-task | Activity heartbeat timeout → retry on another worker | Lease TTL expires → XAUTOCLAIM reclaims → retry |
+| Worker crash mid-task | Activity heartbeat timeout → retry on another worker | Lease TTL expires → another worker takes the lease over, or the coordinator sweeper re-dispatches the task |
 | Coordinator crash | History is durable in Cassandra/Postgres; replay resumes | Outbox retries + DB state is durable; resumes cleanly |
 | Message lost from queue | Can't happen — queue is derived from history | Redis AOF/RDB + outbox pattern prevents loss |
-| Poison-pill task | Per-activity retry policy with backoff + dead-letter workflow | MaxDeliveries DLQ — same concept |
+| Poison-pill task | Per-activity retry policy with backoff + dead-letter workflow | Per-node retry policy with backoff + MaxDeliveries DLQ |
 | Exactly-once execution | History deduplication makes this possible | At-least-once + lease idempotency — not exactly-once |
 
-**The gap**: Temporal's event-sourced history is the canonical source of truth. Composer uses an outbox + Redis stream in two phases: if the coordinator writes to the outbox but the stream consumer processes it twice before the first ack lands, you could in theory schedule the same node twice. The lease (`AcquireTaskLease`) is the idempotency guard — it works, but it's a separate distributed lock rather than structural deduplication.
+**The gap**: Temporal's event-sourced history is the canonical source of truth. Composer uses an outbox + Redis stream in two phases: if the coordinator writes to the outbox but the stream consumer processes it twice before the first ack lands, you could in theory schedule the same node twice. The lease (`AcquireTaskLease`) is the idempotency guard — it works, but it's a separate distributed lock rather than structural deduplication. Scheduling itself is deduplicated: every state transition of a run happens in one transaction under the run's row lock, task rows are unique per `(run_id, node_id)`, and results are fenced by `(task_id, attempt)`.
 
 ---
 

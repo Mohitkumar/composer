@@ -8,20 +8,18 @@ import (
 // WorkflowDAG is an indexed, read-only view of a WorkflowDefinitionSpec.
 // Pre-built adjacency maps make all graph queries O(1) or O(degree) instead of O(nodes+edges).
 type WorkflowDAG struct {
-	nodes      map[string]*Node
-	outgoing   map[string][]*Edge // nodeID → outgoing edges
-	incoming   map[string][]*Edge // nodeID → incoming edges
-	forkParent map[string]string  // branchNodeID → forkNodeID, only set for direct FORK children
-	entryNode  *Node              // node with no incoming edges (preserves slice order for determinism)
+	nodes     map[string]*Node
+	outgoing  map[string][]*Edge // nodeID → outgoing edges
+	incoming  map[string][]*Edge // nodeID → incoming edges
+	entryNode *Node              // first node (in spec order) with no incoming edges
 }
 
 // BuildDAG constructs a WorkflowDAG from a spec, pre-building all index structures.
 func BuildDAG(spec *WorkflowDefinitionSpec) *WorkflowDAG {
 	dag := &WorkflowDAG{
-		nodes:      make(map[string]*Node, len(spec.Nodes)),
-		outgoing:   make(map[string][]*Edge, len(spec.Nodes)),
-		incoming:   make(map[string][]*Edge, len(spec.Nodes)),
-		forkParent: make(map[string]string),
+		nodes:    make(map[string]*Node, len(spec.Nodes)),
+		outgoing: make(map[string][]*Edge, len(spec.Nodes)),
+		incoming: make(map[string][]*Edge, len(spec.Nodes)),
 	}
 
 	for i := range spec.Nodes {
@@ -34,16 +32,6 @@ func BuildDAG(spec *WorkflowDefinitionSpec) *WorkflowDAG {
 		dag.incoming[e.To] = append(dag.incoming[e.To], e)
 	}
 
-	// Pre-compute fork parents for O(1) branch detection
-	for id, node := range dag.nodes {
-		if node.Type == NodeTypeFork {
-			for _, e := range dag.outgoing[id] {
-				dag.forkParent[e.To] = id
-			}
-		}
-	}
-
-	// Find entry node in original slice order for determinism
 	for i := range spec.Nodes {
 		if len(dag.incoming[spec.Nodes[i].NodeID]) == 0 {
 			dag.entryNode = &spec.Nodes[i]
@@ -87,79 +75,14 @@ func (d *WorkflowDAG) Successors(nodeID string) []*Node {
 	return nodes
 }
 
-// SuccessorsConditional evaluates edge conditions and returns only matching successors.
-// Edges without a condition are always included.
-func (d *WorkflowDAG) SuccessorsConditional(nodeID string, evalFn func(string) (bool, error)) ([]*Node, error) {
-	var nodes []*Node
-	for _, e := range d.outgoing[nodeID] {
-		if e.Condition == "" {
-			if n := d.nodes[e.To]; n != nil {
-				nodes = append(nodes, n)
-			}
-			continue
-		}
-		ok, err := evalFn(e.Condition)
-		if err != nil {
-			return nil, fmt.Errorf("condition eval for edge %s→%s: %w", e.From, e.To, err)
-		}
-		if ok {
-			if n := d.nodes[e.To]; n != nil {
-				nodes = append(nodes, n)
-			}
-		}
-	}
-	return nodes, nil
+// OutgoingEdges returns the edges leaving nodeID.
+func (d *WorkflowDAG) OutgoingEdges(nodeID string) []*Edge {
+	return d.outgoing[nodeID]
 }
 
-// ForkParent returns the FORK node that is the direct predecessor of nodeID,
-// or nil if nodeID is not a direct FORK branch.
-func (d *WorkflowDAG) ForkParent(nodeID string) *Node {
-	if forkID, ok := d.forkParent[nodeID]; ok {
-		return d.nodes[forkID]
-	}
-	return nil
-}
-
-// BranchesOf returns the IDs of the direct branch children of a FORK node.
-func (d *WorkflowDAG) BranchesOf(forkNodeID string) []string {
-	edges := d.outgoing[forkNodeID]
-	ids := make([]string, 0, len(edges))
-	for _, e := range edges {
-		ids = append(ids, e.To)
-	}
-	return ids
-}
-
-// JoinNodes returns nodes that have incoming edges from ALL of the given branch node IDs.
-// Falls back to any node reachable from any branch if no strict join point is found.
-func (d *WorkflowDAG) JoinNodes(branchNodeIDs []string) []*Node {
-	// Count how many branch nodes feed into each candidate successor
-	incomingCount := make(map[string]int)
-	for _, branchID := range branchNodeIDs {
-		for _, e := range d.outgoing[branchID] {
-			incomingCount[e.To]++
-		}
-	}
-
-	var join []*Node
-	for candidateID, count := range incomingCount {
-		if count == len(branchNodeIDs) {
-			if n := d.nodes[candidateID]; n != nil {
-				join = append(join, n)
-			}
-		}
-	}
-
-	// Fallback: collect any node reachable from at least one branch
-	if len(join) == 0 {
-		for candidateID := range incomingCount {
-			if n := d.nodes[candidateID]; n != nil {
-				join = append(join, n)
-			}
-		}
-	}
-
-	return join
+// IncomingEdges returns the edges entering nodeID.
+func (d *WorkflowDAG) IncomingEdges(nodeID string) []*Edge {
+	return d.incoming[nodeID]
 }
 
 // PredecessorOutput returns the output of the first completed predecessor of nodeID.
@@ -167,7 +90,7 @@ func (d *WorkflowDAG) JoinNodes(branchNodeIDs []string) []*Node {
 func (d *WorkflowDAG) PredecessorOutput(nodeID string, tasks map[string]*StepResult) json.RawMessage {
 	for _, e := range d.incoming[nodeID] {
 		if result, ok := tasks[e.From]; ok && result != nil &&
-			result.Status == TaskInstanceStatusCompleted && len(result.Output) > 0 {
+			result.Status.IsCompleted() && len(result.Output) > 0 {
 			return result.Output
 		}
 	}

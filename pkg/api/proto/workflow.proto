@@ -19,6 +19,10 @@ service WorkflowService {
 
   // AcquireTaskLease lets workers claim a task lease before execution
   rpc AcquireTaskLease(AcquireTaskLeaseRequest) returns (AcquireTaskLeaseResponse);
+
+  // RenewTaskLease extends a lease the caller already holds; acquired=false
+  // means the lease was lost and the worker should abandon the task.
+  rpc RenewTaskLease(AcquireTaskLeaseRequest) returns (AcquireTaskLeaseResponse);
 }
 
 // ExecuteTaskRequest contains task execution details
@@ -55,7 +59,10 @@ message ReportTaskResultRequest {
   string status = 2;  // "completed", "failed"
   bytes output = 3;
   string error = 4;
-  map<string, string> metadata = 5;
+  map<string, string> metadata = 5;  // legacy: run_id / node_id for older workers
+  string run_id = 6;
+  string node_id = 7;
+  int32 attempt = 8;  // fencing token: must match the task's current attempt
 }
 
 // ReportTaskResultResponse acknowledges result receipt

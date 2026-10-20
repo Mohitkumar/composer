@@ -258,7 +258,7 @@ func TestIntegrationWorkflowExecution(t *testing.T) {
 
 		// Step 7: Report task completion to coordinator
 		t.Log("Step 7: Reporting task completion to coordinator")
-		err = coordinator.HandleNodeCompleted(ctx, taskMsg.TaskID, runID, taskMsg.NodeID, output)
+		err = coordinator.HandleNodeCompleted(ctx, coord.TaskResult{TaskID: taskMsg.TaskID, RunID: runID, NodeID: taskMsg.NodeID, Output: output})
 		if err != nil {
 			t.Fatalf("Failed to handle node completion: %v", err)
 		}
@@ -283,7 +283,7 @@ func TestIntegrationWorkflowExecution(t *testing.T) {
 		t.Log("Step 8: Completing remaining tasks")
 		// Complete process_data task
 		processOutput := json.RawMessage(`{"processed": true, "source": "Sample Slide Show"}`)
-		err = coordinator.HandleNodeCompleted(ctx, nextTaskID, runID, "process_data", processOutput)
+		err = coordinator.HandleNodeCompleted(ctx, coord.TaskResult{TaskID: nextTaskID, RunID: runID, NodeID: "process_data", Output: processOutput})
 		if err != nil {
 			t.Fatalf("Failed to complete process_data task: %v", err)
 		}
@@ -302,7 +302,7 @@ func TestIntegrationWorkflowExecution(t *testing.T) {
 
 		// Complete final task
 		finalOutput := json.RawMessage(`{"success": true}`)
-		err = coordinator.HandleNodeCompleted(ctx, finalTaskID, runID, "store_result", finalOutput)
+		err = coordinator.HandleNodeCompleted(ctx, coord.TaskResult{TaskID: finalTaskID, RunID: runID, NodeID: "store_result", Output: finalOutput})
 		if err != nil {
 			t.Fatalf("Failed to complete store_result task: %v", err)
 		}

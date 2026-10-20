@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/mohitkumar/composer/pkg/util"
 	"github.com/rs/zerolog"
 )
@@ -185,152 +186,109 @@ func (o *OutboxEnqueuer) recoverStaleInFlight(ctx context.Context) {
 	}
 }
 
-// processBatch picks a batch of outbox rows with FOR UPDATE SKIP LOCKED, marks them IN_FLIGHT,
-// commits, and processes them one by one (pushing to Redis) and updates DB accordingly.
-// Returns the number of rows processed and any error.
+// processBatch claims a batch of due outbox rows (marking them IN_FLIGHT so
+// other coordinators skip them), publishes them and records each outcome.
+// Returns the number of rows claimed and any error.
 func (o *OutboxEnqueuer) processBatch(ctx context.Context) (int, error) {
-	tx, err := o.cfg.DB.Begin(ctx)
+	rows, err := o.cfg.DB.Query(ctx, `
+		UPDATE outbox SET status = 'IN_FLIGHT', updated_at = NOW()
+		 WHERE id IN (
+		       SELECT id FROM outbox
+		        WHERE status IN ('PENDING', 'RETRY')
+		          AND (next_attempt_at IS NULL OR next_attempt_at <= NOW())
+		        ORDER BY created_at
+		        LIMIT $1
+		          FOR UPDATE SKIP LOCKED)
+		RETURNING id, stream, payload, attempt_count, max_retries, next_attempt_at, backoff_seconds`,
+		o.cfg.BatchSize)
 	if err != nil {
 		return 0, err
 	}
-	defer tx.Rollback(ctx)
-
-	// select key fields from outbox where status in PENDING/RETRY and next_attempt_at <= now
-	// include attempt_count, max_retries, backoff_seconds for retry planning
-	query := `
-SELECT id, stream, payload, attempt_count, max_retries, next_attempt_at, backoff_seconds
-FROM outbox
-WHERE status IN ('PENDING','RETRY') AND (next_attempt_at IS NULL OR next_attempt_at <= NOW())
-ORDER BY created_at
-LIMIT $1
-FOR UPDATE SKIP LOCKED
-`
-	rows, err := tx.Query(ctx, query, o.cfg.BatchSize)
-	if err != nil {
-		return 0, err
-	}
-	defer rows.Close()
-
-	var rowsToProcess []outboxRow
-	for rows.Next() {
+	rowsToProcess, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (outboxRow, error) {
 		var r outboxRow
-		if err := rows.Scan(&r.ID, &r.Stream, &r.Payload, &r.Attempt, &r.MaxRetries, &r.NextAttempt, &r.BackoffSeconds); err != nil {
-			return 0, err
-		}
-		rowsToProcess = append(rowsToProcess, r)
-	}
-
-	if len(rowsToProcess) == 0 {
-		if err := tx.Commit(ctx); err != nil {
-			return 0, err
-		}
-		return 0, nil
-	}
-
-	// mark selected rows IN_FLIGHT
-	for _, r := range rowsToProcess {
-		if _, err := tx.Exec(ctx, `UPDATE outbox SET status='IN_FLIGHT', updated_at=NOW() WHERE id=$1`, r.ID); err != nil {
-			return 0, err
-		}
-	}
-
-	// commit tx to release locks (we will process rows outside transaction)
-	if err := tx.Commit(ctx); err != nil {
+		err := row.Scan(&r.ID, &r.Stream, &r.Payload, &r.Attempt, &r.MaxRetries, &r.NextAttempt, &r.BackoffSeconds)
+		return r, err
+	})
+	if err != nil {
 		return 0, err
 	}
 
-	// process items one by one (sequentially here; could parallelize per batch)
+	// Publish each row; failures are rescheduled individually, successes are
+	// deleted together in one statement.
+	sent := make([]string, 0, len(rowsToProcess))
 	for _, r := range rowsToProcess {
 		util.RecordOutboxInFlight(ctx, r.Stream, 1)
 		startTime := time.Now()
-		if err := o.processRow(ctx, r); err != nil {
-			o.cfg.Logger.Error().
-				Err(err).
-				Str("outbox_id", r.ID).
-				Str("stream", r.Stream).
-				Dur("duration_ms", time.Since(startTime)).
-				Msg("processing outbox row failed")
+		if err := o.publishRow(ctx, r); err != nil {
+			o.cfg.Logger.Warn().Err(err).Str("outbox_id", r.ID).Str("stream", r.Stream).Msg("publish failed; scheduling retry/dlq")
 			util.RecordOutboxFailed(ctx, r.Stream, err.Error())
+			if err := o.scheduleRetry(ctx, r, err); err != nil {
+				o.cfg.Logger.Error().Err(err).Str("outbox_id", r.ID).Msg("failed to schedule outbox retry")
+			}
 		} else {
-			duration := time.Since(startTime)
-			o.cfg.Logger.Debug().
-				Str("outbox_id", r.ID).
-				Str("stream", r.Stream).
-				Dur("duration_ms", duration).
-				Msg("outbox row processed successfully")
+			sent = append(sent, r.ID)
 			util.RecordOutboxProcessed(ctx, r.Stream)
+			o.cfg.Logger.Debug().Str("outbox_id", r.ID).Dur("duration", time.Since(startTime)).Msg("outbox row published")
 		}
 		util.RecordOutboxInFlight(ctx, r.Stream, -1)
+	}
+
+	if len(sent) > 0 {
+		if _, err := o.cfg.DB.Exec(ctx, `DELETE FROM outbox WHERE id = ANY($1)`, sent); err != nil {
+			// Fallback: mark SENT so the maintenance loop cleans them up and
+			// the stale IN_FLIGHT recovery does not publish them again.
+			o.cfg.Logger.Error().Err(err).Int("count", len(sent)).Msg("failed to delete sent outbox rows, marking SENT")
+			_, _ = o.cfg.DB.Exec(ctx,
+				`UPDATE outbox SET status='SENT', sent_at=NOW(), updated_at=NOW() WHERE id = ANY($1)`, sent)
+		}
 	}
 
 	return len(rowsToProcess), nil
 }
 
-// processRow pushes a single outbox row to Redis and updates DB accordingly (success -> delete, failure -> schedule retry or DLQ).
-func (o *OutboxEnqueuer) processRow(ctx context.Context, r outboxRow) error {
-	// parse payload to fetch stream override or payload map
-	var payloadMap map[string]interface{}
+// publishRow pushes a single outbox row to its stream.
+func (o *OutboxEnqueuer) publishRow(ctx context.Context, r outboxRow) error {
+	var payload map[string]interface{}
 	if len(r.Payload) == 0 {
-		payloadMap = map[string]interface{}{"id": r.ID}
-	} else {
-		// payload may already include stream and values, but we expect the outbox.table.stream column to contain target stream
-		if err := json.Unmarshal(r.Payload, &payloadMap); err != nil {
-			// if payload not JSON, wrap raw string
-			payloadMap = map[string]interface{}{"data": string(r.Payload)}
-		}
+		payload = map[string]interface{}{"id": r.ID}
+	} else if err := json.Unmarshal(r.Payload, &payload); err != nil {
+		payload = map[string]interface{}{"data": string(r.Payload)}
 	}
 
 	stream := r.Stream
 	if stream == "" {
 		stream = "workflow.tasks"
 	}
+	return o.cfg.Publisher.Publish(ctx, stream, payload)
+}
 
-	err := o.cfg.Publisher.Publish(ctx, stream, payloadMap)
-	if err == nil {
-		// Successfully sent — delete the outbox row to prevent table bloat
-		_, uerr := o.cfg.DB.Exec(ctx, `DELETE FROM outbox WHERE id=$1`, r.ID)
-		if uerr != nil {
-			// Fallback: mark as SENT so the maintenance loop can clean it up later
-			o.cfg.Logger.Error().Err(uerr).Str("outbox_id", r.ID).Msg("failed to delete outbox row after send, marking SENT")
-			_, _ = o.cfg.DB.Exec(ctx, `UPDATE outbox SET status='SENT', sent_at=NOW(), updated_at=NOW() WHERE id=$1`, r.ID)
-		}
-		return nil
-	}
-
-	o.cfg.Logger.Warn().Err(err).Str("outbox_id", r.ID).Msg("redis xadd failed; scheduling retry/dlq")
-
+// scheduleRetry reschedules a row whose publish failed with exponential
+// backoff, or moves it to the DLQ once its retries are exhausted.
+func (o *OutboxEnqueuer) scheduleRetry(ctx context.Context, r outboxRow, publishErr error) error {
 	attempt := r.Attempt + 1
 	maxRetries := r.MaxRetries
 	if maxRetries <= 0 {
 		maxRetries = 5
 	}
-	backoffSec := r.BackoffSeconds
-	if backoffSec <= 0 {
-		backoffSec = 5
-	}
 
 	if attempt > maxRetries {
-		_, derr := o.cfg.DB.Exec(ctx, `INSERT INTO outbox_dlq (id, stream, payload, last_error, attempts, created_at, moved_at)
-			VALUES ($1,$2,$3::jsonb,$4,$5,NOW(),NOW()) ON CONFLICT (id) DO NOTHING`, r.ID, stream, r.Payload, err.Error(), attempt)
-		if derr != nil {
-			o.cfg.Logger.Error().Err(derr).Str("outbox_id", r.ID).Msg("failed move to dlq")
+		if _, err := o.cfg.DB.Exec(ctx, `INSERT INTO outbox_dlq (id, stream, payload, last_error, attempts, created_at, moved_at)
+			VALUES ($1,$2,$3::jsonb,$4,$5,NOW(),NOW()) ON CONFLICT (id) DO NOTHING`,
+			r.ID, r.Stream, r.Payload, publishErr.Error(), attempt); err != nil {
+			o.cfg.Logger.Error().Err(err).Str("outbox_id", r.ID).Msg("failed move to dlq")
 		}
-		if _, uerr := o.cfg.DB.Exec(ctx, `UPDATE outbox SET status='DLQ', last_error=$1, attempt_count=$2, updated_at=NOW() WHERE id=$3`, err.Error(), attempt, r.ID); uerr != nil {
-			o.cfg.Logger.Error().Err(uerr).Str("outbox_id", r.ID).Msg("failed mark DLQ")
-			return uerr
+		if _, err := o.cfg.DB.Exec(ctx, `UPDATE outbox SET status='DLQ', last_error=$1, attempt_count=$2, updated_at=NOW() WHERE id=$3`,
+			publishErr.Error(), attempt, r.ID); err != nil {
+			return err
 		}
-		util.RecordOutboxDLQ(ctx, stream)
+		util.RecordOutboxDLQ(ctx, r.Stream)
 		return nil
 	}
 
-	// schedule next attempt with exponential backoff + jitter
-	delay := computeBackoffDuration(backoffSec, attempt)
-	nextAt := time.Now().Add(delay)
-	if _, uerr := o.cfg.DB.Exec(ctx, `UPDATE outbox SET status='RETRY', attempt_count=$1, next_attempt_at=$2, last_error=$3, updated_at=NOW() WHERE id=$4`, attempt, nextAt, err.Error(), r.ID); uerr != nil {
-		o.cfg.Logger.Error().Err(uerr).Str("outbox_id", r.ID).Msg("failed schedule retry")
-		return uerr
-	}
-	return nil
+	nextAt := time.Now().Add(computeBackoffDuration(r.BackoffSeconds, attempt))
+	_, err := o.cfg.DB.Exec(ctx, `UPDATE outbox SET status='RETRY', attempt_count=$1, next_attempt_at=$2, last_error=$3, updated_at=NOW() WHERE id=$4`,
+		attempt, nextAt, publishErr.Error(), r.ID)
+	return err
 }
 
 func computeBackoffDuration(baseSeconds, attempt int) time.Duration {

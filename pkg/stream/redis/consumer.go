@@ -21,9 +21,6 @@ type ConsumerConfig struct {
 	ConsumerGroup string
 	// ConsumerName uniquely identifies this consumer within the group.
 	ConsumerName string
-	// ReadCount is the maximum number of messages fetched per ReadNew call.
-	// Defaults to 1.
-	ReadCount int64
 	// BlockDuration is how long ReadNew blocks waiting for new messages.
 	// Defaults to 5 s.
 	BlockDuration time.Duration
@@ -42,9 +39,6 @@ type Consumer struct {
 // NewConsumer creates a Consumer.  Defaults are applied for zero-valued
 // numeric fields; the caller retains ownership of rdb.
 func NewConsumer(cfg ConsumerConfig, rdb *redisq.RedisStream, logger zerolog.Logger) *Consumer {
-	if cfg.ReadCount == 0 {
-		cfg.ReadCount = 1
-	}
 	if cfg.BlockDuration == 0 {
 		cfg.BlockDuration = 5 * time.Second
 	}
@@ -64,14 +58,17 @@ func (c *Consumer) Setup(ctx context.Context) error {
 	return nil
 }
 
-// ReadNew blocks up to BlockDuration and returns newly dispatched messages
-// (those not yet assigned to any consumer).  Returns nil, nil on timeout.
-func (c *Consumer) ReadNew(ctx context.Context) ([]stream.Message, error) {
+// ReadNew blocks up to BlockDuration and returns at most max newly dispatched
+// messages (those not yet assigned to any consumer).  Returns nil, nil on timeout.
+func (c *Consumer) ReadNew(ctx context.Context, max int64) ([]stream.Message, error) {
+	if max < 1 {
+		max = 1
+	}
 	args := &redis.XReadGroupArgs{
 		Group:    c.cfg.ConsumerGroup,
 		Consumer: c.cfg.ConsumerName,
 		Streams:  []string{c.cfg.StreamName, ">"},
-		Count:    c.cfg.ReadCount,
+		Count:    max,
 		Block:    c.cfg.BlockDuration,
 	}
 	res, err := c.rdb.XReadGroup(ctx, args)

@@ -11,6 +11,7 @@ import (
 
 	"strconv"
 
+	"github.com/google/uuid"
 	"github.com/mohitkumar/composer/pkg/redisq"
 	redisstream "github.com/mohitkumar/composer/pkg/stream/redis"
 	"github.com/mohitkumar/composer/pkg/util"
@@ -93,17 +94,16 @@ func main() {
 		consumerGroup = "workflow-workers"
 	}
 
+	// The worker ID is both the stream consumer name and the lease owner, so it
+	// must be unique per process.
 	workerID := os.Getenv("WORKER_ID")
 	if workerID == "" {
-		workerID = fmt.Sprintf("worker-%d", time.Now().Unix())
+		host, _ := os.Hostname()
+		workerID = fmt.Sprintf("worker-%s-%s", host, uuid.NewString()[:8])
 	}
 
-	leaseTTLSeconds := int64(90)
-	if v := os.Getenv("LEASE_TTL_SECONDS"); v != "" {
-		if parsed, err := strconv.ParseInt(v, 10, 64); err == nil && parsed > 0 {
-			leaseTTLSeconds = parsed
-		}
-	}
+	leaseTTLSeconds := envInt("LEASE_TTL_SECONDS", 90)
+	concurrency := envInt("WORKER_CONCURRENCY", 10)
 
 	ctx := context.Background()
 
@@ -150,6 +150,7 @@ func main() {
 		LangWorkerAddrs: langWorkerAddrs,
 		ConsumerName:    workerID,
 		LeaseTTLSeconds: leaseTTLSeconds,
+		Concurrency:     int(concurrency),
 		Logger:          logger,
 	}
 
@@ -205,4 +206,12 @@ func main() {
 			logger.Fatal().Err(err).Msg("worker failed")
 		}
 	}
+}
+
+// envInt reads a positive integer from the environment, or returns def.
+func envInt(name string, def int64) int64 {
+	if v, err := strconv.ParseInt(os.Getenv(name), 10, 64); err == nil && v > 0 {
+		return v
+	}
+	return def
 }

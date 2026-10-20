@@ -12,7 +12,7 @@ import Link from 'next/link';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
-import { ChevronDown, CheckCircle2, XCircle, Clock, PlayCircle, AlertCircle } from 'lucide-react';
+import { ChevronDown, CheckCircle2, XCircle, Clock, PlayCircle, AlertCircle, MinusCircle } from 'lucide-react';
 import Editor from '@monaco-editor/react';
 
 export default function ExecutionDetailPage() {
@@ -99,6 +99,8 @@ export default function ExecutionDetailPage() {
       case 'PENDING':
       case 'QUEUED':
         return <Clock className="h-4 w-4 text-yellow-500" />;
+      case 'SKIPPED':
+        return <MinusCircle className="h-4 w-4 text-gray-400" />;
       default:
         return <AlertCircle className="h-4 w-4 text-gray-500" />;
     }

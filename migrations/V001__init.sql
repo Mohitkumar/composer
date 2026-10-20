@@ -70,23 +70,24 @@ CREATE TABLE IF NOT EXISTS task_instances(
     FOREIGN KEY (run_id) REFERENCES workflow_runs(id) ON DELETE CASCADE
 );
 
+-- Keep task_instances indexes minimal: every state change rewrites each index,
+-- and indexing the state/lease columns would prevent HOT updates.
+-- (run_id, node_id) also serves every lookup by run_id.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_task_instances_run_node ON task_instances(run_id, node_id);
-CREATE INDEX IF NOT EXISTS idx_task_instances_node_type ON task_instances(node_type);
-CREATE INDEX IF NOT EXISTS idx_task_instances_run_id ON task_instances(run_id);
-CREATE INDEX IF NOT EXISTS idx_task_instances_state ON task_instances(state);
-CREATE INDEX IF NOT EXISTS idx_task_instances_node_id ON task_instances(node_id);
-CREATE INDEX IF NOT EXISTS idx_task_instances_lease ON task_instances(lease_owner, lease_expires_at) WHERE lease_owner IS NOT NULL;
-CREATE INDEX IF NOT EXISTS idx_task_instances_scheduled ON task_instances(scheduled_at) WHERE scheduled_at IS NOT NULL;
--- Partial index for CheckPendingTasks: only indexes rows in active states,
+-- Partial index for counting a run's active tasks: only rows in active states,
 -- which are a small fraction of the table once workflows complete.
--- Eliminates a full-table COUNT scan on every task completion.
-CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_task_instances_run_active
+CREATE INDEX IF NOT EXISTS idx_task_instances_run_active
     ON task_instances (run_id)
     WHERE state IN ('PENDING', 'RUNNING', 'QUEUED');
+-- Lease sweeper: find RUNNING tasks whose lease expired.
+CREATE INDEX IF NOT EXISTS idx_task_instances_running_lease
+    ON task_instances (lease_expires_at)
+    WHERE state = 'RUNNING';
 
 -- Outbox table for transactional message publishing
 CREATE TABLE IF NOT EXISTS outbox(
     id TEXT PRIMARY KEY,
+    task_id TEXT, -- task this row dispatches, so recovery can find tasks without a pending dispatch
     stream TEXT NOT NULL,
     payload JSONB,
     type TEXT,
@@ -103,13 +104,11 @@ CREATE TABLE IF NOT EXISTS outbox(
 
 CREATE INDEX IF NOT EXISTS idx_outbox_status ON outbox(status, created_at);
 CREATE INDEX IF NOT EXISTS idx_outbox_stream ON outbox(stream);
-CREATE INDEX IF NOT EXISTS idx_outbox_status_next_attempt ON outbox (status, next_attempt_at) 
-WHERE status IN ('PENDING', 'RETRY') AND next_attempt_at IS NOT NULL;
--- Covering index for the outbox poll query (status + next_attempt_at + created_at).
--- Avoids a heap fetch for the ORDER BY when selecting the next batch.
-CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_outbox_pending_next
+-- Partial index matching the outbox poll query's filter and ORDER BY created_at.
+CREATE INDEX IF NOT EXISTS idx_outbox_pending_next
     ON outbox (created_at)
     WHERE status IN ('PENDING', 'RETRY');
+CREATE INDEX IF NOT EXISTS idx_outbox_task_id ON outbox (task_id) WHERE task_id IS NOT NULL;
 -- Create dead letter table for outbox failures
 CREATE TABLE IF NOT EXISTS outbox_dlq (
   id TEXT PRIMARY KEY,

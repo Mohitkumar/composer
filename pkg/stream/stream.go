@@ -41,10 +41,10 @@ type Consumer interface {
 	// Idempotent — safe to call on every startup.
 	Setup(ctx context.Context) error
 
-	// ReadNew blocks up to a short internal timeout and returns messages that
-	// have not yet been assigned to any consumer in the group.  Returns nil,
-	// nil when the timeout elapses with no new messages.
-	ReadNew(ctx context.Context) ([]Message, error)
+	// ReadNew blocks up to a short internal timeout and returns at most max
+	// messages that have not yet been assigned to any consumer in the group.
+	// Returns nil, nil when the timeout elapses with no new messages.
+	ReadNew(ctx context.Context, max int64) ([]Message, error)
 
 	// ReclaimOrphaned takes ownership of messages that have been pending
 	// (delivered but not yet acked) for longer than minIdle — typically
