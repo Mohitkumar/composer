@@ -61,17 +61,15 @@ func (s *WorkflowService) Heartbeat(ctx context.Context, req *workflowpb.Heartbe
 
 // AcquireTaskLease lets a worker claim a task before executing it.
 func (s *WorkflowService) AcquireTaskLease(ctx context.Context, req *workflowpb.AcquireTaskLeaseRequest) (*workflowpb.AcquireTaskLeaseResponse, error) {
-	return s.lease(ctx, req, s.coordinator.LeaseManager.Acquire)
+	return s.lease(ctx, req, false)
 }
 
 // RenewTaskLease extends a lease the worker holds while the task runs.
 func (s *WorkflowService) RenewTaskLease(ctx context.Context, req *workflowpb.AcquireTaskLeaseRequest) (*workflowpb.AcquireTaskLeaseResponse, error) {
-	return s.lease(ctx, req, s.coordinator.LeaseManager.Renew)
+	return s.lease(ctx, req, true)
 }
 
-type leaseFunc func(ctx context.Context, runID, taskID, owner string, ttl time.Duration) (bool, error)
-
-func (s *WorkflowService) lease(ctx context.Context, req *workflowpb.AcquireTaskLeaseRequest, fn leaseFunc) (*workflowpb.AcquireTaskLeaseResponse, error) {
+func (s *WorkflowService) lease(ctx context.Context, req *workflowpb.AcquireTaskLeaseRequest, renew bool) (*workflowpb.AcquireTaskLeaseResponse, error) {
 	if req.GetTaskId() == "" || req.GetRunId() == "" || req.GetOwner() == "" {
 		return nil, status.Error(codes.InvalidArgument, "task_id, run_id and owner are required")
 	}
@@ -79,7 +77,13 @@ func (s *WorkflowService) lease(ctx context.Context, req *workflowpb.AcquireTask
 	if ttl <= 0 {
 		ttl = defaultLeaseTTL
 	}
-	acquired, err := fn(ctx, req.GetRunId(), req.GetTaskId(), req.GetOwner(), ttl)
+
+	leases := s.coordinator.LeaseManager
+	op := leases.Acquire
+	if renew {
+		op = leases.Renew
+	}
+	acquired, err := op(ctx, req.GetRunId(), req.GetTaskId(), req.GetOwner(), ttl)
 	if err != nil {
 		return nil, status.Error(codes.Internal, err.Error())
 	}

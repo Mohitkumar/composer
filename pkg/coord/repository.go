@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/mohitkumar/composer/pkg/db"
 	"github.com/mohitkumar/composer/pkg/model"
+	"github.com/mohitkumar/composer/pkg/statemachine"
 )
 
 // repository holds the SQL for workflow runs, task instances, waits and the
@@ -44,21 +45,6 @@ type taskRef struct {
 type finishedTask struct {
 	NodeType  string
 	StartedAt time.Time // zero when the task never started
-}
-
-// newTask is a task instance row to insert.
-type newTask struct {
-	ID          string
-	RunID       string
-	Node        *model.Node
-	State       model.TaskInstanceStatus
-	Input       json.RawMessage
-	Output      json.RawMessage
-	Error       string
-	Branches    []string   // SWITCH decision
-	WakeAt      *time.Time // WAITING: timer or timeout
-	EventName   string     // WAITING on an event
-	ScheduledAt time.Time
 }
 
 // ── Workflow runs ────────────────────────────────────────────────────────────
@@ -96,6 +82,31 @@ func (repository) InsertRun(ctx context.Context, q db.Querier, p *model.StartWor
 		return fmt.Errorf("%w: workflow run %s already exists", ErrConflict, p.RunID)
 	}
 	return nil
+}
+
+// LoadRun locks the run and loads the snapshot the state machine decides on:
+// the run row, its context and the state of every reached node.
+func (r repository) LoadRun(ctx context.Context, q db.Querier, runID string) (*statemachine.Run, error) {
+	row, err := r.LockRun(ctx, q, runID)
+	if err != nil {
+		return nil, err
+	}
+	rc, err := r.LoadRunContext(ctx, q, runID)
+	if err != nil {
+		return nil, err
+	}
+	nodes, err := r.LoadTasks(ctx, q, runID)
+	if err != nil {
+		return nil, err
+	}
+	return &statemachine.Run{
+		ID:              runID,
+		WorkflowID:      row.WorkflowID,
+		WorkflowVersion: row.WorkflowVersion,
+		Status:          row.Status,
+		Context:         rc,
+		Nodes:           nodes,
+	}, nil
 }
 
 // LockRun takes the run's row lock for the rest of the transaction. Every
@@ -203,25 +214,29 @@ func (repository) CancelRunTasks(ctx context.Context, q db.Querier, runID, reaso
 
 // ── Task instances ───────────────────────────────────────────────────────────
 
-// LoadNodeStates returns the state (and SWITCH decision) of every task of the run.
-func (repository) LoadNodeStates(ctx context.Context, q db.Querier, runID string) (model.NodeStates, error) {
-	rows, err := q.Query(ctx,
-		`SELECT node_id, state, branches FROM task_instances WHERE run_id = $1`, runID)
+// LoadTasks returns the state of every task of the run, keyed by node.
+func (repository) LoadTasks(ctx context.Context, q db.Querier, runID string) (map[string]*statemachine.NodeState, error) {
+	rows, err := q.Query(ctx, `
+		SELECT node_id, id, state, attempt, branches, COALESCE(event_name, '')
+		  FROM task_instances WHERE run_id = $1`, runID)
 	if err != nil {
-		return nil, fmt.Errorf("load node states: %w", err)
+		return nil, fmt.Errorf("load tasks: %w", err)
 	}
 	defer rows.Close()
 
-	states := model.NodeStates{}
+	nodes := map[string]*statemachine.NodeState{}
 	for rows.Next() {
 		var nodeID string
-		var st model.NodeState
-		if err := rows.Scan(&nodeID, &st.Status, &st.Branches); err != nil {
-			return nil, fmt.Errorf("scan node state: %w", err)
+		n := &statemachine.NodeState{}
+		if err := rows.Scan(&nodeID, &n.TaskID, &n.Status, &n.Attempt, &n.Branches, &n.AwaitedSignal); err != nil {
+			return nil, fmt.Errorf("scan task: %w", err)
 		}
-		states[nodeID] = st
+		if n.Status != model.TaskInstanceStatusWaiting {
+			n.AwaitedSignal = ""
+		}
+		nodes[nodeID] = n
 	}
-	return states, rows.Err()
+	return nodes, rows.Err()
 }
 
 // LoadOutputs returns the outputs of the given completed nodes of a run.
@@ -247,31 +262,12 @@ func (repository) LoadOutputs(ctx context.Context, q db.Querier, runID string, n
 	return outputs, rows.Err()
 }
 
-// CountTasks returns how many of the run's tasks are still active
-// (pending, queued, running or waiting) and how many failed.
-func (repository) CountTasks(ctx context.Context, q db.Querier, runID string) (active, failed int, err error) {
-	err = q.QueryRow(ctx, `
-		SELECT COUNT(*) FILTER (WHERE state IN ('PENDING', 'QUEUED', 'RUNNING', 'WAITING')),
-		       COUNT(*) FILTER (WHERE state = 'FAILED')
-		  FROM task_instances
-		 WHERE run_id = $1`,
-		runID).Scan(&active, &failed)
-	if err != nil {
-		return 0, 0, fmt.Errorf("count tasks: %w", err)
-	}
-	return active, failed, nil
-}
-
-// InsertTask inserts a task instance. It reports false, without error, when a
-// task for the same (run, node) already exists.
-func (repository) InsertTask(ctx context.Context, q db.Querier, t newTask) (bool, error) {
+// InsertTask inserts the task a CreateTask action describes. It reports
+// false, without error, when the (run, node) already has a task.
+func (repository) InsertTask(ctx context.Context, q db.Querier, runID string, t statemachine.CreateTask, scheduledAt time.Time) (bool, error) {
 	var lastError []byte
 	if t.Error != "" {
 		lastError, _ = json.Marshal(map[string]string{"error": t.Error})
-	}
-	var eventName *string
-	if t.EventName != "" {
-		eventName = &t.EventName
 	}
 	tag, err := q.Exec(ctx, `
 		INSERT INTO task_instances
@@ -281,9 +277,9 @@ func (repository) InsertTask(ctx context.Context, q db.Querier, t newTask) (bool
 		        CASE WHEN $6 IN ('COMPLETED', 'FAILED', 'SKIPPED') THEN NOW() END,
 		        CASE WHEN $6 = 'COMPLETED' THEN NOW() END)
 		ON CONFLICT (run_id, node_id) DO NOTHING`,
-		t.ID, t.RunID, t.Node.NodeID, t.Node.GetNodeTypeForRouting(), t.Node.Queue(), t.State,
+		t.TaskID, runID, t.Node.NodeID, t.Node.GetNodeTypeForRouting(), t.Node.Queue(), t.Status,
 		nullJSON(t.Input), nullJSON(t.Output), lastError,
-		t.Branches, t.WakeAt, eventName, t.ScheduledAt)
+		t.Branches, t.WakeAt, nullString(t.AwaitedSignal), scheduledAt)
 	if err != nil {
 		return false, fmt.Errorf("insert task instance for node %s: %w", t.Node.NodeID, err)
 	}
