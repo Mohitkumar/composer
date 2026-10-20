@@ -29,7 +29,7 @@ Composer is optimised for **high-throughput, short-to-medium duration workflows*
 
 ### Not a good fit (yet)
 
-- **Long-running / durable flows** — workflows that need to `sleep` for hours or days, or wait indefinitely for an external signal (human approval, payment webhook with no SLA). Composer has no timer or signal-wait node type today; a step has a 90-second hard ceiling.
+- **Long-running steps** — a single worker step has a 90-second ceiling. Long *waits* are fine: `WAIT` and `WAIT_FOR_EVENT` nodes park a branch for hours or days (human approval, a payment webhook) without holding a worker or a stream message — but long-running *computation* inside one step is not.
 - **Execution semantics** — Composer provides at-least-once delivery guarded by a database lease. Duplicate execution is prevented in practice but is not structurally impossible the way Temporal's event-sourced history makes it.
 - **In-flight workflow versioning** — changing a workflow definition while runs are in progress is undefined. Temporal has built-in versioning APIs for this.
 
@@ -305,6 +305,54 @@ Any worker node (HTTP, CODE) can declare a retry policy. Failed executions are r
 ```
 
 Without a `retry` block a node executes once.
+
+#### 5. WAIT Node
+
+Pauses its branch for a duration or until a point in time. Resolved by the coordinator; no worker is involved and nothing is held while it waits.
+
+```yaml
+  - node_id: cool_off
+    type: WAIT
+    spec:
+      duration_seconds: 3600          # or a template: "{{input.delay}}"
+      # until: "2026-12-01T09:00:00Z" # alternatively, an RFC 3339 time
+```
+
+Output: `{"woke_at": "<time>"}`. A zero or past wait completes immediately.
+
+#### 6. WAIT_FOR_EVENT Node
+
+Pauses its branch until a named event is signalled to the run, e.g. a human approval or a webhook.
+
+```yaml
+  - node_id: approval
+    type: WAIT_FOR_EVENT
+    spec:
+      event: "approved-{{input.order_id}}"  # templated per run
+      timeout_seconds: 86400                # optional; the node FAILS on timeout
+```
+
+Signal the run over HTTP; the event's `payload` becomes the node's output, so later nodes can read `{{tasks.approval.output.by}}`:
+
+```bash
+curl -X POST http://localhost:8080/api/v1/executions/<run_id>/events \
+  -H "Content-Type: application/json" \
+  -d '{"event": "approved-42", "payload": {"by": "alice"}}'
+# → {"delivered": true}  (false: no node is waiting yet; the event is buffered
+#                         and consumed when the run reaches the node)
+```
+
+Signalling a finished run returns `409`.
+
+#### Task queues
+
+Every worker node is dispatched on a task queue: by default the queue of its runtime (`http`, `python`, `js`). Set `queue` to route a node to a dedicated worker pool, e.g. GPU or high-memory workers started with `WORKER_QUEUES=gpu`:
+
+```yaml
+  - node_id: render
+    type: HTTP
+    queue: gpu
+```
 
 ### Template Expressions
 
@@ -890,6 +938,14 @@ The following sequence diagram illustrates the complete flow of a workflow execu
 - Results carry the attempt number; a late report from a superseded attempt is ignored
 - Outbox retry logic handles transient Redis failures
 
+### Storage and Scaling
+
+- **One transaction per step, under the run's row lock.** Completing a node, routing to its successors, resolving a wait and finishing the run happen atomically, and concurrent branch completions of one run are serialized so join decisions always see each other.
+- **Task outputs live only in `task_instances`.** The run row stores just its input and execution options, so it never grows with the number of nodes. Routing reads only the outputs a node's templates reference (`{{tasks.<id>...}}`, extracted once per definition); a template that indexes `tasks` dynamically falls back to loading all outputs.
+- **Partitioned by run.** `workflow_runs`, `task_instances` and `workflow_events` are range-partitioned by month on the run ID. Run IDs are UUIDv7 (time-ordered), and every hot-path query carries the run ID, so each touches one partition. The coordinator keeps the next 3 months' partitions created and, with `--retention_days`, drops whole months of finished history (a month that still has active runs is kept). Client-supplied `run_id`s must therefore be UUIDv7 from the last 24 hours.
+- **Sharded streams.** Each task queue is spread over `--stream_shards` Redis streams (`workflow.tasks.<queue>.<shard>`), so in Redis Cluster a queue's load spreads across nodes. Workers read the shard count from Redis and consume every shard of the queues they serve.
+- **Push-based outbox.** An insert trigger `NOTIFY`s the outbox enqueuers, which `LISTEN` on a dedicated connection, so a dispatch is published as soon as its transaction commits. Polling (`--outbox.poll_interval`, default 1s) remains as a fallback and for delayed retries.
+
 ### Why PostgreSQL?
 
 PostgreSQL is chosen as the primary data store for several critical reasons:
@@ -959,6 +1015,7 @@ The outbox pattern ensures that task creation and message publishing are atomic:
    - Retry logic handles transient Redis failures
 
 **Outbox Processing:**
+- Woken by `LISTEN/NOTIFY` when new rows commit; polls as a fallback
 - Uses `FOR UPDATE SKIP LOCKED` to allow concurrent processing
 - Marks rows as `IN_FLIGHT` during processing
 - Deletes rows once published, sets `RETRY` with backoff on failure
@@ -1039,69 +1096,39 @@ Composer supports executing tasks in multiple languages through dedicated langua
 
 **Location**: `cmd/language-server-py/`
 
-**Features:**
-- Executes Python 3.11+ code in isolated sandboxes
-- Supports inline code execution with timeout protection
-- Handles JSON input/output serialization
-- Error handling for syntax errors, import errors, and runtime exceptions
-- Logging to `logs/language-server-py.log`
-
-**Execution Flow:**
-1. Receives gRPC `Execute` request with Python code
-2. Parses input JSON into Python objects
-3. Executes code in a sandboxed environment
-4. Calls the `handler` function with input data
-5. Serializes output to JSON
-6. Returns response with success/error status
+Runs each execution in a fresh child process that is killed on timeout. The handler's module body and `handler(input)` run in one namespace, so module-level imports and helper functions work.
 
 **Configuration:**
 - `PORT`: gRPC server port (default: 50051)
-- `DEFAULT_TIMEOUT_SECONDS`: Execution timeout (default: 30)
-
-**Dependencies:**
-- Python 3.11+
-- UV package manager
-- `grpcio`, `grpcio-tools` for gRPC
+- `LOG_FILE`: optional log file (default: stderr only, so the server runs on a read-only filesystem)
+- `config.py`: timeout, memory, output and import limits
 
 #### 2. **JavaScript Language Server**
 
 **Location**: `cmd/language-server-js/`
 
-**Features:**
-- Executes Node.js/JavaScript code
-- Supports ES6+ syntax and Node.js built-in modules
-- Runtime proto loading (no code generation needed)
-- JSON input/output handling
-- Error formatting and timeout protection
-
-**Execution Flow:**
-1. Receives gRPC `Execute` request with JavaScript code
-2. Parses input JSON
-3. Executes code using Node.js `vm` module (sandboxed)
-4. Calls the `handler` function with input
-5. Serializes output to JSON
-6. Returns response
+Runs each execution in its own V8 isolate (`isolated-vm`) with a hard memory limit. Isolates run asynchronously off the server's event loop, so one slow script never stalls other requests.
 
 **Configuration:**
 - `PORT`: gRPC server port (default: 50052)
+- `MAX_CONCURRENT_ISOLATES`: isolates running at once (default: 4); further requests wait
 
-**Dependencies:**
-- Node.js 20+
-- `@grpc/grpc-js`, `@grpc/proto-loader` for gRPC
+#### 3. **Sandbox Security Model**
 
-#### 3. **Language Server Architecture**
+User code is untrusted. Each language server enforces several independent layers, so a bypass of one is caught by the next:
 
-**Common Patterns:**
-- **Sandboxing**: Code execution is isolated to prevent system access
-- **Timeout Protection**: All executions have configurable timeouts
-- **Error Handling**: Structured error responses with stack traces
-- **Logging**: Comprehensive logging for debugging
-- **Stateless**: Language servers are stateless; each request is independent
+| Layer | Python | JavaScript |
+|---|---|---|
+| Language | RestrictedPython: no `_`-prefixed attributes, no `str.format` attribute access, no `eval`/`exec`/`compile`; import allowlist; **module objects are only reachable if allowlisted** (blocks `json.codecs.sys.modules["os"]`-style escapes) | V8 isolate: no `require`, `process`, timers or any Node.js API; input crosses in as a JSON string |
+| Interpreter | PEP 578 audit hook (`guard.py`), irremovable once installed: no file writes, no reads outside the Python installation, no network, no subprocesses, no `ctypes`, no pickle loading | — |
+| Process | per-execution child process; `RLIMIT_AS` (memory), `RLIMIT_CPU`, `RLIMIT_FSIZE=0`, `RLIMIT_NOFILE`, `RLIMIT_NPROC=0`; environment emptied | isolate memory limit, wall-clock timeout, capped console output and result size |
+| Container | non-root user, read-only root filesystem, all capabilities dropped, `no-new-privileges`, PID limit, seccomp `RuntimeDefault` (Helm) | same |
+
+Regression tests for known escape techniques: `cmd/language-server-py/test_sandbox.py` and `cmd/language-server-js/sandbox.test.js`. For hostile multi-tenant workloads, additionally run the language servers under a VM-level sandbox (gVisor, Firecracker) and deny them network egress with a NetworkPolicy.
 
 **Integration:**
-- Language servers are started independently and registered with Go Workers
-- Go Workers route tasks to appropriate language servers based on `node_type`
-- Language servers can be scaled independently based on workload
+- Go workers route CODE tasks to the language server of the node's runtime
+- Language servers are stateless and scale independently
 
 ## Configuration
 
@@ -1114,6 +1141,9 @@ Environment variables or command-line flags:
 - `API_HTTP_PORT` / `--api.http_port` - HTTP API port (default: 8080)
 - `API_GRPC_PORT` / `--api.grpc_port` - gRPC API port (default: 50051)
 - `LOG_LEVEL` / `--log.level` - Log level (debug, info, warn, error)
+- `COMPOSER_STREAM_SHARDS` / `--stream_shards` - Redis streams per task queue (default: 4); published to Redis for workers
+- `COMPOSER_RETENTION_DAYS` / `--retention_days` - drop run history for months that ended more than N days ago (default: 0, keep everything)
+- `--outbox.poll_interval` - outbox fallback poll interval (default: 1s; new rows arrive via LISTEN/NOTIFY)
 - `INTELLIGENCE_AGENT_URL` / `--intelligence.agent_url` - AI service URL (optional)
 
 ### Worker
@@ -1123,7 +1153,9 @@ Environment variables:
 - `REDIS_ADDR` - Redis address (host:port)
 - `COORDINATOR_ADDR` - Coordinator gRPC address (host:port)
 - `LANG_WORKER_ADDRS` - Language worker addresses (format: `runtime:host:port,runtime:host:port`)
-- `STREAM_NAME` - Redis stream name (default: `workflow.tasks`)
+- `WORKER_QUEUES` - task queues to consume, comma-separated (default: `http` plus each configured runtime)
+- `WORKER_CONCURRENCY` - tasks executed in parallel (default: 10)
+- `STREAM_SHARDS` - fallback shard count if the coordinator has not published one yet (default: 4)
 - `CONSUMER_GROUP` - Consumer group name (default: `workflow-workers`)
 - `WORKER_ID` - Unique worker identifier
 - `LEASE_TTL_SECONDS` - Task lease TTL in seconds (default: 90)
@@ -1131,7 +1163,8 @@ Environment variables:
 ### Language Servers
 
 - **JavaScript**: `PORT` - gRPC server port (default: 50052)
-- **Python**: `PORT` - gRPC server port (default: 50053), `DEFAULT_TIMEOUT_SECONDS` - Execution timeout
+- **Python**: `PORT` - gRPC server port (default: 50053), `LOG_FILE` - optional log file
+- **JavaScript**: `MAX_CONCURRENT_ISOLATES` - concurrent executions (default: 4)
 
 ## Development
 
@@ -1158,4 +1191,8 @@ make test-integration
 
 # End-to-end tests (requires Docker for Testcontainers)
 make test-e2e
+
+# Sandbox regression tests
+(cd cmd/language-server-py && uv run python -m unittest test_sandbox -v)
+(cd cmd/language-server-js && npm test)   # needs the Node version isolated-vm was built for (22)
 ```

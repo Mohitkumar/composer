@@ -51,8 +51,11 @@ func setupFlags(cmd *cobra.Command) {
 	// Outbox flags
 	cmd.Flags().Int("outbox.batch_size", 50, "Outbox batch size (number of messages to process per batch)")
 	cmd.Flags().Int("outbox.concurrency", 2, "Outbox concurrency (number of concurrent workers)")
-	cmd.Flags().Duration("outbox.poll_interval", 100*time.Millisecond, "Outbox poll interval (how often to check for new messages)")
-	cmd.Flags().String("outbox.stream_prefix", "workflow.", "Outbox stream prefix (e.g., 'workflow.' for 'workflow.tasks')")
+	cmd.Flags().Duration("outbox.poll_interval", time.Second, "Outbox fallback poll interval (new rows are normally picked up via LISTEN/NOTIFY)")
+
+	// Engine flags
+	cmd.Flags().Int("stream_shards", 4, "Redis streams per task queue (workers read this from Redis)")
+	cmd.Flags().Int("retention_days", 0, "Drop run history for months that ended more than this many days ago (0 keeps everything)")
 
 	// Config file flag
 	cmd.Flags().String("config", "", "Config file path (default: ./config.yaml)")
@@ -119,8 +122,9 @@ func generateConfig() *coord.Config {
 			BatchSize:    viper.GetInt("outbox.batch_size"),
 			Concurrency:  viper.GetInt("outbox.concurrency"),
 			PollInterval: viper.GetDuration("outbox.poll_interval"),
-			StreamPrefix: viper.GetString("outbox.stream_prefix"),
 		},
+		StreamShards:  viper.GetInt("stream_shards"),
+		RetentionDays: viper.GetInt("retention_days"),
 	}
 
 	// Set defaults if not provided
@@ -144,10 +148,7 @@ func generateConfig() *coord.Config {
 		config.OutboxConfig.Concurrency = 2
 	}
 	if config.OutboxConfig.PollInterval == 0 {
-		config.OutboxConfig.PollInterval = 100 * time.Millisecond
-	}
-	if config.OutboxConfig.StreamPrefix == "" {
-		config.OutboxConfig.StreamPrefix = "workflow."
+		config.OutboxConfig.PollInterval = time.Second
 	}
 
 	return config

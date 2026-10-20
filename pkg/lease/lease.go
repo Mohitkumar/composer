@@ -26,7 +26,9 @@ func NewManager(db db.DB) *Manager {
 // task is waiting to run, or when it is RUNNING under a lease that has expired
 // (the previous worker died). An owner never re-acquires a lease it still
 // holds, so a redelivered message cannot start a second concurrent execution.
-func (m *Manager) Acquire(ctx context.Context, taskID, owner string, ttl time.Duration) (bool, error) {
+//
+// runID is the task's run; it confines the lookup to the run's partition.
+func (m *Manager) Acquire(ctx context.Context, runID, taskID, owner string, ttl time.Duration) (bool, error) {
 	return m.exec(ctx, `
 		UPDATE task_instances
 		   SET state = 'RUNNING',
@@ -34,24 +36,24 @@ func (m *Manager) Acquire(ctx context.Context, taskID, owner string, ttl time.Du
 		       lease_expires_at = NOW() + make_interval(secs => $2),
 		       started_at = NOW(),
 		       updated_at = NOW()
-		 WHERE id = $3
+		 WHERE run_id = $3 AND id = $4
 		   AND (state IN ('PENDING', 'QUEUED')
 		        OR (state = 'RUNNING' AND lease_expires_at < NOW()))
 		RETURNING id`,
-		owner, ttl.Seconds(), taskID)
+		owner, ttl.Seconds(), runID, taskID)
 }
 
 // Renew extends a lease that owner currently holds. It returns false once the
 // lease was lost (expired and taken over, or the task finished), which tells
 // the worker to abandon the execution.
-func (m *Manager) Renew(ctx context.Context, taskID, owner string, ttl time.Duration) (bool, error) {
+func (m *Manager) Renew(ctx context.Context, runID, taskID, owner string, ttl time.Duration) (bool, error) {
 	return m.exec(ctx, `
 		UPDATE task_instances
 		   SET lease_expires_at = NOW() + make_interval(secs => $1),
 		       updated_at = NOW()
-		 WHERE id = $2 AND state = 'RUNNING' AND lease_owner = $3
+		 WHERE run_id = $2 AND id = $3 AND state = 'RUNNING' AND lease_owner = $4
 		RETURNING id`,
-		ttl.Seconds(), taskID, owner)
+		ttl.Seconds(), runID, taskID, owner)
 }
 
 func (m *Manager) exec(ctx context.Context, query string, args ...any) (bool, error) {

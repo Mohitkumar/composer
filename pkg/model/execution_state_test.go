@@ -18,6 +18,18 @@ type run struct {
 	tmpl   *template.Resolver
 	ctx    *model.RunContext
 	states model.NodeStates
+	// outputs holds every completed output; load serves them like the DB does.
+	outputs map[string]json.RawMessage
+	loads   [][]string
+}
+
+func (r *run) load(ids []string) (map[string]json.RawMessage, error) {
+	r.loads = append(r.loads, ids)
+	out := map[string]json.RawMessage{}
+	for _, id := range ids {
+		out[id] = r.outputs[id]
+	}
+	return out, nil
 }
 
 func newRun(t *testing.T, nodes []model.Node, edges []model.Edge, input string) *run {
@@ -27,16 +39,17 @@ func newRun(t *testing.T, nodes []model.Node, edges []model.Edge, input string) 
 		t.Fatal(err)
 	}
 	return &run{
-		t:      t,
-		dag:    model.BuildDAG(&model.WorkflowDefinitionSpec{Nodes: nodes, Edges: edges}),
-		tmpl:   tmpl,
-		ctx:    model.NewRunContext(json.RawMessage(input), nil),
-		states: model.NodeStates{},
+		t:       t,
+		dag:     model.BuildDAG(&model.WorkflowDefinitionSpec{Nodes: nodes, Edges: edges}),
+		tmpl:    tmpl,
+		ctx:     model.NewRunContext(json.RawMessage(input), nil),
+		states:  model.NodeStates{},
+		outputs: map[string]json.RawMessage{},
 	}
 }
 
 func (r *run) state() *model.ExecutionState {
-	return model.NewExecutionState(r.dag, r.ctx, r.tmpl, r.states)
+	return model.NewExecutionState(r.dag, r.ctx, r.tmpl, r.states, r.load)
 }
 
 func (r *run) start() *model.RoutingResult {
@@ -56,25 +69,38 @@ func (r *run) start() *model.RoutingResult {
 
 func (r *run) complete(nodeID, output string) *model.RoutingResult {
 	r.t.Helper()
-	r.ctx.Tasks[nodeID] = &model.StepResult{Status: model.TaskInstanceStatusCompleted, Output: json.RawMessage(output)}
-	res, err := r.state().Advance(nodeID)
+	// Like the coordinator: a fresh context per step, outputs loaded on demand.
+	r.ctx.Tasks = map[string]*model.StepResult{}
+	r.outputs[nodeID] = json.RawMessage(output)
+	es := r.state()
+	es.SetOutput(nodeID, json.RawMessage(output))
+	res, err := es.Advance(nodeID)
 	if err != nil {
 		r.t.Fatal(err)
 	}
-	r.states[nodeID] = model.TaskInstanceStatusCompleted
+	for _, n := range res.ExecutableNodes {
+		if _, err := es.ResolveInput(n); err != nil {
+			r.t.Fatal(err)
+		}
+	}
+	r.states[nodeID] = model.NodeState{Status: model.TaskInstanceStatusCompleted}
 	r.persist(res)
 	return res
 }
 
 func (r *run) persist(res *model.RoutingResult) {
 	for _, n := range res.ExecutableNodes {
-		r.states[n.NodeID] = model.TaskInstanceStatusPending
+		r.states[n.NodeID] = model.NodeState{Status: model.TaskInstanceStatusPending}
 	}
 	for _, c := range res.ControlNodes {
-		r.states[c.Node.NodeID] = model.TaskInstanceStatusCompleted
+		r.states[c.Node.NodeID] = model.NodeState{Status: model.TaskInstanceStatusCompleted, Branches: c.Branches}
+		r.outputs[c.Node.NodeID] = c.Output
 	}
 	for _, n := range res.SkippedNodes {
-		r.states[n.NodeID] = model.TaskInstanceStatusSkipped
+		r.states[n.NodeID] = model.NodeState{Status: model.TaskInstanceStatusSkipped}
+	}
+	for _, n := range res.WaitingNodes {
+		r.states[n.NodeID] = model.NodeState{Status: model.TaskInstanceStatusWaiting}
 	}
 }
 
@@ -174,7 +200,7 @@ func TestSwitchSkipsUntakenBranchAndReconverges(t *testing.T) {
 	expect(t, "taken branch", ids(res.ExecutableNodes), "hi")
 	expect(t, "skipped branch", ids(res.SkippedNodes), "lo", "lo2")
 
-	if got := r.ctx.Tasks["s"]; got == nil || !slices.Equal(got.Branches, []string{"hi"}) {
+	if got := r.states["s"]; !slices.Equal(got.Branches, []string{"hi"}) {
 		t.Fatalf("switch decision not recorded: %+v", got)
 	}
 
@@ -226,4 +252,59 @@ func TestNodeRetryDelay(t *testing.T) {
 	if (&model.Node{}).MaxAttempts() != 1 {
 		t.Fatal("default max attempts should be 1")
 	}
+}
+
+func TestOutputsAreLoadedOnlyWhenReferenced(t *testing.T) {
+	// c reads only a's output; b's large output must never be loaded.
+	c := task("c")
+	c.Spec = json.RawMessage(`{"url": "{{tasks.a.output.url}}"}`)
+	r := newRun(t, []model.Node{task("a"), task("b"), c},
+		[]model.Edge{edge("a", "b"), edge("b", "c")}, `{}`)
+
+	r.start()
+	r.complete("a", `{"url": "http://x"}`)
+	r.loads = nil
+	r.complete("b", `{"huge": true}`)
+
+	if len(r.loads) != 1 || !slices.Equal(r.loads[0], []string{"a"}) {
+		t.Fatalf("expected exactly one load of [a], got %v", r.loads)
+	}
+}
+
+func TestTaskRefs(t *testing.T) {
+	sw := sw("s")
+	sw.Spec = json.RawMessage(`{}`)
+	dynamic := task("dyn")
+	dynamic.Spec = json.RawMessage(`{"v": "{{tasks[input.key].output}}"}`)
+	quoted := task("q")
+	quoted.Spec = json.RawMessage(`{"v": "{{tasks[\"my-node\"].output.x + tasks.other.output.y}}", "url": "/api/tasks/1"}`)
+
+	dag := model.BuildDAG(&model.WorkflowDefinitionSpec{
+		Nodes: []model.Node{task("p"), sw, dynamic, quoted},
+		Edges: []model.Edge{edge("p", "s"), cond("s", "dyn", "{{tasks.p.output.n > 1}}")},
+	})
+
+	if refs, ok := dag.TaskRefs("s"); !ok || !slices.Equal(refs, []string{"p", "p"}) {
+		t.Fatalf("switch refs: %v %v", refs, ok)
+	}
+	if _, ok := dag.TaskRefs("dyn"); ok {
+		t.Fatal("dynamic task access must fall back to loading everything")
+	}
+	if refs, ok := dag.TaskRefs("q"); !ok || !slices.Equal(refs, []string{"my-node", "other"}) {
+		t.Fatalf("quoted refs: %v %v", refs, ok)
+	}
+}
+
+func TestWaitNodesParkTheBranch(t *testing.T) {
+	r := newRun(t,
+		[]model.Node{task("a"), {NodeID: "w", Type: model.NodeTypeWait}, {NodeID: "e", Type: model.NodeTypeWaitForEvent}, task("j")},
+		[]model.Edge{edge("a", "w"), edge("a", "e"), edge("w", "j"), edge("e", "j")}, `{}`)
+
+	r.start()
+	res := r.complete("a", `{}`)
+	expect(t, "waiting", ids(res.WaitingNodes), "e", "w")
+	expect(t, "nothing dispatched", ids(res.ExecutableNodes))
+
+	expect(t, "after timer", ids(r.complete("w", `{}`).ExecutableNodes))
+	expect(t, "after event", ids(r.complete("e", `{"paid": true}`).ExecutableNodes), "j")
 }

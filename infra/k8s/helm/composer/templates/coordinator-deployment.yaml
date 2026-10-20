@@ -56,6 +56,8 @@ spec:
         - --store.url={{ .Values.coordinator.config.store.url }}
         - --api.http_port={{ .Values.coordinator.config.api.httpPort }}
         - --api.grpc_port={{ .Values.coordinator.config.api.grpcPort }}
+        - --stream_shards={{ .Values.coordinator.config.engine.streamShards }}
+        - --retention_days={{ .Values.coordinator.config.engine.retentionDays }}
         resources:
           {{- toYaml .Values.coordinator.resources | nindent 10 }}
         volumeMounts:

@@ -4,6 +4,7 @@ Secure sandbox creation and management for Python code execution
 
 import builtins
 import logging
+import types
 from RestrictedPython.Guards import (
     safer_getattr,
     guarded_setattr,
@@ -12,7 +13,7 @@ from RestrictedPython.Guards import (
     guarded_unpack_sequence,
     full_write_guard,
 )
-from config import ALLOWED_IMPORTS, BLOCKED_IMPORTS
+from config import ALLOWED_IMPORTS, BLOCKED_IMPORTS, DENIED_ATTRIBUTES
 
 logger = logging.getLogger(__name__)
 
@@ -20,6 +21,39 @@ logger = logging.getLogger(__name__)
 class TimeoutError(Exception):
     """Custom timeout exception"""
     pass
+
+
+def _module_allowed(module_name):
+    """A module object may be handed to user code only if its package is allowed."""
+    root = module_name.split('.')[0]
+    return root in ALLOWED_IMPORTS and root not in BLOCKED_IMPORTS
+
+
+def _check_value(value, name):
+    """Refuse to hand out modules that are not allowed.
+
+    Allowed modules expose the modules they import as plain attributes
+    (json.codecs, codecs.sys, ...), which would otherwise be a direct path
+    from an allowed import to os and sys.
+    """
+    if isinstance(value, types.ModuleType) and not _module_allowed(value.__name__):
+        raise AttributeError(f"access to module '{value.__name__}' (via '{name}') is not allowed")
+    return value
+
+
+def guarded_getattr(obj, name, default=None):
+    """_getattr_ for compiled code: RestrictedPython's rules plus module and name denylists."""
+    if name in DENIED_ATTRIBUTES:
+        raise AttributeError(f"'{name}' is not allowed in the sandbox")
+    return _check_value(safer_getattr(obj, name, default), name)
+
+
+def guarded_hasattr(obj, name):
+    try:
+        guarded_getattr(obj, name)
+        return True
+    except Exception:
+        return False
 
 
 class SecureImporter:
@@ -48,6 +82,13 @@ class SecureImporter:
             logger.debug(f"Allowed import: {name}")
             try:
                 result = self._original_import(name, globals, locals, fromlist, level)
+                # `from pkg import x` reads attributes without _getattr_.
+                for item in fromlist or ():
+                    if item != '*' and hasattr(result, item):
+                        try:
+                            _check_value(getattr(result, item), item)
+                        except AttributeError as e:
+                            raise ImportError(str(e))
                 logger.debug(f"Import successful: {name}")
                 return result
             except ImportError as e:
@@ -101,7 +142,7 @@ def create_safe_globals(input_data):
         'issubclass': issubclass,
         'type': _safe_type_check,
         'callable': callable,
-        'hasattr': hasattr,
+        'hasattr': guarded_hasattr,
         # Basic types
         'bool': bool,
         'int': int,
@@ -145,8 +186,8 @@ def create_safe_globals(input_data):
     def guarded_getitem(obj, key):
         """Guard function for item access (obj[key])"""
         if hasattr(obj, '__getitem__'):
-            return obj[key]  # Let KeyError/IndexError/TypeError propagate
-        return safer_getattr(obj, key)
+            return _check_value(obj[key], repr(key))  # KeyError/IndexError/TypeError propagate
+        return guarded_getattr(obj, key)
     
     # Helper function for _getiter_ - safe iteration
     def guarded_getiter(iterable):
@@ -160,7 +201,7 @@ def create_safe_globals(input_data):
         # RestrictedPython guard functions
         # These are required for RestrictedPython to work correctly
         # The names must match what RestrictedPython injects into the compiled code
-        '_getattr_': safer_getattr,  # For attribute access (obj.attr)
+        '_getattr_': guarded_getattr,  # For attribute access (obj.attr)
         '_getitem_': guarded_getitem,  # For item access (obj[key])
         '_getiter_': guarded_getiter,  # For iteration (for x in iterable)
         '_setattr_': guarded_setattr,  # For attribute assignment (obj.attr = value)

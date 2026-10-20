@@ -7,10 +7,10 @@ import (
 
 // WorkerConfig holds everything the Worker needs injected at construction.
 type WorkerConfig struct {
-	// Stream is the Consumer used to read, reclaim, and ack task messages.
-	// Use pkg/stream/redis.NewConsumer (or any other stream.Consumer) to
-	// construct it before passing it here.
-	Stream stream.Consumer
+	// Streams are the Consumers the worker reads, reclaims and acks task
+	// messages on — one per stream (task queue shard) it serves. Use
+	// pkg/stream/redis.NewConsumer (or any other stream.Consumer) for each.
+	Streams []stream.Consumer
 
 	// CoordinatorAddr is the gRPC address of the coordinator service
 	// (e.g. "localhost:50051").

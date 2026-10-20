@@ -13,6 +13,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/mohitkumar/composer/pkg/db"
 	"github.com/mohitkumar/composer/pkg/redisq"
+	"github.com/mohitkumar/composer/pkg/stream"
+	redisstream "github.com/mohitkumar/composer/pkg/stream/redis"
 	"github.com/redis/go-redis/v9"
 	"github.com/rs/zerolog"
 	"github.com/testcontainers/testcontainers-go"
@@ -234,4 +236,19 @@ func runMigrations(ctx context.Context, pool *pgxpool.Pool) error {
 	}
 
 	return nil
+}
+
+// queueConsumers returns one stream consumer per shard of each queue.
+func queueConsumers(infra *TestInfra, queues []string, shards int, group, name string) []stream.Consumer {
+	names := stream.QueueStreams(queues, shards)
+	out := make([]stream.Consumer, len(names))
+	for i, n := range names {
+		out[i] = redisstream.NewConsumer(redisstream.ConsumerConfig{
+			StreamName:    n,
+			ConsumerGroup: group,
+			ConsumerName:  name,
+			BlockDuration: 200 * time.Millisecond,
+		}, infra.RedisStream, zerolog.Nop())
+	}
+	return out
 }

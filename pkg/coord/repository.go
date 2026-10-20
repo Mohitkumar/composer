@@ -7,19 +7,21 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/mohitkumar/composer/pkg/db"
 	"github.com/mohitkumar/composer/pkg/model"
 )
 
-// taskStream is the stream every worker task is dispatched on.
-const taskStream = "workflow.tasks"
-
-// repository holds the SQL for workflow runs, task instances and the outbox.
-// Every method takes the Querier to run on, so callers decide the transaction
-// boundary; methods never log — they return errors for the caller to handle.
-type repository struct{}
+// repository holds the SQL for workflow runs, task instances, waits and the
+// outbox. Every method takes the Querier to run on, so callers decide the
+// transaction boundary; methods never log — they return errors for the caller.
+//
+// Run-scoped tables are partitioned by run ID, so every query here filters on
+// run_id to touch a single partition.
+type repository struct {
+	// streamShards is the number of streams per task queue.
+	streamShards int
+}
 
 // runRow is a locked workflow run.
 type runRow struct {
@@ -53,19 +55,10 @@ type newTask struct {
 	Input       json.RawMessage
 	Output      json.RawMessage
 	Error       string
+	Branches    []string   // SWITCH decision
+	WakeAt      *time.Time // WAITING: timer or timeout
+	EventName   string     // WAITING on an event
 	ScheduledAt time.Time
-}
-
-// taskDispatch is the message a worker receives for one task attempt.
-type taskDispatch struct {
-	TaskID          string
-	RunID           string
-	WorkflowID      string
-	WorkflowVersion int
-	NodeID          string
-	NodeType        string
-	Attempt         int
-	Input           json.RawMessage
 }
 
 // ── Workflow runs ────────────────────────────────────────────────────────────
@@ -78,16 +71,16 @@ func (repository) InsertRun(ctx context.Context, q db.Querier, p *model.StartWor
 		`SELECT deleted_at FROM workflow_definitions WHERE id = $1 AND version = $2`,
 		p.WorkflowID, p.WorkflowVersion).Scan(&deletedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return fmt.Errorf("workflow definition not found: %s v%d", p.WorkflowID, p.WorkflowVersion)
+		return fmt.Errorf("%w: workflow definition %s v%d", ErrNotFound, p.WorkflowID, p.WorkflowVersion)
 	}
 	if err != nil {
 		return fmt.Errorf("check workflow definition: %w", err)
 	}
 	if deletedAt != nil {
-		return fmt.Errorf("cannot start workflow: workflow %s v%d has been deleted", p.WorkflowID, p.WorkflowVersion)
+		return fmt.Errorf("%w: workflow %s v%d has been deleted", ErrInvalid, p.WorkflowID, p.WorkflowVersion)
 	}
 
-	contextJSON, err := json.Marshal(rc)
+	contextJSON, err := json.Marshal(rc.Persisted())
 	if err != nil {
 		return fmt.Errorf("marshal run context: %w", err)
 	}
@@ -100,7 +93,7 @@ func (repository) InsertRun(ctx context.Context, q db.Querier, p *model.StartWor
 		return fmt.Errorf("insert workflow run: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
-		return fmt.Errorf("workflow run %s already exists (duplicate run_id)", p.RunID)
+		return fmt.Errorf("%w: workflow run %s already exists", ErrConflict, p.RunID)
 	}
 	return nil
 }
@@ -117,7 +110,7 @@ func (repository) LockRun(ctx context.Context, q db.Querier, runID string) (*run
 		   FOR UPDATE`,
 		runID).Scan(&run.WorkflowID, &run.WorkflowVersion, &run.Status)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, fmt.Errorf("workflow run %s not found", runID)
+		return nil, fmt.Errorf("%w: workflow run %s", ErrNotFound, runID)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("lock workflow run: %w", err)
@@ -125,7 +118,8 @@ func (repository) LockRun(ctx context.Context, q db.Querier, runID string) (*run
 	return run, nil
 }
 
-// LoadRunContext reads the run's context.
+// LoadRunContext reads the run's input and execution options. Task outputs
+// are not part of it; routing loads those on demand (LoadOutputs).
 func (repository) LoadRunContext(ctx context.Context, q db.Querier, runID string) (*model.RunContext, error) {
 	var input, contextJSON json.RawMessage
 	if err := q.QueryRow(ctx,
@@ -136,9 +130,9 @@ func (repository) LoadRunContext(ctx context.Context, q db.Querier, runID string
 	return model.DecodeRunContext(input, contextJSON)
 }
 
-// SaveRunContext overwrites the run's context.
+// SaveRunContext stores the run's input and execution options.
 func (repository) SaveRunContext(ctx context.Context, q db.Querier, runID string, rc *model.RunContext) error {
-	contextJSON, err := json.Marshal(rc)
+	contextJSON, err := json.Marshal(rc.Persisted())
 	if err != nil {
 		return fmt.Errorf("marshal run context: %w", err)
 	}
@@ -148,30 +142,6 @@ func (repository) SaveRunContext(ctx context.Context, q db.Querier, runID string
 		return fmt.Errorf("save run context: %w", err)
 	}
 	return nil
-}
-
-// MergeTaskOutput sets context_json.tasks[nodeID] in place and returns the
-// merged context, so routing can run without a second read.
-func (repository) MergeTaskOutput(ctx context.Context, q db.Querier, runID, nodeID string, output json.RawMessage) (*model.RunContext, error) {
-	stepJSON, err := json.Marshal(&model.StepResult{Status: model.TaskInstanceStatusCompleted, Output: output})
-	if err != nil {
-		return nil, fmt.Errorf("marshal step result: %w", err)
-	}
-	var input, contextJSON json.RawMessage
-	err = q.QueryRow(ctx, `
-		UPDATE workflow_runs
-		   SET context_json = jsonb_set(
-		           COALESCE(context_json, '{}'::jsonb),
-		           '{tasks}',
-		           COALESCE(context_json->'tasks', '{}'::jsonb) || jsonb_build_object($1::text, $2::jsonb)),
-		       updated_at = NOW()
-		 WHERE id = $3
-		RETURNING input_json, context_json`,
-		nodeID, stepJSON, runID).Scan(&input, &contextJSON)
-	if err != nil {
-		return nil, fmt.Errorf("merge task output into run context: %w", err)
-	}
-	return model.DecodeRunContext(input, contextJSON)
 }
 
 // FinishRun moves a non-terminal run to SUCCEEDED or FAILED. It returns the
@@ -216,11 +186,27 @@ func (repository) ResetRunForRetry(ctx context.Context, q db.Querier, runID stri
 	return nil
 }
 
+// CancelRunTasks fails every task of the run that has not finished.
+func (repository) CancelRunTasks(ctx context.Context, q db.Querier, runID, reason string) error {
+	lastError, _ := json.Marshal(map[string]string{"error": reason})
+	_, err := q.Exec(ctx, `
+		UPDATE task_instances
+		   SET state = 'FAILED', last_error = $1::jsonb, finished_at = NOW(), updated_at = NOW(),
+		       lease_owner = NULL, lease_expires_at = NULL
+		 WHERE run_id = $2 AND state IN ('PENDING', 'QUEUED', 'RUNNING', 'WAITING')`,
+		lastError, runID)
+	if err != nil {
+		return fmt.Errorf("cancel run tasks: %w", err)
+	}
+	return nil
+}
+
 // ── Task instances ───────────────────────────────────────────────────────────
 
-// LoadNodeStates returns the state of every task instance of the run.
+// LoadNodeStates returns the state (and SWITCH decision) of every task of the run.
 func (repository) LoadNodeStates(ctx context.Context, q db.Querier, runID string) (model.NodeStates, error) {
-	rows, err := q.Query(ctx, `SELECT node_id, state FROM task_instances WHERE run_id = $1`, runID)
+	rows, err := q.Query(ctx,
+		`SELECT node_id, state, branches FROM task_instances WHERE run_id = $1`, runID)
 	if err != nil {
 		return nil, fmt.Errorf("load node states: %w", err)
 	}
@@ -229,20 +215,43 @@ func (repository) LoadNodeStates(ctx context.Context, q db.Querier, runID string
 	states := model.NodeStates{}
 	for rows.Next() {
 		var nodeID string
-		var state model.TaskInstanceStatus
-		if err := rows.Scan(&nodeID, &state); err != nil {
+		var st model.NodeState
+		if err := rows.Scan(&nodeID, &st.Status, &st.Branches); err != nil {
 			return nil, fmt.Errorf("scan node state: %w", err)
 		}
-		states[nodeID] = state
+		states[nodeID] = st
 	}
 	return states, rows.Err()
 }
 
+// LoadOutputs returns the outputs of the given completed nodes of a run.
+func (repository) LoadOutputs(ctx context.Context, q db.Querier, runID string, nodeIDs []string) (map[string]json.RawMessage, error) {
+	rows, err := q.Query(ctx, `
+		SELECT node_id, output_json FROM task_instances
+		 WHERE run_id = $1 AND node_id = ANY($2) AND state IN ('COMPLETED', 'SUCCEEDED')`,
+		runID, nodeIDs)
+	if err != nil {
+		return nil, fmt.Errorf("load task outputs: %w", err)
+	}
+	defer rows.Close()
+
+	outputs := make(map[string]json.RawMessage, len(nodeIDs))
+	for rows.Next() {
+		var nodeID string
+		var output json.RawMessage
+		if err := rows.Scan(&nodeID, &output); err != nil {
+			return nil, fmt.Errorf("scan task output: %w", err)
+		}
+		outputs[nodeID] = output
+	}
+	return outputs, rows.Err()
+}
+
 // CountTasks returns how many of the run's tasks are still active
-// (pending, queued or running) and how many failed.
+// (pending, queued, running or waiting) and how many failed.
 func (repository) CountTasks(ctx context.Context, q db.Querier, runID string) (active, failed int, err error) {
 	err = q.QueryRow(ctx, `
-		SELECT COUNT(*) FILTER (WHERE state IN ('PENDING', 'QUEUED', 'RUNNING')),
+		SELECT COUNT(*) FILTER (WHERE state IN ('PENDING', 'QUEUED', 'RUNNING', 'WAITING')),
 		       COUNT(*) FILTER (WHERE state = 'FAILED')
 		  FROM task_instances
 		 WHERE run_id = $1`,
@@ -260,16 +269,21 @@ func (repository) InsertTask(ctx context.Context, q db.Querier, t newTask) (bool
 	if t.Error != "" {
 		lastError, _ = json.Marshal(map[string]string{"error": t.Error})
 	}
+	var eventName *string
+	if t.EventName != "" {
+		eventName = &t.EventName
+	}
 	tag, err := q.Exec(ctx, `
 		INSERT INTO task_instances
-		       (id, run_id, node_id, node_type, state, input_json, output_json, last_error,
-		        scheduled_at, finished_at, completed_at)
-		VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb, $8::jsonb, $9,
-		        CASE WHEN $5 IN ('COMPLETED', 'FAILED', 'SKIPPED') THEN NOW() END,
-		        CASE WHEN $5 = 'COMPLETED' THEN NOW() END)
+		       (id, run_id, node_id, node_type, queue, state, input_json, output_json, last_error,
+		        branches, wake_at, event_name, scheduled_at, finished_at, completed_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8::jsonb, $9::jsonb, $10, $11, $12, $13,
+		        CASE WHEN $6 IN ('COMPLETED', 'FAILED', 'SKIPPED') THEN NOW() END,
+		        CASE WHEN $6 = 'COMPLETED' THEN NOW() END)
 		ON CONFLICT (run_id, node_id) DO NOTHING`,
-		t.ID, t.RunID, t.Node.NodeID, t.Node.GetNodeTypeForRouting(), t.State,
-		nullJSON(t.Input), nullJSON(t.Output), lastError, t.ScheduledAt)
+		t.ID, t.RunID, t.Node.NodeID, t.Node.GetNodeTypeForRouting(), t.Node.Queue(), t.State,
+		nullJSON(t.Input), nullJSON(t.Output), lastError,
+		t.Branches, t.WakeAt, eventName, t.ScheduledAt)
 	if err != nil {
 		return false, fmt.Errorf("insert task instance for node %s: %w", t.Node.NodeID, err)
 	}
@@ -284,10 +298,10 @@ func (repository) CompleteTask(ctx context.Context, q db.Querier, ref taskRef, o
 		   SET state = 'COMPLETED', output_json = $1::jsonb,
 		       completed_at = NOW(), finished_at = NOW(), updated_at = NOW(),
 		       lease_owner = NULL, lease_expires_at = NULL
-		 WHERE id = $2 AND run_id = $3 AND node_id = $4 AND attempt = $5
+		 WHERE run_id = $2 AND id = $3 AND node_id = $4 AND attempt = $5
 		   AND state IN ('PENDING', 'QUEUED', 'RUNNING')
 		RETURNING node_type, started_at`,
-		nullJSON(output), ref.TaskID, ref.RunID, ref.NodeID, ref.Attempt))
+		nullJSON(output), ref.RunID, ref.TaskID, ref.NodeID, ref.Attempt))
 }
 
 // FailTask marks the referenced attempt FAILED and releases its lease.
@@ -298,10 +312,10 @@ func (repository) FailTask(ctx context.Context, q db.Querier, ref taskRef, reaso
 		   SET state = 'FAILED', last_error = $1::jsonb,
 		       finished_at = NOW(), updated_at = NOW(),
 		       lease_owner = NULL, lease_expires_at = NULL
-		 WHERE id = $2 AND run_id = $3 AND node_id = $4 AND attempt = $5
+		 WHERE run_id = $2 AND id = $3 AND node_id = $4 AND attempt = $5
 		   AND state IN ('PENDING', 'QUEUED', 'RUNNING')
 		RETURNING node_type, started_at`,
-		lastError, ref.TaskID, ref.RunID, ref.NodeID, ref.Attempt))
+		lastError, ref.RunID, ref.TaskID, ref.NodeID, ref.Attempt))
 }
 
 // RequeueTask schedules the next attempt of a failed execution: the task goes
@@ -314,11 +328,11 @@ func (repository) RequeueTask(ctx context.Context, q db.Querier, ref taskRef, re
 		   SET state = 'PENDING', attempt = attempt + 1, last_error = $1::jsonb,
 		       started_at = NULL, updated_at = NOW(),
 		       lease_owner = NULL, lease_expires_at = NULL
-		 WHERE id = $2 AND run_id = $3 AND node_id = $4 AND attempt = $5
+		 WHERE run_id = $2 AND id = $3 AND node_id = $4 AND attempt = $5
 		   AND state IN ('PENDING', 'QUEUED', 'RUNNING')
-		RETURNING node_type, attempt, input_json`,
-		lastError, ref.TaskID, ref.RunID, ref.NodeID, ref.Attempt).
-		Scan(&d.NodeType, &d.Attempt, &d.Input)
+		RETURNING node_type, COALESCE(queue, lower(node_type)), attempt, input_json`,
+		lastError, ref.RunID, ref.TaskID, ref.NodeID, ref.Attempt).
+		Scan(&d.NodeType, &d.Queue, &d.Attempt, &d.Input)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, false, nil
 	}
@@ -355,90 +369,6 @@ func scanFinishedTask(row pgx.Row) (*finishedTask, bool, error) {
 		t.StartedAt = *startedAt
 	}
 	return &t, true, nil
-}
-
-// ── Outbox ───────────────────────────────────────────────────────────────────
-
-// EnqueueDispatch writes the task's dispatch message to the outbox. The
-// outbox enqueuer publishes it no earlier than notBefore.
-func (repository) EnqueueDispatch(ctx context.Context, q db.Querier, d *taskDispatch, notBefore time.Time) error {
-	payload, err := json.Marshal(map[string]any{
-		"task_id":          d.TaskID,
-		"run_id":           d.RunID,
-		"workflow_id":      d.WorkflowID,
-		"workflow_version": d.WorkflowVersion,
-		"node_id":          d.NodeID,
-		"node_type":        d.NodeType,
-		"attempt":          d.Attempt,
-		"input":            string(d.Input),
-	})
-	if err != nil {
-		return fmt.Errorf("marshal dispatch payload: %w", err)
-	}
-	if _, err := q.Exec(ctx, `
-		INSERT INTO outbox (id, task_id, stream, payload, type, status, next_attempt_at)
-		VALUES ($1, $2, $3, $4::jsonb, 'TASK_EXECUTION', 'PENDING', $5)`,
-		uuid.NewString(), d.TaskID, taskStream, payload, notBefore); err != nil {
-		return fmt.Errorf("insert outbox entry for task %s: %w", d.TaskID, err)
-	}
-	return nil
-}
-
-// dispatchInsert is the outbox INSERT … SELECT shared by the recovery
-// statements below; they supply FROM with task rows "t" and their run "r".
-const dispatchInsert = `
-	INSERT INTO outbox (id, task_id, stream, payload, type, status, next_attempt_at)
-	SELECT gen_random_uuid()::text, t.id, '` + taskStream + `',
-	       jsonb_build_object(
-	           'task_id', t.id, 'run_id', t.run_id,
-	           'workflow_id', r.workflow_definition_id, 'workflow_version', r.workflow_version,
-	           'node_id', t.node_id, 'node_type', t.node_type,
-	           'attempt', t.attempt, 'input', t.input_json::text),
-	       'TASK_EXECUTION', 'PENDING', NOW()`
-
-// RequeueExpiredLeases resets RUNNING tasks whose lease expired — their worker
-// died or lost contact — and re-dispatches them. Safe to run concurrently from
-// several coordinators: each task row is claimed by exactly one UPDATE.
-func (repository) RequeueExpiredLeases(ctx context.Context, q db.Querier) (int64, error) {
-	tag, err := q.Exec(ctx, `
-		WITH expired AS (
-		    UPDATE task_instances
-		       SET state = 'PENDING', lease_owner = NULL, lease_expires_at = NULL,
-		           started_at = NULL, updated_at = NOW()
-		     WHERE state = 'RUNNING' AND (lease_expires_at IS NULL OR lease_expires_at < NOW())
-		    RETURNING id, run_id, node_id, node_type, attempt, input_json
-		)`+dispatchInsert+`
-		  FROM expired t JOIN workflow_runs r ON r.id = t.run_id`)
-	if err != nil {
-		return 0, fmt.Errorf("requeue expired leases: %w", err)
-	}
-	return tag.RowsAffected(), nil
-}
-
-// RedispatchPendingTasks re-dispatches PENDING tasks of running workflows that
-// have no outbox entry and were not touched for olderThan — their stream
-// message was lost. Touching updated_at limits each task to one re-dispatch per
-// interval; a task still queued in the stream may run twice, which the lease
-// deduplicates.
-func (repository) RedispatchPendingTasks(ctx context.Context, q db.Querier, olderThan time.Duration) (int64, error) {
-	tag, err := q.Exec(ctx, `
-		WITH lost AS (
-		    UPDATE task_instances t
-		       SET updated_at = NOW()
-		      FROM workflow_runs r
-		     WHERE r.id = t.run_id
-		       AND r.status = 'RUNNING'
-		       AND t.state = 'PENDING'
-		       AND t.updated_at < NOW() - make_interval(secs => $1)
-		       AND NOT EXISTS (SELECT 1 FROM outbox o WHERE o.task_id = t.id)
-		    RETURNING t.id, t.run_id, t.node_id, t.node_type, t.attempt, t.input_json
-		)`+dispatchInsert+`
-		  FROM lost t JOIN workflow_runs r ON r.id = t.run_id`,
-		olderThan.Seconds())
-	if err != nil {
-		return 0, fmt.Errorf("redispatch pending tasks: %w", err)
-	}
-	return tag.RowsAffected(), nil
 }
 
 // nullJSON maps an empty payload to SQL NULL instead of invalid JSON.

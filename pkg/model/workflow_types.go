@@ -33,6 +33,9 @@ const (
 	// TaskInstanceStatusSkipped marks a node on a branch that was not taken
 	// (an unselected SWITCH edge, or downstream of one).
 	TaskInstanceStatusSkipped TaskInstanceStatus = "SKIPPED"
+	// TaskInstanceStatusWaiting marks a WAIT or WAIT_FOR_EVENT node parked
+	// until its timer fires or its event arrives.
+	TaskInstanceStatusWaiting TaskInstanceStatus = "WAITING"
 )
 
 // IsCompleted reports whether the task finished successfully.
@@ -55,12 +58,20 @@ const (
 	// JOIN - Explicit join point; any node with several incoming edges already
 	// waits for all of them, so JOIN is a no-op pass-through.
 	NodeTypeJoin NodeType = "JOIN"
-	// WAIT - Wait for external event
+	// WAIT - Pause the branch for a duration or until a point in time
 	NodeTypeWait NodeType = "WAIT"
+	// WAIT_FOR_EVENT - Pause the branch until a named event is signalled to the run
+	NodeTypeWaitForEvent NodeType = "WAIT_FOR_EVENT"
 )
 
 // IsControlFlow reports whether the coordinator resolves this node inline
 // instead of dispatching it to a worker.
 func (t NodeType) IsControlFlow() bool {
 	return t == NodeTypeSwitch || t == NodeTypeFork || t == NodeTypeJoin
+}
+
+// IsWait reports whether the node parks in WAITING until a timer or event
+// resolves it, without ever being dispatched to a worker.
+func (t NodeType) IsWait() bool {
+	return t == NodeTypeWait || t == NodeTypeWaitForEvent
 }

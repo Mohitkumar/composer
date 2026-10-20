@@ -13,6 +13,9 @@ RUN npm ci --omit=dev
 COPY cmd/language-server-js/*.js ./
 COPY pkg/api/proto ./proto
 
+# User code runs here; never as root (the image's built-in "node" user).
+USER node
+
 EXPOSE 50052
 
 CMD ["node", "main.js"]

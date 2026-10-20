@@ -28,28 +28,27 @@ from config import DEFAULT_TIMEOUT_SECONDS, MAX_WORKERS
 
 # Setup logging with file output
 def setup_logging():
-    """Setup logging configuration with file and console output"""
-    log_dir = os.path.join(os.path.dirname(__file__), '../../logs')
-    os.makedirs(log_dir, exist_ok=True)
-    log_file = os.path.join(log_dir, 'language-server-py.log')
-
+    """Log to stderr, and also to LOG_FILE when set. The default is stderr only,
+    so the server runs on a read-only root filesystem."""
     formatter = logging.Formatter(
         '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
         datefmt='%Y-%m-%d %H:%M:%S'
     )
-
-    file_handler = logging.FileHandler(log_file, mode='a')
-    file_handler.setLevel(logging.DEBUG)
-    file_handler.setFormatter(formatter)
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.INFO)
 
     console_handler = logging.StreamHandler(sys.stderr)
     console_handler.setLevel(logging.INFO)
     console_handler.setFormatter(formatter)
-
-    root_logger = logging.getLogger()
-    root_logger.setLevel(logging.INFO)
-    root_logger.addHandler(file_handler)
     root_logger.addHandler(console_handler)
+
+    log_file = os.environ.get('LOG_FILE')
+    if log_file:
+        os.makedirs(os.path.dirname(os.path.abspath(log_file)), exist_ok=True)
+        file_handler = logging.FileHandler(log_file, mode='a')
+        file_handler.setLevel(logging.DEBUG)
+        file_handler.setFormatter(formatter)
+        root_logger.addHandler(file_handler)
 
     return logging.getLogger(__name__)
 
@@ -119,7 +118,7 @@ class LanguageExecutorServicer(pb_grpc.LanguageExecutorServicer):
                     error=f"Execution timed out: {e}",
                     duration_ms=int((time.time() - start) * 1000)
                 )
-            except (SyntaxError, ValueError, ImportError, MemoryError) as e:
+            except (SyntaxError, ValueError, ImportError, MemoryError, PermissionError) as e:
                 logger.error(f"[{task_id}] {type(e).__name__}: {e}")
                 return pb.ExecuteResponse(
                     success=False,

@@ -86,6 +86,7 @@ message AcquireTaskLeaseRequest {
   string task_id = 1;
   string owner = 2;
   int64 ttl_seconds = 3;
+  string run_id = 4;  // routes the lookup to the run's partition
 }
 
 // AcquireTaskLeaseResponse returns whether the lease was acquired

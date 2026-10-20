@@ -14,11 +14,20 @@ import (
 	"github.com/rs/zerolog"
 )
 
+// notifyChannel is the Postgres channel the outbox insert trigger notifies.
+const notifyChannel = "outbox_new"
+
 // OutboxEnqueuer processes outbox rows and pushes them to Redis streams.
+//
+// It is woken by Postgres NOTIFY as soon as a transaction that inserted outbox
+// rows commits, so dispatch latency does not depend on the poll interval. The
+// poll still runs as a fallback (lost notifications, listener reconnects) and
+// to pick up rows whose next_attempt_at has come due.
 type OutboxEnqueuer struct {
 	cfg  EnqueuerConfig
 	wg   sync.WaitGroup
 	quit chan struct{}
+	wake chan struct{} // signalled by the LISTEN loop
 }
 
 // outboxRow represents a row from the outbox table
@@ -41,7 +50,7 @@ func NewOutboxEnqueuer(cfg EnqueuerConfig) *OutboxEnqueuer {
 		cfg.Concurrency = 1
 	}
 	if cfg.PollInterval <= 0 {
-		cfg.PollInterval = 100 * time.Millisecond
+		cfg.PollInterval = time.Second
 	}
 	if cfg.Logger.GetLevel() == zerolog.NoLevel {
 		cfg.Logger = zerolog.New(nil).Level(zerolog.InfoLevel)
@@ -49,6 +58,7 @@ func NewOutboxEnqueuer(cfg EnqueuerConfig) *OutboxEnqueuer {
 	return &OutboxEnqueuer{
 		cfg:  cfg,
 		quit: make(chan struct{}),
+		wake: make(chan struct{}, 1),
 	}
 }
 
@@ -68,10 +78,14 @@ func (o *OutboxEnqueuer) Run(ctx context.Context) {
 	batchFull := make(chan struct{}, 1)
 
 	// Start periodic cleanup and recovery in background
-	o.wg.Add(1)
+	o.wg.Add(2)
 	go func() {
 		defer o.wg.Done()
 		o.maintenanceLoop(ctx)
+	}()
+	go func() {
+		defer o.wg.Done()
+		o.listenLoop(ctx)
 	}()
 
 	for {
@@ -117,6 +131,8 @@ func (o *OutboxEnqueuer) Run(ctx context.Context) {
 		select {
 		case <-batchFull:
 			// more work pending — re-poll immediately
+		case <-o.wake:
+			// new rows committed
 		case <-time.After(o.cfg.PollInterval):
 		case <-ctx.Done():
 			o.shutdown()
@@ -125,6 +141,65 @@ func (o *OutboxEnqueuer) Run(ctx context.Context) {
 			o.shutdown()
 			return
 		}
+	}
+}
+
+// listenLoop holds a dedicated connection on LISTEN outbox_new and signals
+// wake for each notification, reconnecting with backoff on failure.
+func (o *OutboxEnqueuer) listenLoop(ctx context.Context) {
+	// WaitForNotification only returns on ctx, so Stop must cancel it too.
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	go func() {
+		select {
+		case <-o.quit:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+
+	backoff := time.Second
+	for ctx.Err() == nil {
+		err := o.listen(ctx)
+		if ctx.Err() != nil {
+			return
+		}
+		o.cfg.Logger.Warn().Err(err).Dur("retry_in", backoff).Msg("outbox listener disconnected; polling until it reconnects")
+		select {
+		case <-time.After(backoff):
+		case <-ctx.Done():
+			return
+		}
+		backoff = min(backoff*2, 30*time.Second)
+	}
+}
+
+func (o *OutboxEnqueuer) listen(ctx context.Context) error {
+	pooled, err := o.cfg.DB.Acquire(ctx)
+	if err != nil {
+		return err
+	}
+	// Take the connection out of the pool: its LISTEN session state must not
+	// leak to other users, and it is closed when listening stops.
+	conn := pooled.Hijack()
+	defer conn.Close(context.Background()) //nolint:errcheck
+
+	if _, err := conn.Exec(ctx, "LISTEN "+notifyChannel); err != nil {
+		return err
+	}
+	o.signalWake() // catch rows committed while we were not listening
+	for {
+		if _, err := conn.WaitForNotification(ctx); err != nil {
+			return err
+		}
+		o.signalWake()
+	}
+}
+
+func (o *OutboxEnqueuer) signalWake() {
+	select {
+	case o.wake <- struct{}{}:
+	default:
 	}
 }
 

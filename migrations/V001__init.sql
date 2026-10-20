@@ -27,21 +27,34 @@ CREATE INDEX IF NOT EXISTS idx_workflow_definitions_enabled ON workflow_definiti
 CREATE INDEX IF NOT EXISTS idx_workflow_definitions_deployed ON workflow_definitions(id, deployed) WHERE deployed = true;
 CREATE INDEX IF NOT EXISTS idx_workflow_definitions_deleted_at ON workflow_definitions(deleted_at) WHERE deleted_at IS NULL;
 
+-- ----------------------------------------------------------------------------
+-- Run-scoped tables: workflow_runs, task_instances, workflow_events
+--
+-- All three are range-partitioned by month on the run ID. Run IDs are UUIDv7,
+-- whose text form sorts by creation time, so the run ID alone routes every
+-- hot-path query (they all carry run_id) to a single partition, and old months
+-- can be dropped wholesale for retention. IDs use COLLATE "C" so text order is
+-- byte order. Partitions are managed by composer_ensure_partitions() and
+-- composer_drop_partitions() below; there is deliberately no DEFAULT partition,
+-- which could block creating future partitions.
+-- ----------------------------------------------------------------------------
+
 -- Workflow runs (instances) table
 CREATE TABLE IF NOT EXISTS workflow_runs(
-    id TEXT PRIMARY KEY,
+    id TEXT COLLATE "C" NOT NULL,
     workflow_definition_id TEXT NOT NULL,
     workflow_version INT NOT NULL,
     status TEXT NOT NULL DEFAULT 'PENDING',
     input_json JSONB,
-    context_json JSONB,
+    context_json JSONB, -- {input, config} only; task outputs live in task_instances
     error_json JSONB,
     deleted_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     completed_at TIMESTAMPTZ,
+    PRIMARY KEY (id),
     FOREIGN KEY (workflow_definition_id, workflow_version) REFERENCES workflow_definitions(id, version)
-);
+) PARTITION BY RANGE (id);
 
 CREATE INDEX IF NOT EXISTS idx_workflow_runs_definition ON workflow_runs(workflow_definition_id, workflow_version);
 CREATE INDEX IF NOT EXISTS idx_workflow_runs_status ON workflow_runs(status);
@@ -50,15 +63,19 @@ CREATE INDEX IF NOT EXISTS idx_workflow_runs_deleted_at ON workflow_runs(deleted
 
 -- Task instances table
 CREATE TABLE IF NOT EXISTS task_instances(
-    id TEXT PRIMARY KEY,
-    run_id TEXT NOT NULL,
+    id TEXT COLLATE "C" NOT NULL,
+    run_id TEXT COLLATE "C" NOT NULL,
     node_id TEXT NOT NULL,
     node_type TEXT NOT NULL,
+    queue TEXT,                -- worker queue the task is dispatched on
     state TEXT NOT NULL DEFAULT 'PENDING',
     attempt INT NOT NULL DEFAULT 0,
     input_json JSONB,
     output_json JSONB,
     last_error JSONB,
+    branches TEXT[],           -- SWITCH: successors it selected
+    wake_at TIMESTAMPTZ,       -- WAITING: when the timer fires (WAIT) or times out (WAIT_FOR_EVENT)
+    event_name TEXT,           -- WAITING on WAIT_FOR_EVENT: the event that resolves it
     scheduled_at TIMESTAMPTZ,
     started_at TIMESTAMPTZ,
     finished_at TIMESTAMPTZ,
@@ -67,8 +84,9 @@ CREATE TABLE IF NOT EXISTS task_instances(
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     lease_owner TEXT,
     lease_expires_at TIMESTAMPTZ,
+    PRIMARY KEY (run_id, id),
     FOREIGN KEY (run_id) REFERENCES workflow_runs(id) ON DELETE CASCADE
-);
+) PARTITION BY RANGE (run_id);
 
 -- Keep task_instances indexes minimal: every state change rewrites each index,
 -- and indexing the state/lease columns would prevent HOT updates.
@@ -78,11 +96,107 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_task_instances_run_node ON task_instances(
 -- which are a small fraction of the table once workflows complete.
 CREATE INDEX IF NOT EXISTS idx_task_instances_run_active
     ON task_instances (run_id)
-    WHERE state IN ('PENDING', 'RUNNING', 'QUEUED');
+    WHERE state IN ('PENDING', 'RUNNING', 'QUEUED', 'WAITING');
 -- Lease sweeper: find RUNNING tasks whose lease expired.
 CREATE INDEX IF NOT EXISTS idx_task_instances_running_lease
     ON task_instances (lease_expires_at)
     WHERE state = 'RUNNING';
+-- Timer: find WAITING tasks that are due.
+CREATE INDEX IF NOT EXISTS idx_task_instances_wake
+    ON task_instances (wake_at)
+    WHERE state = 'WAITING' AND wake_at IS NOT NULL;
+
+-- Events signalled to a run before a WAIT_FOR_EVENT node was waiting for them.
+CREATE TABLE IF NOT EXISTS workflow_events(
+    id TEXT COLLATE "C" NOT NULL,
+    run_id TEXT COLLATE "C" NOT NULL,
+    name TEXT NOT NULL,
+    payload JSONB,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    consumed_at TIMESTAMPTZ,
+    PRIMARY KEY (run_id, id),
+    FOREIGN KEY (run_id) REFERENCES workflow_runs(id) ON DELETE CASCADE
+) PARTITION BY RANGE (run_id);
+
+CREATE INDEX IF NOT EXISTS idx_workflow_events_pending
+    ON workflow_events (run_id, name, created_at)
+    WHERE consumed_at IS NULL;
+
+-- composer_uuid7_bound returns the smallest UUIDv7 text with a timestamp >= ts:
+-- the partition boundary for runs created from ts onwards.
+CREATE OR REPLACE FUNCTION composer_uuid7_bound(ts TIMESTAMPTZ) RETURNS TEXT
+LANGUAGE sql IMMUTABLE AS $$
+    SELECT substr(h, 1, 8) || '-' || substr(h, 9, 4) || '-0000-0000-000000000000'
+      FROM (SELECT lpad(to_hex(floor(extract(epoch FROM ts) * 1000)::BIGINT), 12, '0') AS h) b
+$$;
+
+-- composer_ensure_partitions creates the monthly partitions of every run-scoped
+-- table from the current month to months_ahead months ahead. Idempotent and
+-- safe to call concurrently.
+CREATE OR REPLACE FUNCTION composer_ensure_partitions(months_ahead INT DEFAULT 3) RETURNS INT
+LANGUAGE plpgsql AS $$
+DECLARE
+    month_start TIMESTAMPTZ;
+    tbl TEXT;
+    created INT := 0;
+BEGIN
+    PERFORM pg_advisory_xact_lock(hashtext('composer_partitions'));
+    FOR i IN 0..months_ahead LOOP
+        month_start := date_trunc('month', NOW() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'
+                       + make_interval(months => i);
+        FOREACH tbl IN ARRAY ARRAY['workflow_runs', 'task_instances', 'workflow_events'] LOOP
+            IF to_regclass(format('%I_p%s', tbl, to_char(month_start AT TIME ZONE 'UTC', 'YYYYMM'))) IS NULL THEN
+                EXECUTE format('CREATE TABLE %I PARTITION OF %I FOR VALUES FROM (%L) TO (%L)',
+                    tbl || '_p' || to_char(month_start AT TIME ZONE 'UTC', 'YYYYMM'), tbl,
+                    composer_uuid7_bound(month_start),
+                    composer_uuid7_bound(month_start + INTERVAL '1 month'));
+                created := created + 1;
+            END IF;
+        END LOOP;
+    END LOOP;
+    RETURN created;
+END;
+$$;
+
+-- composer_drop_partitions drops every month that ended before older_than.
+-- A month that still has non-terminal runs is kept. Returns the months dropped.
+CREATE OR REPLACE FUNCTION composer_drop_partitions(older_than TIMESTAMPTZ) RETURNS SETOF TEXT
+LANGUAGE plpgsql AS $$
+DECLARE
+    part RECORD;
+    suffix TEXT;
+    active BOOLEAN;
+BEGIN
+    PERFORM pg_advisory_xact_lock(hashtext('composer_partitions'));
+    FOR part IN
+        SELECT c.relname
+          FROM pg_inherits i
+          JOIN pg_class c ON c.oid = i.inhrelid
+         WHERE i.inhparent = 'workflow_runs'::regclass
+         ORDER BY c.relname
+    LOOP
+        suffix := substring(part.relname FROM '_p(\d{6})$');
+        CONTINUE WHEN suffix IS NULL
+            OR to_timestamp(suffix, 'YYYYMM') AT TIME ZONE 'UTC' + INTERVAL '1 month' > older_than;
+
+        EXECUTE format('SELECT EXISTS (SELECT 1 FROM %I WHERE status IN (''RUNNING'', ''PENDING''))',
+                       part.relname) INTO active;
+        IF active THEN
+            RAISE NOTICE 'keeping partition %: it still has active runs', part.relname;
+            CONTINUE;
+        END IF;
+
+        -- Referencing tables first, so their foreign keys never see orphans.
+        EXECUTE format('DROP TABLE IF EXISTS %I', 'workflow_events_p' || suffix);
+        EXECUTE format('DROP TABLE IF EXISTS %I', 'task_instances_p' || suffix);
+        EXECUTE format('ALTER TABLE workflow_runs DETACH PARTITION %I', part.relname);
+        EXECUTE format('DROP TABLE %I', part.relname);
+        RETURN NEXT suffix;
+    END LOOP;
+END;
+$$;
+
+SELECT composer_ensure_partitions(3);
 
 -- Outbox table for transactional message publishing
 CREATE TABLE IF NOT EXISTS outbox(
@@ -103,12 +217,27 @@ CREATE TABLE IF NOT EXISTS outbox(
 );
 
 CREATE INDEX IF NOT EXISTS idx_outbox_status ON outbox(status, created_at);
-CREATE INDEX IF NOT EXISTS idx_outbox_stream ON outbox(stream);
 -- Partial index matching the outbox poll query's filter and ORDER BY created_at.
 CREATE INDEX IF NOT EXISTS idx_outbox_pending_next
     ON outbox (created_at)
     WHERE status IN ('PENDING', 'RETRY');
 CREATE INDEX IF NOT EXISTS idx_outbox_task_id ON outbox (task_id) WHERE task_id IS NOT NULL;
+
+-- Wake outbox enqueuers (LISTEN outbox_new) as soon as a transaction that
+-- inserted outbox rows commits. Statement-level, and Postgres folds duplicate
+-- notifications within a transaction, so a batch insert sends one.
+CREATE OR REPLACE FUNCTION composer_notify_outbox() RETURNS TRIGGER
+LANGUAGE plpgsql AS $$
+BEGIN
+    PERFORM pg_notify('outbox_new', '');
+    RETURN NULL;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS outbox_notify ON outbox;
+CREATE TRIGGER outbox_notify AFTER INSERT ON outbox
+    FOR EACH STATEMENT EXECUTE FUNCTION composer_notify_outbox();
+
 -- Create dead letter table for outbox failures
 CREATE TABLE IF NOT EXISTS outbox_dlq (
   id TEXT PRIMARY KEY,

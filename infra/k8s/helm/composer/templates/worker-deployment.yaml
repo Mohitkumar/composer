@@ -27,8 +27,12 @@ spec:
           value: {{ .Values.worker.env.redisAddr | quote }}
         - name: COORDINATOR_ADDR
           value: {{ .Values.worker.env.coordinatorAddr | quote }}
-        - name: STREAM_NAME
-          value: {{ .Values.worker.env.streamName | quote }}
+        {{- with .Values.worker.env.queues }}
+        - name: WORKER_QUEUES
+          value: {{ . | quote }}
+        {{- end }}
+        - name: WORKER_CONCURRENCY
+          value: {{ .Values.worker.env.concurrency | quote }}
         - name: CONSUMER_GROUP
           value: {{ .Values.worker.env.consumerGroup | quote }}
         - name: WORKER_ID

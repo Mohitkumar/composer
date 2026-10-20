@@ -41,7 +41,7 @@ function loadProto() {
  * @param {Object} call - gRPC call object
  * @param {Function} callback - gRPC callback function
  */
-function Execute(call, callback) {
+async function Execute(call, callback) {
   const startTime = Date.now();
   
   try {
@@ -94,15 +94,12 @@ function Execute(call, callback) {
     
     // Execute code
     try {
-      const output = executeCode(code, input, timeoutSeconds);
-      const outputJson = serializeOutput(output);
-      const duration = Date.now() - startTime;
-      
+      const { output, logs } = await executeCode(code, input, timeoutSeconds);
       callback(null, {
         success: true,
-        output_json: outputJson,
-        duration_ms: duration,
-        logs: []
+        output_json: serializeOutput(output),
+        duration_ms: Date.now() - startTime,
+        logs,
       });
     } catch (execErr) {
       const errorMsg = formatError(execErr, timeoutSeconds || (30));

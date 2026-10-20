@@ -31,6 +31,7 @@ const nodeTypeColors: Record<string, { bg: string; border: string; text: string 
   FORK: { bg: 'bg-orange-50', border: 'border-orange-300', text: 'text-orange-700' },
   JOIN: { bg: 'bg-pink-50', border: 'border-pink-300', text: 'text-pink-700' },
   WAIT: { bg: 'bg-gray-50', border: 'border-gray-300', text: 'text-gray-700' },
+  WAIT_FOR_EVENT: { bg: 'bg-purple-50', border: 'border-purple-300', text: 'text-purple-700' },
 };
 
 // Custom node component
@@ -250,6 +251,7 @@ export function WorkflowGraph({ spec }: WorkflowGraphProps) {
       FORK: '#f97316',
       JOIN: '#ec4899',
       WAIT: '#6b7280',
+      WAIT_FOR_EVENT: '#a855f7',
     };
     return colorMap[type] || '#94a3b8';
   }, []);

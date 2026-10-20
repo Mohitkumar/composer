@@ -25,6 +25,8 @@ type WorkflowInstanceStatusResponse struct {
 	RunningTasks   int                    `json:"running_tasks"`
 	CompletedTasks int                    `json:"completed_tasks"`
 	FailedTasks    int                    `json:"failed_tasks"`
+	WaitingTasks   int                    `json:"waiting_tasks"`
+	SkippedTasks   int                    `json:"skipped_tasks"`
 	TotalTasks     int                    `json:"total_tasks"`
 	CreatedAt      time.Time              `json:"created_at"`
 	UpdatedAt      time.Time              `json:"updated_at"`

@@ -69,17 +69,17 @@ func (s *WorkflowService) RenewTaskLease(ctx context.Context, req *workflowpb.Ac
 	return s.lease(ctx, req, s.coordinator.LeaseManager.Renew)
 }
 
-type leaseFunc func(ctx context.Context, taskID, owner string, ttl time.Duration) (bool, error)
+type leaseFunc func(ctx context.Context, runID, taskID, owner string, ttl time.Duration) (bool, error)
 
 func (s *WorkflowService) lease(ctx context.Context, req *workflowpb.AcquireTaskLeaseRequest, fn leaseFunc) (*workflowpb.AcquireTaskLeaseResponse, error) {
-	if req.GetTaskId() == "" || req.GetOwner() == "" {
-		return nil, status.Error(codes.InvalidArgument, "task_id and owner are required")
+	if req.GetTaskId() == "" || req.GetRunId() == "" || req.GetOwner() == "" {
+		return nil, status.Error(codes.InvalidArgument, "task_id, run_id and owner are required")
 	}
 	ttl := time.Duration(req.GetTtlSeconds()) * time.Second
 	if ttl <= 0 {
 		ttl = defaultLeaseTTL
 	}
-	acquired, err := fn(ctx, req.GetTaskId(), req.GetOwner(), ttl)
+	acquired, err := fn(ctx, req.GetRunId(), req.GetTaskId(), req.GetOwner(), ttl)
 	if err != nil {
 		return nil, status.Error(codes.Internal, err.Error())
 	}

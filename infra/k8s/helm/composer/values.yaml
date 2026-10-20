@@ -37,6 +37,11 @@ coordinator:
     api:
       httpPort: 8080
       grpcPort: 50051
+    engine:
+      # Redis streams per task queue; workers read the value from Redis.
+      streamShards: 4
+      # Drop run history for months that ended more than this many days ago (0 = keep).
+      retentionDays: 0
   # OpenTelemetry configuration
   otel:
     enabled: true
@@ -63,8 +68,10 @@ worker:
   env:
     redisAddr: "redis:6379"
     coordinatorAddr: "composer-coordinator:50051"
-    streamName: "workflow.tasks"
     consumerGroup: "workflow-workers"
+    # Comma-separated task queues; empty = "http" plus each configured runtime.
+    queues: ""
+    concurrency: 10
   # OpenTelemetry configuration
   otel:
     enabled: true

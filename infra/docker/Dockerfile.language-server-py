@@ -35,6 +35,12 @@ COPY --from=builder /app/proto ./proto
 
 # Activate virtual environment
 ENV PATH="/app/.venv/bin:$PATH"
+# Runs on a read-only root filesystem: no .pyc writes.
+ENV PYTHONDONTWRITEBYTECODE=1
+
+# User code runs here; never as root.
+RUN adduser -D -H -u 10001 sandbox
+USER 10001
 
 EXPOSE 50051
 

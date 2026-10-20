@@ -3,6 +3,7 @@ package model
 import (
 	"database/sql"
 	"encoding/json"
+	"strings"
 	"time"
 )
 
@@ -22,6 +23,24 @@ type Node struct {
 	Runtime *string         `json:"runtime,omitempty"` // Optional: python/js/node (only for CODE type nodes)
 	Spec    json.RawMessage `json:"spec"`              // task implementation definition (http spec, code reference etc)
 	Retry   *RetryPolicy    `json:"retry,omitempty"`   // Optional: retry failed executions of this node
+	// TaskQueue optionally routes the node to a dedicated worker pool. By
+	// default a node goes to the queue of its runtime ("http", "python", "js").
+	TaskQueue string `json:"queue,omitempty"`
+}
+
+// Queue returns the task queue a worker node is dispatched on.
+func (n *Node) Queue() string {
+	if n.TaskQueue != "" {
+		return strings.ToLower(n.TaskQueue)
+	}
+	key := strings.ToLower(n.GetNodeTypeForRouting())
+	switch key {
+	case "py":
+		return "python"
+	case "javascript", "node":
+		return "js"
+	}
+	return key
 }
 
 // RetryPolicy controls how often a failed worker node is re-executed.

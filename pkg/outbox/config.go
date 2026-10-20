@@ -16,5 +16,4 @@ type EnqueuerConfig struct {
 	BatchSize    int
 	Concurrency  int
 	PollInterval time.Duration
-	StreamPrefix string // e.g. "workflow." -> stream "workflow.tasks" or supply full stream in outbox payload
 }

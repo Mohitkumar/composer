@@ -51,23 +51,24 @@ func (c *CoordinatorClient) Close() error {
 }
 
 // AcquireTaskLease asks the coordinator to claim a task for owner.
-func (c *CoordinatorClient) AcquireTaskLease(ctx context.Context, taskID, owner string, ttlSeconds int64) (bool, error) {
-	return c.lease(ctx, c.client.AcquireTaskLease, taskID, owner, ttlSeconds)
+func (c *CoordinatorClient) AcquireTaskLease(ctx context.Context, msg *TaskMessage, owner string, ttlSeconds int64) (bool, error) {
+	return c.lease(ctx, c.client.AcquireTaskLease, msg, owner, ttlSeconds)
 }
 
 // RenewTaskLease extends a lease owner holds; false means the lease was lost.
-func (c *CoordinatorClient) RenewTaskLease(ctx context.Context, taskID, owner string, ttlSeconds int64) (bool, error) {
-	return c.lease(ctx, c.client.RenewTaskLease, taskID, owner, ttlSeconds)
+func (c *CoordinatorClient) RenewTaskLease(ctx context.Context, msg *TaskMessage, owner string, ttlSeconds int64) (bool, error) {
+	return c.lease(ctx, c.client.RenewTaskLease, msg, owner, ttlSeconds)
 }
 
 type leaseRPC func(context.Context, *workflowpb.AcquireTaskLeaseRequest, ...grpc.CallOption) (*workflowpb.AcquireTaskLeaseResponse, error)
 
-func (c *CoordinatorClient) lease(ctx context.Context, rpc leaseRPC, taskID, owner string, ttlSeconds int64) (bool, error) {
+func (c *CoordinatorClient) lease(ctx context.Context, rpc leaseRPC, msg *TaskMessage, owner string, ttlSeconds int64) (bool, error) {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
 	resp, err := rpc(ctx, &workflowpb.AcquireTaskLeaseRequest{
-		TaskId:     taskID,
+		TaskId:     msg.TaskID,
+		RunId:      msg.RunID,
 		Owner:      owner,
 		TtlSeconds: ttlSeconds,
 	})

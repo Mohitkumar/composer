@@ -1,13 +1,68 @@
 /**
  * Secure sandbox creation and management for JavaScript code execution.
  *
- * Uses isolated-vm (V8 isolates) instead of the deprecated vm2 library.
- * Each execution gets its own V8 isolate with hard memory limits and
- * no access to the host process, filesystem, network, or Node.js APIs.
+ * Uses isolated-vm (V8 isolates). Each execution gets its own isolate with a
+ * hard memory limit and no access to the host process, filesystem, network,
+ * or Node.js APIs. Scripts run asynchronously on isolated-vm's thread pool, so
+ * a long-running script never blocks the server's event loop, and at most
+ * MAX_CONCURRENT_ISOLATES run at once. Everything that crosses back into the
+ * host (console output, the result) is size-capped.
  */
 
 import ivm from 'isolated-vm';
-import { DEFAULT_MEMORY_LIMIT_MB } from './config.js';
+import {
+  DEFAULT_MEMORY_LIMIT_MB,
+  MAX_CONCURRENT_ISOLATES,
+  MAX_LOG_BYTES,
+  MAX_OUTPUT_BYTES,
+} from './config.js';
+
+/** A counting semaphore limiting concurrent isolates. */
+class Limiter {
+  constructor(max) {
+    this.free = max;
+    this.waiting = [];
+  }
+
+  async acquire() {
+    if (this.free > 0) {
+      this.free--;
+      return;
+    }
+    await new Promise((resolve) => this.waiting.push(resolve));
+  }
+
+  release() {
+    const next = this.waiting.shift();
+    if (next) {
+      next();
+    } else {
+      this.free++;
+    }
+  }
+}
+
+const limiter = new Limiter(MAX_CONCURRENT_ISOLATES);
+
+/** Collects console output up to MAX_LOG_BYTES, then drops the rest. */
+function logCollector() {
+  const lines = [];
+  let bytes = 0;
+  let truncated = false;
+  return {
+    push(line) {
+      if (bytes + line.length > MAX_LOG_BYTES) {
+        truncated = true;
+        return;
+      }
+      bytes += line.length;
+      lines.push(line);
+    },
+    lines() {
+      return truncated ? [...lines, '[log output truncated]'] : lines;
+    },
+  };
+}
 
 /**
  * Execute code inside an isolated V8 isolate.
@@ -15,57 +70,56 @@ import { DEFAULT_MEMORY_LIMIT_MB } from './config.js';
  * @param {string} code  - User code (must define a `handler` function)
  * @param {*}      input - Input data (JSON-serializable) passed to handler()
  * @param {number} timeoutMs - Execution timeout in milliseconds
- * @returns {*} The JSON-round-tripped return value of handler(input)
+ * @returns {Promise<{output: *, logs: string[]}>} handler(input), JSON-round-tripped, and console output
  */
-function runInIsolate(code, input, timeoutMs) {
-  // Create an isolate with a hard memory ceiling
+async function runInIsolate(code, input, timeoutMs) {
+  await limiter.acquire();
   const isolate = new ivm.Isolate({ memoryLimit: DEFAULT_MEMORY_LIMIT_MB });
+  const logs = logCollector();
 
   try {
-    const context = isolate.createContextSync();
+    const context = await isolate.createContext();
     const jail = context.global;
 
-    // Provide a minimal console.log that captures output (no host object leaks)
-    const logs = [];
-    jail.setSync('_log', new ivm.Callback((...args) => {
+    // Only primitives cross this boundary: the callback receives copies.
+    await jail.set('_log', new ivm.Callback((...args) => {
       logs.push(args.map(String).join(' '));
     }));
+    // The input enters as a JSON string and is parsed inside the isolate, so
+    // no host object reference leaks in.
+    await jail.set('_inputJSON', JSON.stringify(input));
 
-    // Inject a frozen copy of the input as a JSON string — the user code
-    // parses it inside the isolate so no host references leak in.
-    jail.setSync('_inputJSON', JSON.stringify(input));
-
-    // Bootstrap: set up console, parse input, and define `input` global
-    const bootstrap = `
-      const console = {
-        log:   (...a) => _log(...a),
-        error: (...a) => _log('[error]', ...a),
-        warn:  (...a) => _log('[warn]', ...a),
-        info:  (...a) => _log(...a),
-      };
+    const script = await isolate.compileScript(`
+      const console = (() => {
+        const log = _log;
+        const write = (prefix) => (...a) => log(prefix, ...a.map((v) => {
+          try { return typeof v === 'string' ? v : JSON.stringify(v); } catch { return String(v); }
+        }));
+        return { log: write(''), info: write(''), warn: write('[warn]'), error: write('[error]') };
+      })();
       const input = JSON.parse(_inputJSON);
-    `;
+      delete globalThis._log;
+      delete globalThis._inputJSON;
 
-    // Compile and run bootstrap + user code + handler invocation
-    const fullScript = `
-      ${bootstrap}
       ${code}
 
       if (typeof handler !== 'function') {
         throw new Error('handler function is not defined or is not a function');
       }
-      const _result = handler(input);
-      JSON.stringify(_result);
-    `;
+      JSON.stringify(handler(input));
+    `);
 
-    const script = isolate.compileScriptSync(fullScript);
-    const resultJSON = script.runSync(context, { timeout: timeoutMs });
-
-    // resultJSON is a string (JSON.stringify ran inside the isolate)
-    return JSON.parse(resultJSON);
+    const resultJSON = await script.run(context, { timeout: timeoutMs });
+    if (typeof resultJSON !== 'string') {
+      throw new Error('handler must return a JSON-serializable value');
+    }
+    if (resultJSON.length > MAX_OUTPUT_BYTES) {
+      throw new Error(`Output is ${resultJSON.length} bytes; the limit is ${MAX_OUTPUT_BYTES}`);
+    }
+    return { output: JSON.parse(resultJSON), logs: logs.lines() };
   } finally {
-    // Tear down the isolate immediately to free memory
     isolate.dispose();
+    limiter.release();
   }
 }
 

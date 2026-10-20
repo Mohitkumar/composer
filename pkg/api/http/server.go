@@ -96,6 +96,7 @@ func NewServer(config *api.APIConfig, coordinator *coord.Coordinator) *Server {
 				r.Get("/{id}", h.getExecution)
 				r.Post("/{id}/cancel", h.cancelExecution)
 				r.Post("/{id}/retry", h.retryExecution)
+				r.Post("/{id}/events", h.signalExecution)
 			})
 
 			// Template endpoints

@@ -18,6 +18,11 @@ spec:
         {{- include "composer.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: worker-py
     spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
       containers:
       - name: worker-py
         image: "{{ .Values.workerPy.image.repository }}:{{ .Values.workerPy.image.tag | default .Chart.AppVersion }}"
@@ -29,8 +34,21 @@ spec:
         env:
         - name: PORT
           value: {{ .Values.workerPy.env.port | quote }}
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop: [ALL]
+        volumeMounts:
+        - name: tmp
+          mountPath: /tmp
         resources:
           {{- toYaml .Values.workerPy.resources | nindent 10 }}
+      volumes:
+      - name: tmp
+        emptyDir:
+          medium: Memory
+          sizeLimit: 64Mi
 ---
 apiVersion: v1
 kind: Service

@@ -13,6 +13,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/mohitkumar/composer/pkg/redisq"
+	"github.com/mohitkumar/composer/pkg/stream"
 	redisstream "github.com/mohitkumar/composer/pkg/stream/redis"
 	"github.com/mohitkumar/composer/pkg/util"
 	"github.com/mohitkumar/composer/worker"
@@ -84,10 +85,7 @@ func main() {
 	// 2. Individual env vars: LANG_WORKER_PYTHON_ADDR, LANG_WORKER_JS_ADDR, etc.
 	langWorkerAddrs := parseLangWorkerAddrs()
 
-	streamName := os.Getenv("STREAM_NAME")
-	if streamName == "" {
-		streamName = "workflow.tasks"
-	}
+	queues := workerQueues(langWorkerAddrs)
 
 	consumerGroup := os.Getenv("CONSUMER_GROUP")
 	if consumerGroup == "" {
@@ -136,16 +134,21 @@ func main() {
 	}
 	defer redisStream.Close()
 
-	// Create Redis stream consumer
-	streamConsumer := redisstream.NewConsumer(redisstream.ConsumerConfig{
-		StreamName:    streamName,
-		ConsumerGroup: consumerGroup,
-		ConsumerName:  workerID,
-	}, redisStream, logger)
+	// One consumer per shard stream of every queue this worker serves.
+	shards := streamShards(ctx, redisStream, logger)
+	streamNames := stream.QueueStreams(queues, shards)
+	consumers := make([]stream.Consumer, len(streamNames))
+	for i, name := range streamNames {
+		consumers[i] = redisstream.NewConsumer(redisstream.ConsumerConfig{
+			StreamName:    name,
+			ConsumerGroup: consumerGroup,
+			ConsumerName:  workerID,
+		}, redisStream, logger)
+	}
 
 	// Create worker
 	wcfg := worker.WorkerConfig{
-		Stream:          streamConsumer,
+		Streams:         consumers,
 		CoordinatorAddr: coordAddr,
 		LangWorkerAddrs: langWorkerAddrs,
 		ConsumerName:    workerID,
@@ -167,7 +170,8 @@ func main() {
 
 	logger.Info().
 		Str("worker_id", workerID).
-		Str("stream", streamName).
+		Strs("queues", queues).
+		Int("shards", shards).
 		Str("group", consumerGroup).
 		Str("coordinator", coordAddr).
 		Msg("starting worker")
@@ -214,4 +218,34 @@ func envInt(name string, def int64) int64 {
 		return v
 	}
 	return def
+}
+
+// workerQueues returns the task queues to consume: WORKER_QUEUES if set,
+// otherwise "http" plus one queue per configured language runtime.
+func workerQueues(langWorkerAddrs map[string]string) []string {
+	if v := os.Getenv("WORKER_QUEUES"); v != "" {
+		var queues []string
+		for _, q := range strings.Split(v, ",") {
+			if q = strings.ToLower(strings.TrimSpace(q)); q != "" {
+				queues = append(queues, q)
+			}
+		}
+		return queues
+	}
+	queues := []string{"http"}
+	for runtime := range langWorkerAddrs {
+		queues = append(queues, runtime)
+	}
+	return queues
+}
+
+// streamShards returns the shard count the coordinator published in Redis,
+// falling back to STREAM_SHARDS or the default when it is not set yet.
+func streamShards(ctx context.Context, rs *redisq.RedisStream, logger zerolog.Logger) int {
+	if n, err := rs.Client().Get(ctx, stream.ShardsKey).Int(); err == nil && n > 0 {
+		return n
+	}
+	n := int(envInt("STREAM_SHARDS", stream.DefaultShards))
+	logger.Warn().Int("shards", n).Msg("coordinator has not published a shard count yet; using STREAM_SHARDS")
+	return n
 }

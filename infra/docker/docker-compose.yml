@@ -54,7 +54,8 @@ services:
     environment:
       - REDIS_ADDR=redis:6379
       - COORDINATOR_ADDR=coordinator:50051
-      - STREAM_NAME=workflow.tasks
+      # Queues default to "http" plus each configured runtime (python, js);
+      # set WORKER_QUEUES to serve dedicated queues instead.
       - CONSUMER_GROUP=workflow-workers
       - LANG_WORKER_PYTHON_ADDR=python-worker:50051
       - LANG_WORKER_JS_ADDR=js-worker:50052
@@ -70,6 +71,13 @@ services:
     container_name: composer-python-worker
     environment:
       - PORT=50051
+    user: "10001"
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,noexec
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 256
     restart: unless-stopped
 
   js-worker:
@@ -79,6 +87,13 @@ services:
     container_name: composer-js-worker
     environment:
       - PORT=50052
+    user: "1000"
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,noexec
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 256
     restart: unless-stopped
 
   web:

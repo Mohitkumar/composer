@@ -6,7 +6,8 @@
   "type": "module",
   "scripts": {
     "start": "node main.js",
-    "dev": "node --watch main.js"
+    "dev": "node --watch main.js",
+    "test": "node --test sandbox.test.js"
   },
   "keywords": [
     "workflow",

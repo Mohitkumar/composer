@@ -8,12 +8,14 @@ forcibly killed (threads cannot be killed in CPython).
 import json
 import multiprocessing
 import logging
+import os
 import resource
-import traceback
 import types
 from RestrictedPython import compile_restricted
+import guard
 from sandbox import TimeoutError, create_safe_globals
-from config import DEFAULT_TIMEOUT_SECONDS, MAX_CODE_SIZE, MAX_MEMORY_BYTES
+from config import (DEFAULT_TIMEOUT_SECONDS, MAX_CODE_SIZE, MAX_MEMORY_BYTES,
+                    MAX_OPEN_FILES, MAX_OUTPUT_BYTES)
 
 logger = logging.getLogger(__name__)
 
@@ -46,19 +48,31 @@ def calculate_timeout(timeout_seconds):
 
 
 def _set_resource_limits():
-    """Set resource limits for the child process (Linux/macOS only)."""
-    try:
-        # Limit virtual memory
-        resource.setrlimit(resource.RLIMIT_AS, (MAX_MEMORY_BYTES, MAX_MEMORY_BYTES))
-    except (ValueError, AttributeError):
-        # RLIMIT_AS may not be available on all platforms
-        pass
-    try:
-        # Limit CPU time (hard kill after timeout + buffer)
-        cpu_limit = DEFAULT_TIMEOUT_SECONDS + 5
-        resource.setrlimit(resource.RLIMIT_CPU, (cpu_limit, cpu_limit))
-    except (ValueError, AttributeError):
-        pass
+    """Apply per-process limits in the sandbox child. Each limit is best-effort:
+    not every platform supports every resource."""
+    cpu_limit = DEFAULT_TIMEOUT_SECONDS + 5
+    limits = [
+        (resource.RLIMIT_AS, MAX_MEMORY_BYTES),  # memory
+        (resource.RLIMIT_CPU, cpu_limit),        # hard kill after the timeout
+        (resource.RLIMIT_FSIZE, 0),              # no file may grow: no writes
+        (resource.RLIMIT_NOFILE, MAX_OPEN_FILES),
+        (resource.RLIMIT_CORE, 0),               # no core dumps of user data
+        (getattr(resource, 'RLIMIT_NPROC', None), 0),  # no new processes
+    ]
+    for res, limit in limits:
+        if res is None:
+            continue
+        try:
+            resource.setrlimit(res, (limit, limit))
+        except (ValueError, OSError, AttributeError):
+            pass
+
+
+def _prepare_child():
+    """Lock down the sandbox child before any user code is compiled or run."""
+    os.environ.clear()  # nothing from the server's environment leaks in
+    _set_resource_limits()
+    guard.install()
 
 
 def _sandbox_worker(code, input_data, timeout_seconds, result_pipe):
@@ -66,9 +80,9 @@ def _sandbox_worker(code, input_data, timeout_seconds, result_pipe):
     Worker function that runs in a child process.
     Compiles and executes user code, calls handler(input), sends result back via pipe.
     """
-    _set_resource_limits()
-
     try:
+        _prepare_child()
+
         # Compile with RestrictedPython
         try:
             compiled_code = compile_restricted(code, '<inline>', 'exec')
@@ -83,27 +97,29 @@ def _sandbox_worker(code, input_data, timeout_seconds, result_pipe):
             result_pipe.send(('error', 'SyntaxError', "Compilation did not produce valid bytecode"))
             return
 
-        # Create sandbox and execute code to define handler()
-        safe_globals = create_safe_globals(input_data)
-        local_ns = {}
-        exec(compiled_code, safe_globals, local_ns)
+        # Run the module body in one namespace, so its imports and helper
+        # functions are visible to handler() as globals.
+        namespace = create_safe_globals(input_data)
+        exec(compiled_code, namespace)
 
-        # Validate handler exists
-        if "handler" not in local_ns:
+        handler = namespace.get("handler")
+        if handler is None:
             result_pipe.send(('error', 'ValueError', "No handler() function defined in code"))
             return
-        if not callable(local_ns["handler"]):
+        if not callable(handler):
             result_pipe.send(('error', 'ValueError', "handler is defined but is not callable"))
             return
 
-        # Call handler(input)
-        output = local_ns["handler"](input_data)
-
-        # Serialize output
-        output_json = json.dumps(output, default=str)
+        output_json = json.dumps(handler(input_data), default=str)
+        if len(output_json) > MAX_OUTPUT_BYTES:
+            result_pipe.send(('error', 'ValueError',
+                              f"Output is {len(output_json)} bytes; the limit is {MAX_OUTPUT_BYTES}"))
+            return
         result_pipe.send(('ok', output_json))
     except MemoryError:
         result_pipe.send(('error', 'MemoryError', "Code exceeded memory limit"))
+    except guard.SandboxViolation as e:
+        result_pipe.send(('error', 'PermissionError', str(e)))
     except Exception as e:
         result_pipe.send(('error', type(e).__name__, str(e)))
 
@@ -171,6 +187,8 @@ def execute_and_call(code, input_data, timeout_seconds):
             raise MemoryError(error_message)
         elif error_type == 'ImportError':
             raise ImportError(error_message)
+        elif error_type == 'PermissionError':
+            raise PermissionError(error_message)
         else:
             raise RuntimeError(f"{error_type}: {error_message}")
 

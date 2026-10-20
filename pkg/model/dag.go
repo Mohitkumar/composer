@@ -3,6 +3,7 @@ package model
 import (
 	"encoding/json"
 	"fmt"
+	"regexp"
 )
 
 // WorkflowDAG is an indexed, read-only view of a WorkflowDefinitionSpec.
@@ -12,6 +13,9 @@ type WorkflowDAG struct {
 	outgoing  map[string][]*Edge // nodeID → outgoing edges
 	incoming  map[string][]*Edge // nodeID → incoming edges
 	entryNode *Node              // first node (in spec order) with no incoming edges
+	// taskRefs lists, per node, the task outputs its templates can read; a
+	// missing entry means the references could not be determined statically.
+	taskRefs map[string][]string
 }
 
 // BuildDAG constructs a WorkflowDAG from a spec, pre-building all index structures.
@@ -39,7 +43,62 @@ func BuildDAG(spec *WorkflowDefinitionSpec) *WorkflowDAG {
 		}
 	}
 
+	dag.taskRefs = make(map[string][]string, len(spec.Nodes))
+	for id, n := range dag.nodes {
+		texts := jsonStrings(n.Spec)
+		var implicit []string
+		if n.Type == NodeTypeSwitch {
+			// A SWITCH reads its conditions and passes a predecessor's output through.
+			for _, e := range dag.outgoing[id] {
+				texts = append(texts, e.Condition)
+			}
+			for _, e := range dag.incoming[id] {
+				implicit = append(implicit, e.From)
+			}
+		}
+		if refs, ok := templateTaskRefs(texts...); ok {
+			dag.taskRefs[id] = append(refs, implicit...)
+		}
+	}
+
 	return dag
+}
+
+// TaskRefs returns the node IDs whose outputs nodeID's templates may read.
+// ok is false when they cannot be determined, meaning every output may be read.
+func (d *WorkflowDAG) TaskRefs(nodeID string) (refs []string, ok bool) {
+	refs, ok = d.taskRefs[nodeID]
+	return refs, ok
+}
+
+var (
+	templateExprRe = regexp.MustCompile(`{{\s*([^}]+)\s*}}`)
+	tasksIdentRe   = regexp.MustCompile(`\btasks\b`)
+	taskRefRe      = regexp.MustCompile(`\btasks\s*(?:\.\s*([A-Za-z_][A-Za-z0-9_]*)|\[\s*["']([^"']+)["']\s*\])`)
+)
+
+// templateTaskRefs extracts tasks.<id> and tasks["<id>"] references from the
+// {{ }} expressions in texts. It reports false if any expression uses tasks in
+// another way (e.g. tasks[someVar]), which could read any output.
+func templateTaskRefs(texts ...string) ([]string, bool) {
+	refs := []string{}
+	for _, text := range texts {
+		for _, expr := range templateExprRe.FindAllStringSubmatch(text, -1) {
+			body := expr[1]
+			matches := taskRefRe.FindAllStringSubmatch(body, -1)
+			if len(matches) != len(tasksIdentRe.FindAllStringIndex(body, -1)) {
+				return nil, false
+			}
+			for _, m := range matches {
+				if m[1] != "" {
+					refs = append(refs, m[1])
+				} else {
+					refs = append(refs, m[2])
+				}
+			}
+		}
+	}
+	return refs, true
 }
 
 // GetNode returns the node with the given ID, or nil if not found.
@@ -114,4 +173,35 @@ func (d *WorkflowDAG) Descendants(nodeID string) []string {
 		}
 	}
 	return result
+}
+
+// jsonStrings returns every string value in a JSON document (so escaped quotes
+// are decoded), or the raw text if it is not valid JSON.
+func jsonStrings(raw json.RawMessage) []string {
+	var v any
+	if len(raw) == 0 {
+		return nil
+	}
+	if err := json.Unmarshal(raw, &v); err != nil {
+		return []string{string(raw)}
+	}
+	var out []string
+	var walk func(any)
+	walk = func(v any) {
+		switch t := v.(type) {
+		case string:
+			out = append(out, t)
+		case map[string]any:
+			for k, val := range t {
+				out = append(out, k)
+				walk(val)
+			}
+		case []any:
+			for _, val := range t {
+				walk(val)
+			}
+		}
+	}
+	walk(v)
+	return out
 }

@@ -7,7 +7,7 @@ export interface ValidationResult {
 }
 
 // Valid node types
-export const VALID_NODE_TYPES = ["CODE", "HTTP", "SWITCH", "FORK", "JOIN", "WAIT"];
+export const VALID_NODE_TYPES = ["CODE", "HTTP", "SWITCH", "FORK", "JOIN", "WAIT", "WAIT_FOR_EVENT"];
 
 // Valid runtimes (only for CODE type nodes)
 export const VALID_RUNTIMES = ["python", "javascript", "js", "node", "go"];
@@ -171,6 +171,14 @@ export function validateWorkflowSpec(spec: any): ValidationResult {
     } else if (node.runtime) {
       // Runtime should not be specified for non-CODE nodes
       warnings.push(`Node '${node.node_id || i}': 'runtime' field is only valid for CODE type nodes. It will be ignored.`);
+    }
+
+    // Wait nodes are resolved by the coordinator and need a resolvable trigger.
+    if (node.type === "WAIT" && node.spec?.duration_seconds === undefined && !node.spec?.until) {
+      errors.push(`Node '${node.node_id || i}': WAIT nodes require spec.duration_seconds or spec.until`);
+    }
+    if (node.type === "WAIT_FOR_EVENT" && !node.spec?.event) {
+      errors.push(`Node '${node.node_id || i}': WAIT_FOR_EVENT nodes require spec.event`);
     }
 
     // Validate node spec based on runtime (for CODE nodes) or type (for other nodes)

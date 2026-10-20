@@ -26,16 +26,26 @@ const (
 // errLeaseLost cancels an execution whose lease was taken over or released.
 var errLeaseLost = errors.New("task lease lost")
 
-// Worker executes tasks from a stream and reports results to the coordinator.
-// Up to Concurrency tasks run at once; each holds a lease for its duration.
+// Worker executes tasks from its streams and reports results to the coordinator.
+//
+// One reader goroutine per stream pulls messages into a bounded hand-off
+// channel, and Concurrency executor goroutines drain it. Readers only fetch as
+// many messages as the channel has room for, so a reader blocked on an idle
+// stream holds no execution capacity, and messages never pile up in memory.
 type Worker struct {
 	cfg           WorkerConfig
 	router        *Router
 	coordClient   *CoordinatorClient
 	langClientMgr *LangClientManager
 
-	slots    chan struct{} // one token per free execution slot
-	inflight sync.WaitGroup
+	deliveries chan delivery
+	space      chan struct{} // signalled when an executor takes a delivery
+}
+
+// delivery is a message together with the stream it must be acked on.
+type delivery struct {
+	msg  stream.Message
+	from stream.Consumer
 }
 
 // TaskMessage is the fields we expect in each stream message.
@@ -54,6 +64,9 @@ type TaskMessage struct {
 func NewWorker(cfg WorkerConfig) (*Worker, error) {
 	if cfg.Logger.GetLevel() == zerolog.NoLevel {
 		cfg.Logger = zerolog.New(nil).Level(zerolog.InfoLevel)
+	}
+	if len(cfg.Streams) == 0 {
+		return nil, errors.New("worker needs at least one stream")
 	}
 	if cfg.Concurrency < 1 {
 		cfg.Concurrency = defaultConcurrency
@@ -81,17 +94,13 @@ func NewWorker(cfg WorkerConfig) (*Worker, error) {
 		return nil, fmt.Errorf("failed to create coordinator client: %w", err)
 	}
 
-	slots := make(chan struct{}, cfg.Concurrency)
-	for range cfg.Concurrency {
-		slots <- struct{}{}
-	}
-
 	return &Worker{
 		cfg:           cfg,
 		router:        NewRouter(langClientMgr, cfg.Logger),
 		coordClient:   coordClient,
 		langClientMgr: langClientMgr,
-		slots:         slots,
+		deliveries:    make(chan delivery, cfg.Concurrency),
+		space:         make(chan struct{}, 1),
 	}, nil
 }
 
@@ -107,104 +116,116 @@ func (w *Worker) Close() error {
 	return errors.Join(errs...)
 }
 
-// EnsureConsumerGroup delegates to the stream consumer's Setup method.
+// EnsureConsumerGroup creates the consumer group on every stream.
 // Idempotent — safe to call on every startup.
 func (w *Worker) EnsureConsumerGroup(ctx context.Context) error {
-	return w.cfg.Stream.Setup(ctx)
+	for _, s := range w.cfg.Streams {
+		if err := s.Setup(ctx); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
-// Run reads new messages into free execution slots, and reclaims messages
-// orphaned by crashed workers, until ctx is canceled. It returns after all
-// in-flight tasks have finished.
+// Run reads and executes tasks until ctx is canceled, then waits for
+// in-flight tasks to finish. Messages still in the hand-off channel stay
+// pending in their stream and are reclaimed by another worker.
 func (w *Worker) Run(ctx context.Context) {
 	w.cfg.Logger.Info().
 		Str("consumer", w.cfg.ConsumerName).
+		Int("streams", len(w.cfg.Streams)).
 		Int("concurrency", w.cfg.Concurrency).
 		Msg("starting worker")
 
-	var loops sync.WaitGroup
-	loops.Add(1)
-	go func() {
-		defer loops.Done()
-		w.reclaimPendingLoop(ctx)
-	}()
+	var readers, executors sync.WaitGroup
+	for _, s := range w.cfg.Streams {
+		readers.Add(2)
+		go func() { defer readers.Done(); w.readLoop(ctx, s) }()
+		go func() { defer readers.Done(); w.reclaimPendingLoop(ctx, s) }()
+	}
+	for range w.cfg.Concurrency {
+		executors.Add(1)
+		go func() { defer executors.Done(); w.executeLoop(ctx) }()
+	}
 
+	readers.Wait()
+	w.cfg.Logger.Info().Msg("context canceled, waiting for in-flight tasks")
+	executors.Wait()
+}
+
+// readLoop fetches new messages from one stream while the hand-off channel has room.
+func (w *Worker) readLoop(ctx context.Context, s stream.Consumer) {
 	for ctx.Err() == nil {
-		free := w.acquireSlots(ctx)
-		if free == 0 {
-			break
+		free := cap(w.deliveries) - len(w.deliveries)
+		if free <= 0 {
+			w.waitForSpace(ctx)
+			continue
 		}
-		msgs, err := w.cfg.Stream.ReadNew(ctx, int64(free))
-		if err != nil && ctx.Err() == nil {
-			w.cfg.Logger.Error().Err(err).Msg("read new messages failed")
-			time.Sleep(time.Second)
+		msgs, err := s.ReadNew(ctx, int64(free))
+		if err != nil {
+			if ctx.Err() == nil {
+				w.cfg.Logger.Error().Err(err).Msg("read new messages failed")
+				time.Sleep(time.Second)
+			}
+			continue
 		}
 		for _, msg := range msgs {
-			w.spawn(ctx, msg)
+			if !w.hand(ctx, delivery{msg: msg, from: s}) {
+				return
+			}
 		}
-		w.releaseSlots(free - len(msgs))
 	}
-
-	w.cfg.Logger.Info().Msg("context canceled, waiting for in-flight tasks")
-	loops.Wait()
-	w.inflight.Wait()
 }
 
-// acquireSlots blocks until at least one execution slot is free, then takes
-// every free slot. It returns 0 when ctx is canceled.
-func (w *Worker) acquireSlots(ctx context.Context) int {
+// waitForSpace blocks until an executor frees a slot (or briefly, since
+// several readers share one signal).
+func (w *Worker) waitForSpace(ctx context.Context) {
 	select {
-	case <-w.slots:
+	case <-w.space:
+	case <-time.After(100 * time.Millisecond):
 	case <-ctx.Done():
-		return 0
 	}
-	n := 1
+}
+
+// hand passes a delivery to the executors; false if ctx was canceled first.
+func (w *Worker) hand(ctx context.Context, d delivery) bool {
+	select {
+	case w.deliveries <- d:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+func (w *Worker) executeLoop(ctx context.Context) {
 	for {
 		select {
-		case <-w.slots:
-			n++
-		default:
-			return n
+		case <-ctx.Done():
+			return
+		case d := <-w.deliveries:
+			select {
+			case w.space <- struct{}{}:
+			default:
+			}
+			w.handleMessage(ctx, d)
 		}
 	}
 }
 
-func (w *Worker) releaseSlots(n int) {
-	for range n {
-		w.slots <- struct{}{}
-	}
-}
-
-// spawn runs msg in its own goroutine; the caller must hold a slot for it.
-func (w *Worker) spawn(ctx context.Context, msg stream.Message) {
-	w.inflight.Add(1)
-	go func() {
-		defer w.inflight.Done()
-		defer w.releaseSlots(1)
-		w.handleMessage(ctx, msg)
-	}()
-}
-
-// reclaimPendingLoop periodically reclaims messages that have been pending too
-// long (e.g. from crashed workers).
-func (w *Worker) reclaimPendingLoop(ctx context.Context) {
+// reclaimPendingLoop periodically reclaims messages of one stream that have
+// been pending too long (e.g. from crashed workers).
+func (w *Worker) reclaimPendingLoop(ctx context.Context, s stream.Consumer) {
 	reclaimInterval := max(time.Duration(w.cfg.LeaseTTLSeconds/2)*time.Second, 10*time.Second)
 	minIdleTime := time.Duration(w.cfg.LeaseTTLSeconds) * time.Second
 
 	ticker := time.NewTicker(reclaimInterval)
 	defer ticker.Stop()
-
-	w.cfg.Logger.Info().
-		Dur("reclaim_interval", reclaimInterval).
-		Dur("min_idle_time", minIdleTime).
-		Msg("starting pending message recovery loop")
-
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			w.reclaimPendingMessages(ctx, minIdleTime)
+			w.reclaimPendingMessages(ctx, s, minIdleTime)
 		}
 	}
 }
@@ -212,8 +233,8 @@ func (w *Worker) reclaimPendingLoop(ctx context.Context) {
 // reclaimPendingMessages reclaims orphaned messages and enforces the DLQ limit.
 // Messages whose DeliveryCount exceeds MaxDeliveries are dead-lettered instead
 // of being reprocessed.
-func (w *Worker) reclaimPendingMessages(ctx context.Context, minIdleTime time.Duration) {
-	msgs, err := w.cfg.Stream.ReclaimOrphaned(ctx, minIdleTime)
+func (w *Worker) reclaimPendingMessages(ctx context.Context, s stream.Consumer, minIdleTime time.Duration) {
+	msgs, err := s.ReclaimOrphaned(ctx, minIdleTime)
 	if err != nil {
 		w.cfg.Logger.Error().Err(err).Msg("reclaim orphaned messages failed")
 		return
@@ -224,21 +245,12 @@ func (w *Worker) reclaimPendingMessages(ctx context.Context, minIdleTime time.Du
 
 	for _, msg := range msgs {
 		if msg.DeliveryCount > w.cfg.MaxDeliveries {
-			w.deadLetter(ctx, msg)
+			w.deadLetter(ctx, delivery{msg: msg, from: s})
 			continue
 		}
-		if w.acquireSlot(ctx) {
-			w.spawn(ctx, msg)
+		if !w.hand(ctx, delivery{msg: msg, from: s}) {
+			return
 		}
-	}
-}
-
-func (w *Worker) acquireSlot(ctx context.Context) bool {
-	select {
-	case <-w.slots:
-		return true
-	case <-ctx.Done():
-		return false
 	}
 }
 
@@ -246,13 +258,13 @@ func (w *Worker) acquireSlot(ctx context.Context) bool {
 // removes it from the stream so it is never redelivered.
 // If the report fails the message is not acked so the next reclaim cycle
 // retries the DLQ report.
-func (w *Worker) deadLetter(ctx context.Context, msg stream.Message) {
-	logger := w.cfg.Logger.With().Str("msg_id", msg.ID).Int64("delivery_count", msg.DeliveryCount).Logger()
+func (w *Worker) deadLetter(ctx context.Context, d delivery) {
+	logger := w.cfg.Logger.With().Str("msg_id", d.msg.ID).Int64("delivery_count", d.msg.DeliveryCount).Logger()
 
-	taskMsg, err := parseTaskMessage(msg.Values)
+	taskMsg, err := parseTaskMessage(d.msg.Values)
 	if err != nil {
 		logger.Error().Err(err).Msg("dead-letter: unparseable message payload, discarding")
-		_ = w.cfg.Stream.Ack(ctx, msg.ID)
+		_ = d.from.Ack(ctx, d.msg.ID)
 		return
 	}
 
@@ -262,16 +274,16 @@ func (w *Worker) deadLetter(ctx context.Context, msg stream.Message) {
 		logger.Error().Err(err).Msg("failed to report dead-lettered task; will retry on next reclaim cycle")
 		return
 	}
-	_ = w.cfg.Stream.Ack(ctx, msg.ID)
+	_ = d.from.Ack(ctx, d.msg.ID)
 }
 
 // handleMessage processes one message and acks it once the outcome is durable
 // at the coordinator (or the message turned out to be stale or invalid).
-func (w *Worker) handleMessage(ctx context.Context, msg stream.Message) {
-	taskMsg, err := parseTaskMessage(msg.Values)
+func (w *Worker) handleMessage(ctx context.Context, d delivery) {
+	taskMsg, err := parseTaskMessage(d.msg.Values)
 	if err != nil {
 		w.cfg.Logger.Error().Err(err).Msg("invalid task message; acking and discarding")
-		_ = w.cfg.Stream.Ack(ctx, msg.ID)
+		_ = d.from.Ack(ctx, d.msg.ID)
 		return
 	}
 
@@ -279,7 +291,7 @@ func (w *Worker) handleMessage(ctx context.Context, msg stream.Message) {
 		w.cfg.Logger.Error().Err(err).Str("task_id", taskMsg.TaskID).Msg("task processing failed")
 		return // not acked — redelivered via reclaim
 	}
-	_ = w.cfg.Stream.Ack(ctx, msg.ID)
+	_ = d.from.Ack(ctx, d.msg.ID)
 }
 
 func (w *Worker) processMessage(ctx context.Context, msg *TaskMessage) error {
@@ -290,7 +302,7 @@ func (w *Worker) processMessage(ctx context.Context, msg *TaskMessage) error {
 		Int("attempt", msg.Attempt).
 		Logger()
 
-	acquired, err := w.coordClient.AcquireTaskLease(ctx, msg.TaskID, w.cfg.ConsumerName, w.cfg.LeaseTTLSeconds)
+	acquired, err := w.coordClient.AcquireTaskLease(ctx, msg, w.cfg.ConsumerName, w.cfg.LeaseTTLSeconds)
 	if err != nil {
 		return fmt.Errorf("acquire task lease: %w", err)
 	}
@@ -304,7 +316,7 @@ func (w *Worker) processMessage(ctx context.Context, msg *TaskMessage) error {
 	defer cancel()
 	leaseCtx, stopRenewal := context.WithCancelCause(execCtx)
 	defer stopRenewal(nil)
-	go w.renewLeaseLoop(leaseCtx, msg.TaskID, stopRenewal, logger)
+	go w.renewLeaseLoop(leaseCtx, msg, stopRenewal, logger)
 
 	// Embed the task ID so executors can use task_instances.id as an
 	// idempotency key (e.g. Idempotency-Key header on HTTP requests).
@@ -338,7 +350,7 @@ func (w *Worker) processMessage(ctx context.Context, msg *TaskMessage) error {
 
 // renewLeaseLoop renews the task lease every TTL/3 until ctx is canceled. If
 // the lease is lost it cancels the execution with errLeaseLost.
-func (w *Worker) renewLeaseLoop(ctx context.Context, taskID string, cancel context.CancelCauseFunc, logger zerolog.Logger) {
+func (w *Worker) renewLeaseLoop(ctx context.Context, msg *TaskMessage, cancel context.CancelCauseFunc, logger zerolog.Logger) {
 	renewInterval := max(time.Duration(w.cfg.LeaseTTLSeconds/3)*time.Second, 5*time.Second)
 	ticker := time.NewTicker(renewInterval)
 	defer ticker.Stop()
@@ -348,7 +360,7 @@ func (w *Worker) renewLeaseLoop(ctx context.Context, taskID string, cancel conte
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			renewed, err := w.coordClient.RenewTaskLease(ctx, taskID, w.cfg.ConsumerName, w.cfg.LeaseTTLSeconds)
+			renewed, err := w.coordClient.RenewTaskLease(ctx, msg, w.cfg.ConsumerName, w.cfg.LeaseTTLSeconds)
 			switch {
 			case err != nil:
 				// Transient; the lease survives until its TTL, so keep trying.

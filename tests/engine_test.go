@@ -3,24 +3,26 @@ package tests
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/mohitkumar/composer/pkg/api"
 	grpcapi "github.com/mohitkumar/composer/pkg/api/grpc"
 	"github.com/mohitkumar/composer/pkg/coord"
 	"github.com/mohitkumar/composer/pkg/db"
 	"github.com/mohitkumar/composer/pkg/model"
 	"github.com/mohitkumar/composer/pkg/redisq"
-	redisstream "github.com/mohitkumar/composer/pkg/stream/redis"
 	"github.com/mohitkumar/composer/worker"
 	"github.com/rs/zerolog"
 )
@@ -34,9 +36,10 @@ type engine struct {
 	coord    *coord.Coordinator
 	grpcAddr string
 	svc      *stubService
+	runs     int // makes each run's workflow ID unique
 }
 
-func newEngine(t *testing.T) *engine {
+func newEngine(t *testing.T, configure ...func(*coord.Config)) *engine {
 	t.Helper()
 	if testing.Short() {
 		t.Skip("skipping container-backed test in short mode")
@@ -49,11 +52,16 @@ func newEngine(t *testing.T) *engine {
 
 	// Log to stderr, not t: background loops may outlive an individual test.
 	logger := zerolog.New(os.Stderr).Level(zerolog.WarnLevel)
-	c, err := coord.NewCoordinator(&coord.Config{
+	cfg := &coord.Config{
 		DBConfig:     db.Config{URL: infra.DBURL},
 		RedisConfig:  redisq.RedisConfig{Addrs: []string{infra.RedisAddr}},
 		OutboxConfig: coord.OutboxConfig{PollInterval: 20 * time.Millisecond, Concurrency: 2},
-	}, &logger)
+		StreamShards: 3,
+	}
+	for _, f := range configure {
+		f(cfg)
+	}
+	c, err := coord.NewCoordinator(cfg, &logger)
 	if err != nil {
 		t.Fatalf("create coordinator: %v", err)
 	}
@@ -77,17 +85,16 @@ func newEngine(t *testing.T) *engine {
 	return &engine{t: t, ctx: ctx, infra: infra, coord: c, grpcAddr: lis.Addr().String(), svc: svc}
 }
 
-// startWorker runs a worker until the test ends and returns its stop function.
-func (e *engine) startWorker(name string, concurrency int, leaseTTL int64) context.CancelFunc {
+// startWorker runs a worker on the given queues (default "http") until the
+// test ends and returns its stop function.
+func (e *engine) startWorker(name string, concurrency int, leaseTTL int64, queues ...string) context.CancelFunc {
 	e.t.Helper()
+	if len(queues) == 0 {
+		queues = []string{"http"}
+	}
 	logger := zerolog.New(os.Stderr).Level(zerolog.WarnLevel)
 	w, err := worker.NewWorker(worker.WorkerConfig{
-		Stream: redisstream.NewConsumer(redisstream.ConsumerConfig{
-			StreamName:    "workflow.tasks",
-			ConsumerGroup: "engine-test",
-			ConsumerName:  name,
-			BlockDuration: 200 * time.Millisecond,
-		}, e.infra.RedisStream, logger),
+		Streams:         queueConsumers(e.infra, queues, e.coord.Config.StreamShards, "engine-test", name),
 		CoordinatorAddr: e.grpcAddr,
 		ConsumerName:    name,
 		LeaseTTLSeconds: leaseTTL,
@@ -111,7 +118,8 @@ func (e *engine) startWorker(name string, concurrency int, leaseTTL int64) conte
 func (e *engine) run(spec model.WorkflowDefinitionSpec, input string) string {
 	e.t.Helper()
 	specJSON, _ := json.Marshal(spec)
-	id := strings.ReplaceAll(e.t.Name(), "/", "_")
+	e.runs++
+	id := fmt.Sprintf("%s_%d", strings.ReplaceAll(e.t.Name(), "/", "_"), e.runs)
 	if err := e.coord.RegisterWorkflow(e.ctx, &model.RegisterWorkflowRequest{
 		WorkflowID: id, Name: id, Version: 1, Spec: specJSON, CreatedBy: "admin",
 	}); err != nil {
@@ -350,10 +358,10 @@ func TestExpiredLeaseIsRecovered(t *testing.T) {
 		`SELECT id FROM task_instances WHERE run_id = $1`, runID).Scan(&taskID); err != nil {
 		t.Fatal(err)
 	}
-	if ok, err := e.coord.LeaseManager.Acquire(e.ctx, taskID, "dead-worker", time.Second); err != nil || !ok {
+	if ok, err := e.coord.LeaseManager.Acquire(e.ctx, runID, taskID, "dead-worker", time.Second); err != nil || !ok {
 		t.Fatalf("acquire: ok=%v err=%v", ok, err)
 	}
-	if ok, _ := e.coord.LeaseManager.Acquire(e.ctx, taskID, "dead-worker", time.Second); ok {
+	if ok, _ := e.coord.LeaseManager.Acquire(e.ctx, runID, taskID, "dead-worker", time.Second); ok {
 		t.Fatal("an owner must not re-acquire a lease it still holds")
 	}
 
@@ -366,5 +374,250 @@ func TestExpiredLeaseIsRecovered(t *testing.T) {
 	}
 	if calls := e.svc.callCount("/ok/orphan"); calls != 1 {
 		t.Fatalf("orphaned task executed %d times, want 1", calls)
+	}
+}
+
+// waitForNode waits until a node of the run reaches state.
+func (e *engine) waitForNode(runID, nodeID string, state model.TaskInstanceStatus, timeout time.Duration) {
+	e.t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		var got string
+		err := e.infra.DBPool.QueryRow(e.ctx,
+			`SELECT state FROM task_instances WHERE run_id = $1 AND node_id = $2`, runID, nodeID).Scan(&got)
+		if err == nil && got == string(state) {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	e.t.Fatalf("node %s did not reach %s within %v; tasks: %v", nodeID, state, timeout, e.nodeStates(runID))
+}
+
+func (e *engine) taskOutput(runID, nodeID string) map[string]any {
+	e.t.Helper()
+	var raw []byte
+	if err := e.infra.DBPool.QueryRow(e.ctx,
+		`SELECT output_json FROM task_instances WHERE run_id = $1 AND node_id = $2`, runID, nodeID).Scan(&raw); err != nil {
+		e.t.Fatal(err)
+	}
+	var out map[string]any
+	_ = json.Unmarshal(raw, &out)
+	return out
+}
+
+func waitNode(id, spec string) model.Node {
+	return model.Node{NodeID: id, Type: model.NodeTypeWait, Spec: json.RawMessage(spec)}
+}
+
+func eventNode(id, spec string) model.Node {
+	return model.Node{NodeID: id, Type: model.NodeTypeWaitForEvent, Spec: json.RawMessage(spec)}
+}
+
+func TestEngineFeatures(t *testing.T) {
+	e := newEngine(t)
+	e.startWorker("w1", 8, 10)
+
+	t.Run("task outputs stay out of the run row", func(t *testing.T) {
+		e.t = t
+		b := e.httpNode("b")
+		b.Spec = json.RawMessage(fmt.Sprintf(`{"url": "%s/ok/{{tasks.a.output.n}}", "method": "GET"}`, e.svc.URL))
+		runID := e.run(model.WorkflowDefinitionSpec{Nodes: []model.Node{e.httpNode("a"), b},
+			Edges: []model.Edge{{From: "a", To: "b"}}}, `{"k": 1}`)
+		if got := e.waitForRun(runID, 30*time.Second); got != model.WorkflowInstanceStatusSucceeded {
+			t.Fatalf("status %s, tasks %v", got, e.nodeStates(runID))
+		}
+		if e.svc.callCount("/ok/5") != 1 {
+			t.Fatal("b must have been resolved from a's output")
+		}
+		var hasTasks bool
+		if err := e.infra.DBPool.QueryRow(e.ctx,
+			`SELECT context_json ? 'tasks' FROM workflow_runs WHERE id = $1`, runID).Scan(&hasTasks); err != nil || hasTasks {
+			t.Fatalf("context_json must not hold task outputs (has=%v err=%v)", hasTasks, err)
+		}
+		details, err := e.coord.GetExecutionDetails(e.ctx, runID)
+		if err != nil || details.Context.Tasks["a"] == nil {
+			t.Fatalf("execution details must rebuild task outputs: %v", err)
+		}
+	})
+
+	t.Run("wait node pauses the branch", func(t *testing.T) {
+		e.t = t
+		start := time.Now()
+		runID := e.run(model.WorkflowDefinitionSpec{
+			Nodes: []model.Node{waitNode("pause", `{"duration_seconds": "{{input.delay}}"}`), e.httpNode("after_pause")},
+			Edges: []model.Edge{{From: "pause", To: "after_pause"}},
+		}, `{"delay": 1.5}`)
+		if got := e.waitForRun(runID, 30*time.Second); got != model.WorkflowInstanceStatusSucceeded {
+			t.Fatalf("status %s, tasks %v", got, e.nodeStates(runID))
+		}
+		if elapsed := time.Since(start); elapsed < 1500*time.Millisecond {
+			t.Fatalf("wait returned after %v, want >= 1.5s", elapsed)
+		}
+		if e.taskOutput(runID, "pause")["woke_at"] == nil {
+			t.Fatal("wait output must carry woke_at")
+		}
+	})
+
+	t.Run("event delivered to a waiting node", func(t *testing.T) {
+		e.t = t
+		next := e.httpNode("ship")
+		next.Spec = json.RawMessage(fmt.Sprintf(`{"url": "%s/ok/ship-{{tasks.approval.output.by}}", "method": "GET"}`, e.svc.URL))
+		runID := e.run(model.WorkflowDefinitionSpec{
+			Nodes: []model.Node{eventNode("approval", `{"event": "approved-{{input.order}}"}`), next},
+			Edges: []model.Edge{{From: "approval", To: "ship"}},
+		}, `{"order": 42}`)
+		e.waitForNode(runID, "approval", model.TaskInstanceStatusWaiting, 10*time.Second)
+
+		delivered, err := e.coord.SignalWorkflow(e.ctx, runID, "approved-42", json.RawMessage(`{"by": "alice"}`))
+		if err != nil || !delivered {
+			t.Fatalf("signal: delivered=%v err=%v", delivered, err)
+		}
+		if got := e.waitForRun(runID, 30*time.Second); got != model.WorkflowInstanceStatusSucceeded {
+			t.Fatalf("status %s, tasks %v", got, e.nodeStates(runID))
+		}
+		if e.svc.callCount("/ok/ship-alice") != 1 {
+			t.Fatal("successor must see the event payload as the wait node's output")
+		}
+	})
+
+	t.Run("event sent early is buffered", func(t *testing.T) {
+		e.t = t
+		runID := e.run(model.WorkflowDefinitionSpec{
+			Nodes: []model.Node{waitNode("delay", `{"duration_seconds": 1}`), eventNode("approval", `{"event": "go"}`)},
+			Edges: []model.Edge{{From: "delay", To: "approval"}},
+		}, `{}`)
+		delivered, err := e.coord.SignalWorkflow(e.ctx, runID, "go", json.RawMessage(`{"early": true}`))
+		if err != nil || delivered {
+			t.Fatalf("early signal should be buffered: delivered=%v err=%v", delivered, err)
+		}
+		if got := e.waitForRun(runID, 30*time.Second); got != model.WorkflowInstanceStatusSucceeded {
+			t.Fatalf("status %s, tasks %v", got, e.nodeStates(runID))
+		}
+		if e.taskOutput(runID, "approval")["early"] != true {
+			t.Fatal("buffered event payload must become the node's output")
+		}
+	})
+
+	t.Run("event wait times out", func(t *testing.T) {
+		e.t = t
+		runID := e.run(model.WorkflowDefinitionSpec{
+			Nodes: []model.Node{eventNode("approval", `{"event": "never", "timeout_seconds": 1}`)},
+		}, `{}`)
+		if got := e.waitForRun(runID, 30*time.Second); got != model.WorkflowInstanceStatusFailed {
+			t.Fatalf("status %s, tasks %v", got, e.nodeStates(runID))
+		}
+		if _, err := e.coord.SignalWorkflow(e.ctx, runID, "never", nil); !errors.Is(err, coord.ErrRunNotActive) {
+			t.Fatalf("signal to a finished run: %v", err)
+		}
+	})
+
+	t.Run("cancel resolves waiting nodes", func(t *testing.T) {
+		e.t = t
+		runID := e.run(model.WorkflowDefinitionSpec{Nodes: []model.Node{waitNode("long", `{"duration_seconds": 3600}`)}}, `{}`)
+		e.waitForNode(runID, "long", model.TaskInstanceStatusWaiting, 10*time.Second)
+		if err := e.coord.CancelWorkflowInstance(e.ctx, runID, "test"); err != nil {
+			t.Fatal(err)
+		}
+		e.expectStates(runID, map[string]string{"long": "FAILED#0"})
+	})
+
+	t.Run("custom queue is served only by its workers", func(t *testing.T) {
+		e.t = t
+		gpu := e.httpNode("render")
+		gpu.TaskQueue = "gpu"
+		runID := e.run(model.WorkflowDefinitionSpec{Nodes: []model.Node{gpu}}, `{}`)
+		time.Sleep(time.Second)
+		if e.svc.callCount("/ok/render") != 0 {
+			t.Fatal("http workers must not take tasks from the gpu queue")
+		}
+		e.startWorker("gpu-worker", 2, 10, "gpu")
+		if got := e.waitForRun(runID, 30*time.Second); got != model.WorkflowInstanceStatusSucceeded {
+			t.Fatalf("status %s, tasks %v", got, e.nodeStates(runID))
+		}
+	})
+
+	t.Run("client run ids must be uuidv7", func(t *testing.T) {
+		e.t = t
+		specJSON, _ := json.Marshal(model.WorkflowDefinitionSpec{Nodes: []model.Node{e.httpNode("x")}})
+		_ = e.coord.RegisterWorkflow(e.ctx, &model.RegisterWorkflowRequest{WorkflowID: "ids", Name: "ids", Version: 1, Spec: specJSON, CreatedBy: "admin"})
+		for _, bad := range []string{"order-123", uuid.NewString()} {
+			err := e.coord.StartWorkflow(e.ctx, &model.StartWorkflowRequest{WorkflowID: "ids", WorkflowVersion: 1, RunID: bad})
+			if !errors.Is(err, coord.ErrInvalid) {
+				t.Fatalf("run id %q: got %v, want ErrInvalid", bad, err)
+			}
+		}
+		good, _ := uuid.NewV7()
+		if err := e.coord.StartWorkflow(e.ctx, &model.StartWorkflowRequest{WorkflowID: "ids", WorkflowVersion: 1, RunID: good.String()}); err != nil {
+			t.Fatal(err)
+		}
+	})
+}
+
+// With a very long fallback poll, dispatch latency proves the enqueuer is
+// woken by LISTEN/NOTIFY.
+func TestOutboxIsWokenByNotify(t *testing.T) {
+	e := newEngine(t, func(c *coord.Config) { c.OutboxConfig.PollInterval = time.Minute })
+	e.startWorker("w1", 2, 10)
+	time.Sleep(500 * time.Millisecond) // let the listener connect
+
+	start := time.Now()
+	runID := e.run(model.WorkflowDefinitionSpec{
+		Nodes: []model.Node{e.httpNode("a"), e.httpNode("b"), e.httpNode("c")},
+		Edges: []model.Edge{{From: "a", To: "b"}, {From: "b", To: "c"}},
+	}, `{}`)
+	if got := e.waitForRun(runID, 20*time.Second); got != model.WorkflowInstanceStatusSucceeded {
+		t.Fatalf("status %s, tasks %v", got, e.nodeStates(runID))
+	}
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("three dispatches took %v; the outbox was not woken by NOTIFY", elapsed)
+	}
+}
+
+func TestPartitionRetention(t *testing.T) {
+	e := newEngine(t)
+	e.startWorker("w1", 2, 10)
+
+	done := e.run(model.WorkflowDefinitionSpec{Nodes: []model.Node{e.httpNode("a")}}, `{}`)
+	e.waitForRun(done, 30*time.Second)
+	e.t = t
+	waiting := e.run(model.WorkflowDefinitionSpec{Nodes: []model.Node{waitNode("hold", `{"duration_seconds": 3600}`)}}, `{}`)
+	e.waitForNode(waiting, "hold", model.TaskInstanceStatusWaiting, 10*time.Second)
+
+	dropAll := func() []string {
+		rows, err := e.infra.DBPool.Query(e.ctx, `SELECT composer_drop_partitions(NOW() + INTERVAL '40 days')`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var months []string
+		for rows.Next() {
+			var m string
+			_ = rows.Scan(&m)
+			months = append(months, m)
+		}
+		return months
+	}
+	currentMonth := time.Now().UTC().Format("200601")
+
+	if slices.Contains(dropAll(), currentMonth) {
+		t.Fatal("a month with an active run must be kept")
+	}
+	if err := e.coord.CancelWorkflowInstance(e.ctx, waiting, "test"); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(dropAll(), currentMonth) {
+		t.Fatal("a month with only finished runs must be dropped")
+	}
+	var runs int
+	_ = e.infra.DBPool.QueryRow(e.ctx, `SELECT COUNT(*) FROM workflow_runs`).Scan(&runs)
+	if runs != 0 {
+		t.Fatalf("%d runs survived their partition", runs)
+	}
+
+	if err := e.coord.MaintainPartitions(e.ctx); err != nil {
+		t.Fatal(err)
+	}
+	again := e.run(model.WorkflowDefinitionSpec{Nodes: []model.Node{e.httpNode("b")}}, `{}`)
+	if got := e.waitForRun(again, 30*time.Second); got != model.WorkflowInstanceStatusSucceeded {
+		t.Fatalf("runs must work after partitions are recreated: %s", got)
 	}
 }

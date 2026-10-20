@@ -74,7 +74,7 @@ func (h *handlers) createWorkflow(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := h.coordinator.RegisterWorkflow(r.Context(), &req); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeCoordError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusCreated, map[string]string{"message": "Workflow created successfully"})
@@ -100,7 +100,7 @@ func (h *handlers) listWorkflows(w http.ResponseWriter, r *http.Request) {
 
 	result, err := h.coordinator.ListWorkflowsWithStats(r.Context(), enabledOnly, search, page, pageSize)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeCoordError(w, err)
 		return
 	}
 
@@ -236,7 +236,7 @@ func (h *handlers) updateWorkflow(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := h.coordinator.UpdateWorkflow(r.Context(), id, version, payload.Name, payload.Enabled, payload.WebhookURL); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeCoordError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"message": "Workflow updated successfully"})
@@ -257,7 +257,7 @@ func (h *handlers) deleteWorkflow(w http.ResponseWriter, r *http.Request) {
 	hardDelete := r.URL.Query().Get("hard") == "true"
 
 	if err := h.coordinator.DeleteWorkflow(r.Context(), id, version, hardDelete); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeCoordError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"message": "Workflow deleted successfully"})
@@ -278,7 +278,7 @@ func (h *handlers) deployWorkflow(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := h.coordinator.DeployWorkflow(r.Context(), id, version); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeCoordError(w, err)
 		return
 	}
 
@@ -300,7 +300,7 @@ func (h *handlers) rollbackWorkflow(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := h.coordinator.RollbackWorkflow(r.Context(), id, version); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeCoordError(w, err)
 		return
 	}
 
@@ -323,7 +323,7 @@ func (h *handlers) getPreviousDeployedVersions(w http.ResponseWriter, r *http.Re
 
 	versions, err := h.coordinator.GetPreviousDeployedVersions(r.Context(), id, version)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeCoordError(w, err)
 		return
 	}
 
@@ -361,7 +361,7 @@ func (h *handlers) executeWorkflow(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := h.coordinator.StartWorkflow(r.Context(), &p); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeCoordError(w, err)
 		return
 	}
 
@@ -421,7 +421,7 @@ func (h *handlers) listExecutions(w http.ResponseWriter, r *http.Request) {
 
 	result, err := h.coordinator.ListWorkflowInstances(r.Context(), wfID, status, search, page, pageSize)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeCoordError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, result)
@@ -460,10 +460,31 @@ func (h *handlers) cancelExecution(w http.ResponseWriter, r *http.Request) {
 	json.NewDecoder(r.Body).Decode(&payload)
 
 	if err := h.coordinator.CancelWorkflowInstance(r.Context(), id, payload.Reason); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeCoordError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"message": "Execution cancelled successfully"})
+}
+
+// signalExecution delivers a named event to a run's WAIT_FOR_EVENT node, or
+// buffers it until the run reaches one.
+func (h *handlers) signalExecution(w http.ResponseWriter, r *http.Request) {
+	runID := chi.URLParam(r, "id")
+	var payload struct {
+		Event   string          `json:"event"`
+		Payload json.RawMessage `json:"payload,omitempty"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	delivered, err := h.coordinator.SignalWorkflow(r.Context(), runID, payload.Event, payload.Payload)
+	if err != nil {
+		writeCoordError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]any{"run_id": runID, "event": payload.Event, "delivered": delivered})
 }
 
 func (h *handlers) retryExecution(w http.ResponseWriter, r *http.Request) {
@@ -489,11 +510,7 @@ func (h *handlers) retryExecution(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := h.coordinator.RetryWorkflowInstance(r.Context(), &p); err != nil {
-		status := http.StatusInternalServerError
-		if errors.Is(err, coord.ErrRunActive) {
-			status = http.StatusConflict
-		}
-		writeError(w, status, err.Error())
+		writeCoordError(w, err)
 		return
 	}
 
@@ -508,7 +525,7 @@ func (h *handlers) listNodeTemplates(w http.ResponseWriter, r *http.Request) {
 
 	templates, err := h.coordinator.ListNodeTemplates(r.Context(), runtime, category)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeCoordError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, templates)
@@ -529,7 +546,7 @@ func (h *handlers) listWorkflowTemplates(w http.ResponseWriter, r *http.Request)
 
 	templates, err := h.coordinator.ListWorkflowTemplates(r.Context(), category)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeCoordError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, templates)
@@ -552,7 +569,7 @@ func (h *handlers) listConfigurations(w http.ResponseWriter, r *http.Request) {
 
 	configs, err := h.coordinator.ListConfigurations(r.Context(), configType)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeCoordError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, configs)
@@ -582,7 +599,7 @@ func (h *handlers) createConfiguration(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := h.coordinator.CreateConfiguration(r.Context(), &req); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeCoordError(w, err)
 		return
 	}
 
@@ -598,7 +615,7 @@ func (h *handlers) updateConfiguration(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := h.coordinator.UpdateConfiguration(r.Context(), id, &req); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeCoordError(w, err)
 		return
 	}
 
@@ -608,7 +625,7 @@ func (h *handlers) updateConfiguration(w http.ResponseWriter, r *http.Request) {
 func (h *handlers) deleteConfiguration(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	if err := h.coordinator.DeleteConfiguration(r.Context(), id); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeCoordError(w, err)
 		return
 	}
 
@@ -671,4 +688,19 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 // writeError writes a {"error": msg} JSON response.
 func writeError(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, map[string]string{"error": msg})
+}
+
+// writeCoordError maps the coordinator's sentinel errors to status codes;
+// anything else is an internal error.
+func writeCoordError(w http.ResponseWriter, err error) {
+	status := http.StatusInternalServerError
+	switch {
+	case errors.Is(err, coord.ErrNotFound):
+		status = http.StatusNotFound
+	case errors.Is(err, coord.ErrInvalid):
+		status = http.StatusBadRequest
+	case errors.Is(err, coord.ErrConflict), errors.Is(err, coord.ErrRunActive), errors.Is(err, coord.ErrRunNotActive):
+		status = http.StatusConflict
+	}
+	writeError(w, status, err.Error())
 }

@@ -48,10 +48,10 @@ function calculateTimeout(timeoutSeconds) {
  * @param {string} code  - User code (must define a `handler` function)
  * @param {*}      input - Input data for the handler
  * @param {number} timeoutSeconds - Timeout in seconds
- * @returns {*} Execution result from handler(input)
+ * @returns {Promise<{output: *, logs: string[]}>} handler(input) and console output
  * @throws {Error} If execution fails or times out
  */
-function executeCode(code, input, timeoutSeconds) {
+async function executeCode(code, input, timeoutSeconds) {
   validateCodeSize(code);
   const timeoutMs = calculateTimeout(timeoutSeconds);
   return runInIsolate(code, input, timeoutMs);

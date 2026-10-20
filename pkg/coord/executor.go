@@ -28,14 +28,19 @@ func (r TaskResult) ref() taskRef {
 	return taskRef{TaskID: r.TaskID, RunID: r.RunID, NodeID: r.NodeID, Attempt: r.Attempt}
 }
 
-// ErrRunActive is returned when a retry targets a run that still has tasks in flight.
-var ErrRunActive = errors.New("workflow run still has active tasks")
+// Client-supplied run IDs must be UUIDv7 close to the current time, so they
+// land in an existing partition (see migrations: run-scoped tables are
+// partitioned by run ID).
+const (
+	runIDMaxAge  = 24 * time.Hour
+	runIDMaxSkew = time.Hour
+)
 
 // StartWorkflow creates a workflow run and schedules everything reachable from
 // the start node, in a single transaction.
 func (c *Coordinator) StartWorkflow(ctx context.Context, p *model.StartWorkflowRequest) (err error) {
-	if p.RunID == "" {
-		p.RunID = uuid.NewString()
+	if p.RunID, err = runIDFor(p.RunID); err != nil {
+		return err
 	}
 	ctx, span := util.StartWorkflowSpan(ctx, "start", p.WorkflowID, p.RunID)
 	defer func() { util.EndSpan(span, err) }()
@@ -52,7 +57,7 @@ func (c *Coordinator) StartWorkflow(ctx context.Context, p *model.StartWorkflowR
 	}
 	start, err := dag.StartNode(p.StartNodeID)
 	if err != nil {
-		return err
+		return fmt.Errorf("%w: %v", ErrInvalid, err)
 	}
 	scheduledAt := time.Now()
 	if p.StartedAtUnixMs > 0 {
@@ -66,13 +71,9 @@ func (c *Coordinator) StartWorkflow(ctx context.Context, p *model.StartWorkflowR
 		}
 		run := &runRow{ID: p.RunID, WorkflowID: p.WorkflowID, WorkflowVersion: p.WorkflowVersion,
 			Status: model.WorkflowInstanceStatusRunning}
-
-		es := model.NewExecutionState(dag, rc, c.Template, nil)
-		routing, err := es.Begin(start)
-		if err != nil {
-			return err
-		}
-		return c.applyRouting(ctx, t, logger, run, es, routing, scheduledAt)
+		r := c.newRouter(ctx, t, logger, run, dag, rc, nil)
+		r.scheduledAt = scheduledAt
+		return r.begin(start)
 	})
 	if err != nil {
 		logger.Error().Err(err).Msg("failed to start workflow")
@@ -82,6 +83,23 @@ func (c *Coordinator) StartWorkflow(ctx context.Context, p *model.StartWorkflowR
 	util.RecordWorkflowStarted(ctx, p.WorkflowID, p.RunID)
 	logger.Info().Str("start_node_id", start.NodeID).Msg("workflow started")
 	return nil
+}
+
+// runIDFor returns a new UUIDv7 run ID, or validates a client-supplied one.
+func runIDFor(requested string) (string, error) {
+	if requested == "" {
+		id, err := uuid.NewV7()
+		return id.String(), err
+	}
+	id, err := uuid.Parse(requested)
+	if err != nil || id.Version() != 7 {
+		return "", fmt.Errorf("%w: run_id must be a UUIDv7", ErrInvalid)
+	}
+	sec, nsec := id.Time().UnixTime()
+	if age := time.Since(time.Unix(sec, nsec)); age > runIDMaxAge || age < -runIDMaxSkew {
+		return "", fmt.Errorf("%w: run_id timestamp must be within the last %v", ErrInvalid, runIDMaxAge)
+	}
+	return id.String(), nil
 }
 
 // HandleNodeCompleted records a successful task attempt and schedules every
@@ -103,15 +121,10 @@ func (c *Coordinator) HandleNodeCompleted(ctx context.Context, res TaskResult) (
 		t.onCommit(func() {
 			util.RecordTaskCompleted(ctx, res.TaskID, res.RunID, res.NodeID, task.NodeType, sinceOrZero(task.StartedAt))
 		})
-
-		rc, err := c.repo.MergeTaskOutput(ctx, t, res.RunID, res.NodeID, res.Output)
-		if err != nil {
-			return err
-		}
 		if run.Status.IsTerminal() {
 			return nil // e.g. cancelled: keep the output, schedule nothing
 		}
-		return c.advance(ctx, t, logger, run, rc, res.NodeID)
+		return c.advance(ctx, t, logger, run, res.NodeID, res.Output)
 	})
 	if err != nil {
 		logger.Error().Err(err).Msg("failed to handle node completion")
@@ -147,10 +160,6 @@ func (c *Coordinator) HandleNodeFailed(ctx context.Context, res TaskResult) (err
 			util.RecordTaskFailed(ctx, res.TaskID, res.RunID, res.NodeID, task.NodeType, sinceOrZero(task.StartedAt), res.Error)
 		})
 		logger.Warn().Msg("task failed")
-
-		if run.Status.IsTerminal() {
-			return nil
-		}
 		return c.finalizeIfDone(ctx, t, logger, run)
 	})
 	if err != nil {
@@ -215,7 +224,7 @@ func (c *Coordinator) RetryWorkflowInstance(ctx context.Context, p *model.RetryW
 		}
 		restart := dag.GetNode(p.NodeID)
 		if restart == nil {
-			return fmt.Errorf("node %s not found in workflow definition", p.NodeID)
+			return fmt.Errorf("%w: node %s not in workflow definition", ErrInvalid, p.NodeID)
 		}
 
 		rc, err := c.repo.LoadRunContext(ctx, t, p.RunID)
@@ -228,18 +237,15 @@ func (c *Coordinator) RetryWorkflowInstance(ctx context.Context, p *model.RetryW
 		if len(p.ExecutionOptions) > 0 {
 			rc.Config = p.ExecutionOptions
 		}
-		reset := append(dag.Descendants(p.NodeID), p.NodeID)
-		for _, id := range reset {
-			delete(rc.Tasks, id)
-		}
 
 		if err := c.repo.ResetRunForRetry(ctx, t, p.RunID, version, p.Input); err != nil {
 			return err
 		}
-		if err := c.repo.DeleteTasks(ctx, t, p.RunID, reset); err != nil {
+		if err := c.repo.SaveRunContext(ctx, t, p.RunID, rc); err != nil {
 			return err
 		}
-		if err := c.repo.SaveRunContext(ctx, t, p.RunID, rc); err != nil {
+		reset := append(dag.Descendants(p.NodeID), p.NodeID)
+		if err := c.repo.DeleteTasks(ctx, t, p.RunID, reset); err != nil {
 			return err
 		}
 		run.WorkflowVersion, run.Status = version, model.WorkflowInstanceStatusRunning
@@ -248,13 +254,8 @@ func (c *Coordinator) RetryWorkflowInstance(ctx context.Context, p *model.RetryW
 		if err != nil {
 			return err
 		}
-		es := model.NewExecutionState(dag, rc, c.Template, states)
-		routing, err := es.Begin(restart)
-		if err != nil {
-			return err
-		}
 		logger = logger.With().Str("workflow_id", run.WorkflowID).Int("workflow_version", version).Logger()
-		return c.applyRouting(ctx, t, logger, run, es, routing, time.Now())
+		return c.newRouter(ctx, t, logger, run, dag, rc, states).begin(restart)
 	})
 	if err != nil {
 		logger.Error().Err(err).Msg("failed to retry workflow run")
@@ -270,19 +271,40 @@ func (c *Coordinator) resolveRetryVersion(ctx context.Context, workflowID string
 	}
 	wf, err := c.GetWorkflow(ctx, workflowID, 0)
 	if err != nil {
-		return 0, fmt.Errorf("get deployed workflow version: %w", err)
+		return 0, err
 	}
 	if !wf.Deployed {
-		return 0, fmt.Errorf("workflow has no deployed version")
+		return 0, fmt.Errorf("%w: workflow has no deployed version", ErrInvalid)
 	}
 	return wf.Version, nil
 }
 
-// advance routes from a completed node. Routing errors are permanent (a bad
-// SWITCH condition, or a node missing from the definition), so they fail the
-// run instead of being returned for the worker to retry forever.
-func (c *Coordinator) advance(ctx context.Context, t *txn, logger zerolog.Logger, run *runRow, rc *model.RunContext, nodeID string) error {
+// CancelWorkflowInstance fails a running workflow run and all of its
+// unfinished tasks, including waits.
+func (c *Coordinator) CancelWorkflowInstance(ctx context.Context, runID, reason string) error {
+	if reason == "" {
+		reason = "cancelled"
+	}
+	return c.withRun(ctx, runID, func(t *txn, run *runRow) error {
+		if run.Status.IsTerminal() {
+			return fmt.Errorf("%w: run is %s", ErrRunNotActive, run.Status)
+		}
+		if err := c.repo.CancelRunTasks(ctx, t, runID, reason); err != nil {
+			return err
+		}
+		return c.finishRun(ctx, t, c.Logger.With().Str("run_id", runID).Logger(), run,
+			model.WorkflowInstanceStatusFailed, reason)
+	})
+}
+
+// advance routes from a node that just completed with output, persists the
+// result and finishes the run if nothing is left in flight.
+func (c *Coordinator) advance(ctx context.Context, t *txn, logger zerolog.Logger, run *runRow, nodeID string, output json.RawMessage) error {
 	dag, err := c.loadDAG(ctx, run.WorkflowID, run.WorkflowVersion)
+	if err != nil {
+		return err
+	}
+	rc, err := c.repo.LoadRunContext(ctx, t, run.ID)
 	if err != nil {
 		return err
 	}
@@ -290,94 +312,15 @@ func (c *Coordinator) advance(ctx context.Context, t *txn, logger zerolog.Logger
 	if err != nil {
 		return err
 	}
-
-	es := model.NewExecutionState(dag, rc, c.Template, states)
-	routing, err := es.Advance(nodeID)
-	if err != nil {
-		logger.Error().Err(err).Msg("routing failed, failing workflow")
-		return c.finishRun(ctx, t, logger, run, model.WorkflowInstanceStatusFailed,
-			fmt.Sprintf("routing after node %s failed: %v", nodeID, err))
-	}
-	return c.applyRouting(ctx, t, logger, run, es, routing, time.Now())
-}
-
-// applyRouting persists a routing step: control nodes complete inline, skipped
-// nodes are recorded, and worker nodes get a task instance plus an outbox
-// dispatch. A node whose input fails to resolve is recorded as FAILED. Finally
-// the run is finished if nothing is left in flight.
-func (c *Coordinator) applyRouting(ctx context.Context, t *txn, logger zerolog.Logger, run *runRow,
-	es *model.ExecutionState, routing *model.RoutingResult, scheduledAt time.Time) error {
-
-	for _, cn := range routing.ControlNodes {
-		if _, err := c.repo.InsertTask(ctx, t, newTask{ID: uuid.NewString(), RunID: run.ID, Node: cn.Node,
-			State: model.TaskInstanceStatusCompleted, Output: cn.Output, ScheduledAt: scheduledAt}); err != nil {
-			return err
-		}
-	}
-	for _, n := range routing.SkippedNodes {
-		if _, err := c.repo.InsertTask(ctx, t, newTask{ID: uuid.NewString(), RunID: run.ID, Node: n,
-			State: model.TaskInstanceStatusSkipped, ScheduledAt: scheduledAt}); err != nil {
-			return err
-		}
-	}
-	if len(routing.ControlNodes) > 0 {
-		// SWITCH nodes added pass-through outputs and branch decisions.
-		if err := c.repo.SaveRunContext(ctx, t, run.ID, es.RunContext()); err != nil {
-			return err
-		}
-	}
-
-	for _, n := range routing.ExecutableNodes {
-		if err := c.scheduleNode(ctx, t, logger, run, es, n, scheduledAt); err != nil {
-			return err
-		}
-	}
-
-	logger.Debug().
-		Int("scheduled", len(routing.ExecutableNodes)).
-		Int("control", len(routing.ControlNodes)).
-		Int("skipped", len(routing.SkippedNodes)).
-		Msg("routing applied")
-	return c.finalizeIfDone(ctx, t, logger, run)
-}
-
-func (c *Coordinator) scheduleNode(ctx context.Context, t *txn, logger zerolog.Logger, run *runRow,
-	es *model.ExecutionState, n *model.Node, scheduledAt time.Time) error {
-
-	task := newTask{ID: uuid.NewString(), RunID: run.ID, Node: n,
-		State: model.TaskInstanceStatusPending, ScheduledAt: scheduledAt}
-	input, resolveErr := es.ResolveInput(n)
-	if resolveErr != nil {
-		logger.Error().Err(resolveErr).Str("node_id", n.NodeID).Msg("input resolution failed, recording node as FAILED")
-		task.State, task.Error = model.TaskInstanceStatusFailed, resolveErr.Error()
-	} else {
-		task.Input = input
-	}
-
-	inserted, err := c.repo.InsertTask(ctx, t, task)
-	if err != nil || !inserted {
-		return err
-	}
-	nodeType := n.GetNodeTypeForRouting()
-	t.onCommit(func() { util.RecordTaskCreated(ctx, task.ID, run.ID, n.NodeID, nodeType) })
-	if task.State != model.TaskInstanceStatusPending {
-		return nil
-	}
-
-	return c.repo.EnqueueDispatch(ctx, t, &taskDispatch{
-		TaskID:          task.ID,
-		RunID:           run.ID,
-		WorkflowID:      run.WorkflowID,
-		WorkflowVersion: run.WorkflowVersion,
-		NodeID:          n.NodeID,
-		NodeType:        nodeType,
-		Input:           input,
-	}, time.Now())
+	return c.newRouter(ctx, t, logger, run, dag, rc, states).advance(nodeID, output)
 }
 
 // finalizeIfDone finishes the run once no task is in flight: FAILED if any
 // task failed, SUCCEEDED otherwise.
 func (c *Coordinator) finalizeIfDone(ctx context.Context, t *txn, logger zerolog.Logger, run *runRow) error {
+	if run.Status.IsTerminal() {
+		return nil
+	}
 	active, failed, err := c.repo.CountTasks(ctx, t, run.ID)
 	if err != nil || active > 0 {
 		return err
@@ -420,7 +363,7 @@ func (c *Coordinator) loadDAG(ctx context.Context, workflowID string, version in
 		`SELECT spec_json FROM workflow_definitions WHERE id = $1 AND version = $2`,
 		workflowID, version).Scan(&specJSON)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, fmt.Errorf("workflow definition not found: %s v%d", workflowID, version)
+		return nil, fmt.Errorf("%w: workflow definition %s v%d", ErrNotFound, workflowID, version)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("load workflow definition: %w", err)
@@ -441,6 +384,15 @@ func (c *Coordinator) taskLogger(res TaskResult) zerolog.Logger {
 		Str("task_id", res.TaskID).
 		Int("attempt", res.Attempt).
 		Logger()
+}
+
+// newTaskID returns a time-ordered task ID, which keeps index inserts local.
+func newTaskID() string {
+	id, err := uuid.NewV7()
+	if err != nil {
+		return uuid.NewString()
+	}
+	return id.String()
 }
 
 func sinceOrZero(t time.Time) time.Duration {
