@@ -15,16 +15,14 @@ Composer runs workflows defined as a graph of steps: HTTP calls, Python or JavaS
 ## Contents
 
 1. [Use cases](#use-cases)
-2. [Concepts](#concepts)
-3. [Quick start](#quick-start)
-4. [Building and running](#building-and-running)
-5. [Defining workflows](#defining-workflows)
-6. [API](#api)
-7. [Design — high level](#design--high-level)
-8. [Design — low level](#design--low-level)
-9. [Configuration](#configuration)
-10. [Project layout](#project-layout)
-11. [Development and testing](#development-and-testing)
+2. [Quick start](#quick-start)
+3. [Building and running](#building-and-running)
+4. [Defining workflows](#defining-workflows)
+5. [API](#api)
+6. [Design — high level](#design--high-level)
+7. [Design — low level](#design--low-level)
+8. [Configuration](#configuration)
+9. [Development and testing](#development-and-testing)
 
 ---
 
@@ -45,21 +43,6 @@ Composer runs workflows defined as a graph of steps: HTTP calls, Python or JavaS
 - **Long computations in one step** — a single worker step is capped at 90 seconds. Split long work into steps, or hand it to a dedicated system and use `WAIT_FOR_EVENT` for the callback.
 - **Code-as-workflow** — workflows are declarative graphs, not arbitrary programs with loops; there is no deterministic replay of workflow code as in Temporal.
 - **Exactly-once side effects** — execution is at-least-once (a step can re-run after a worker crash). Steps that call external systems should be idempotent; HTTP steps send the task ID as an `Idempotency-Key` header to help.
-
----
-
-## Concepts
-
-| Term | Meaning |
-|---|---|
-| **Workflow definition** | A versioned graph of **nodes** and **edges**, written in YAML. One version per workflow is *deployed*. |
-| **Run** | One execution of a definition version, with its own input. Runs are pinned to the version they started on. |
-| **Node / task** | A step in the graph. When a run reaches a node it creates a **task** for it — at most one per node per run. |
-| **Worker node** | `HTTP` or `CODE`: executed by a worker. |
-| **Control node** | `SWITCH`, `FORK`, `JOIN`: resolved instantly by the coordinator. |
-| **Wait node** | `WAIT`, `WAIT_FOR_EVENT`: parked until a timer fires or an event (signal) arrives. |
-| **Queue** | Worker nodes are dispatched on a task queue (`http`, `python`, `js`, or a custom one) that a pool of workers consumes. |
-| **Event** | Something that happened to a run (a task completed, a timer fired, …). The engine's state machine consumes events and decides what happens next. |
 
 ---
 
@@ -155,13 +138,6 @@ LANG_WORKER_ADDRS=python:localhost:50053,js:localhost:50052 ./bin/worker
 
 (cd web && npm run dev)                                 # http://localhost:3000
 ```
-
-### Run on Kubernetes
-
-A Helm chart is in `infra/k8s/helm/composer` (`infra/scripts/bootstrap_k8s.sh` installs it). It runs the coordinator, workers and language servers; the language servers are deployed with a read-only root filesystem, no capabilities, a non-root user and the `RuntimeDefault` seccomp profile.
-
-> **Schema note.** `migrations/V001__init.sql` creates the run-scoped tables as partitioned tables. Existing unpartitioned databases cannot be converted in place; migrate data into a fresh database.
-
 ---
 
 ## Defining workflows
@@ -398,34 +374,6 @@ Flags, or environment variables with the `COMPOSER_` prefix (e.g. `COMPOSER_STOR
 |---|---|---|
 | Python | `PORT`, `LOG_FILE` (optional) | `50051` |
 | JavaScript | `PORT`, `MAX_CONCURRENT_ISOLATES` | `50052`, `4` |
-
----
-
-## Project layout
-
-```
-cmd/
-  coordinator/          coordinator binary (flags, bootstrap)
-  worker/               worker binary (queues, streams, concurrency)
-  language-server-py/   Python sandbox server (RestrictedPython + audit hooks)
-  language-server-js/   JavaScript sandbox server (isolated-vm)
-pkg/
-  statemachine/         the workflow state machine: events, state, actions (pure)
-  coord/                coordinator shell: engine, persister, repository, definitions, runs
-  model/                definitions, DAG index, run context, statuses
-  template/             CEL template resolver
-  lease/                task leases
-  outbox/               outbox enqueuer (LISTEN/NOTIFY + polling)
-  stream/               stream abstraction, queue/shard naming, Redis implementation
-  api/                  HTTP (REST) and gRPC servers, protobuf definitions
-worker/                 worker runtime: readers, executor pool, executors, coordinator client
-migrations/             database schema (partitions, triggers, seed data)
-web/                    Next.js web UI
-infra/                  Docker Compose, Helm chart, bootstrap scripts, observability config
-tests/                  end-to-end tests against real PostgreSQL and Redis (Testcontainers)
-docs/diagrams/          architecture diagrams (Excalidraw sources + SVG)
-benchmark/              k6 load tests
-```
 
 ---
 
