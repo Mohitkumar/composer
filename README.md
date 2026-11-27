@@ -359,11 +359,6 @@ The machine is pure: it never writes, dispatches, or reads the clock. Every rule
 | Interpreter | PEP 578 audit hook, irremovable: no file writes, no reads outside Python, no network, no subprocesses, no `ctypes`, no pickle loading | — |
 | Process | per-execution child process with memory, CPU, file-size, file-descriptor and process limits; empty environment | isolate memory limit, timeout, capped logs and output; isolates run off the event loop |
 | Container | non-root, read-only filesystem, no capabilities, `no-new-privileges`, PID limit | same |
-
-For hostile multi-tenant workloads, also run the language servers under a VM-level sandbox (gVisor, Firecracker) and deny them network egress.
-
-> The diagrams are Excalidraw drawings: open any `docs/diagrams/*.excalidraw` file at [excalidraw.com](https://excalidraw.com) to edit it, then export the SVG next to it.
-
 ---
 
 ## Configuration
