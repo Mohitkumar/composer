@@ -194,15 +194,6 @@ Here, small orders ship immediately. Large orders wait up to a day for an approv
 | `WAIT` | coordinator timer | `duration_seconds` (number or template) or `until` (RFC 3339). Output: `{"woke_at": …}`. |
 | `WAIT_FOR_EVENT` | API signal | `event` (name, may be templated), optional `timeout_seconds` (the node fails on timeout). Output: the event's payload. |
 
-### Joins and skipped branches
-
-One rule decides when a node runs. A node becomes ready once every incoming edge is resolved:
-
-- An edge is **active** when its source completed and, for a SWITCH, selected this target.
-- An edge is **inactive** when its source was skipped, or the SWITCH chose another branch.
-
-A ready node **runs** if at least one incoming edge is active, and is **skipped** otherwise. Skips propagate down untaken branches. This handles fork/join with branches of any length, diamonds, and SWITCH branches that merge again.
-
 ### Templates
 
 Any string in a spec or condition can contain `{{ expression }}`, written in [CEL](https://github.com/google/cel-spec):
@@ -213,8 +204,6 @@ Any string in a spec or condition can contain `{{ expression }}`, written in [CE
 | `config` | the run's `execution_options` |
 | `tasks.<node_id>.output` / `.status` | a completed node's output and status |
 | `system.now` | current time (RFC 3339) |
-
-A string that is exactly one template keeps the value's type: `"{{input.count}}"` resolves to a number. Templates inside text are interpolated as strings.
 
 ### Retries, queues
 
